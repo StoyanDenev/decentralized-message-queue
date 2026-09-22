@@ -189,14 +189,20 @@ discussion, not shipped C99 consensus behavior or a completed convergence proof:
 - Only messages received by both co-creators are eligible for inclusion. This is a
   shared-receipt condition; it does not silently require every eligible message to
   fit in a block or define the complete canonical selection/ordering algorithm.
-- For competing blocks at the same height, the stated preference is more distinct
-  valid included ledger messages, then the smaller header value. For conflicting
-  messages, the preserved message has the smaller data hash. The owner also selects
-  the smaller produced successor header to resolve conflicting successor candidates.
-  Define precisely how these rules compose with ADR-004's intended validated-work
-  ordering, transaction dependencies and comparison of complete histories before
-  implementing the production history comparator. A header value is not interchangeable
-  with its hash.
+- For competing blocks at the same height, prefer more distinct valid included
+  ledger messages, then the smaller header value. Each candidate is validated on
+  its own parent history. This ranking also applies when different valid candidates
+  contain conflicting transactions from the same sender at the same nonce.
+- The owner clarifies that smaller message-data hash applies **only during assembly
+  and requeue** among conflicting transactions that are valid against the relevant
+  state. It does not override block ranking or replace a transaction in the selected
+  block. A smaller-hash alternative whose nonce is already consumed remains invalid.
+  The bounded model implements requeue filtering; production assembly is not shipped.
+- The owner also selects the smaller produced successor header to resolve conflicting
+  successor candidates. Composition of complete-history selection with ADR-004's
+  intended validated-work ordering and transaction dependencies still needs a reviewed
+  specification. The scope of message-data-hash preference relative to block ranking
+  is decided above. A header value is not interchangeable with its hash.
 - The owner explicitly adopts the same-body case: among valid competing blocks at
   the same height with an identical message body, prefer the smaller header interpreted
   as a number. A node that received only the larger-header candidate may temporarily
@@ -258,24 +264,29 @@ fixed-width big-endian model-header value. Losing descendants retain their origi
 parents; replay never transplants them onto a preferred root. Each nonanchor parent
 has at most one valid child in the supported domain.
 
-Differing root transactions with the same sender and nonce, and competing valid
-children of a nonanchor parent, return `UNSUPPORTED` without publishing partial
-state. Opposite delivery orders may remain different outside that domain. This
-restriction avoids deciding the still-open composition of conflicting-message,
-header and complete-history preferences; it is not a new protocol rule. Frozen
-pair/receipt fixtures do not prove production eligibility, public DH derivation,
-VDF verification or that the modeled competing histories are reachable.
+Root siblings may contain different transactions at the same sender and nonce;
+each body must be valid on its original parent, and count/header ranking remains
+unchanged even when the winning body contains the larger transaction data hash.
+Competing valid children of a nonanchor parent still return
+`K2_MODEL_UNSUPPORTED_BRANCHING` without publishing partial state. Opposite delivery
+orders may remain different outside that unique-descendant domain. This remaining
+model limit does not decide comparison of complete histories or validated work.
+Frozen pair/receipt fixtures do not prove production eligibility, public DH
+derivation, VDF verification or that the modeled competing histories are reachable.
 
 **Implemented checks.** Fixed scenarios witness a temporary split and later
 correction, greater-message-count preference, identical-body lower-header preference,
 original-parent descendant detachment, dependent-spend rejection, one-sided receipts,
-invalid signatures/bodies, bounded capacity and atomic failure. The independent
+invalid signatures/bodies, bounded capacity and atomic failure. Conflicting-root
+scenarios check both delivery orders, count and header winners containing the larger
+conflicting transaction hash, descendant recovery and journal replay. The independent
 arithmetic oracle checks selected-history ancestry, balances, nonces and conservation;
 nodes never copy another node's state. Omitted transactions are deduplicated and
 individually revalidated against selected state; smaller data hash resolves ready
-same-sender/nonce alternatives. A ready queue is not a promise that all entries form
-a valid batch. Eight seeded delivery permutations are each replayed twice to compare
-traces. Canonical journal bytes test old/new in-memory crash cuts and independent
+same-sender/nonce alternatives. This cannot override the selected block or revive
+a consumed nonce. A ready queue is not a promise that all entries form a valid batch;
+C99 production transaction assembly remains unimplemented. Eight seeded delivery
+permutations are each replayed twice to compare traces. Canonical journal bytes test old/new in-memory crash cuts and independent
 state reconstruction, not filesystem durability.
 
 For a common finite candidate set within the supported bounds, eventual delivery of

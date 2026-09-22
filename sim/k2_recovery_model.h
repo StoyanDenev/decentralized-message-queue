@@ -19,7 +19,7 @@
 typedef enum {
     K2_MODEL_OK = 0, K2_MODEL_DUPLICATE = 1, K2_MODEL_PENDING = 2,
     K2_MODEL_INVALID = -1, K2_MODEL_FULL = -2, K2_MODEL_UNSUPPORTED_BRANCHING = -3,
-    K2_MODEL_STALE_PREPARATION = -4, K2_MODEL_UNSUPPORTED_CONFLICT = -5
+    K2_MODEL_STALE_PREPARATION = -4
 } k2_model_status_t;
 typedef struct {
     uint8_t chain[32]; uint32_t shard;

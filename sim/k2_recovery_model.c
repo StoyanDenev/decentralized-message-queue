@@ -94,16 +94,6 @@ static bool selected_tx(const k2_model_node_t *n,const uint8_t id[32]) {
     }
     return false;
 }
-static bool conflicting_bodies(const k2_model_candidate_t *a,const k2_model_candidate_t *b) {
-    for(size_t i=0;i<a->tx_count;i++) for(size_t j=0;j<b->tx_count;j++) {
-        const triple_entry_tx_t *x=&a->txs[i],*y=&b->txs[j];
-        if(x->nonce==y->nonce && !memcmp(x->from,y->from,32)) {
-            uint8_t first[32],second[32]; k2_model_tx_id(x,first); k2_model_tx_id(y,second);
-            if(memcmp(first,second,32)) return true;
-        }
-    }
-    return false;
-}
 static void requeue(k2_model_node_t *n,ledger_state_t *scratch) {
     const triple_entry_tx_t *txs[K2_MODEL_RECEIPTS]; uint8_t ids[K2_MODEL_RECEIPTS][32]; size_t count=0;
     n->requeue_count=0; n->rejected_requeue_count=0;
@@ -136,16 +126,13 @@ static k2_model_status_t recover(k2_model_node_t *n,ledger_state_t *scratch,size
         if(i==added) added_status=status;
     }
     if(added_status==K2_MODEL_INVALID) return K2_MODEL_INVALID;
-    /* Conflict-vs-header precedence is not decided. Such root candidate sets
-     * are outside this finite model's domain; rejection need not converge. */
-    for(size_t i=0;i<n->record_count;i++) if(n->records[i].valid && !memcmp(n->records[i].candidate.parent,n->config->anchor_id,32))
-        for(size_t j=0;j<i;j++) if(n->records[j].valid && !memcmp(n->records[j].candidate.parent,n->config->anchor_id,32) &&
-            conflicting_bodies(&n->records[i].candidate,&n->records[j].candidate)) return K2_MODEL_UNSUPPORTED_CONFLICT;
     /* This model does not select between competing complete histories. */
     for(size_t i=0;i<n->record_count;i++) if(n->records[i].valid && memcmp(n->records[i].candidate.parent,n->config->anchor_id,32))
         for(size_t j=0;j<i;j++) if(n->records[j].valid && !memcmp(n->records[i].candidate.parent,n->records[j].candidate.parent,32))
             return K2_MODEL_UNSUPPORTED_BRANCHING;
     int best=-1;
+    /* Transaction-hash preference is confined to assembly/requeue. Even
+     * conflicting original-parent-valid siblings use this block ranking. */
     for(size_t i=0;i<n->record_count;i++) if(n->records[i].valid && !memcmp(n->records[i].candidate.parent,n->config->anchor_id,32)) {
         if(best<0 || n->records[i].candidate.tx_count>n->records[best].candidate.tx_count ||
            (n->records[i].candidate.tx_count==n->records[best].candidate.tx_count &&

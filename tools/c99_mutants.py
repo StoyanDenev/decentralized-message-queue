@@ -18,7 +18,39 @@ from pathlib import Path
 
 # name, target, repository-relative source, literal old text, literal new text.
 # Each replacement must match exactly once in the unmutated source snapshot.
+ROOT_RANK = """if(best<0 || n->records[i].candidate.tx_count>n->records[best].candidate.tx_count ||
+           (n->records[i].candidate.tx_count==n->records[best].candidate.tx_count &&
+            memcmp(n->records[i].header,n->records[best].header,K2_MODEL_HEADER_BYTES)<0)) best=(int)i;"""
+TX_OVERRIDES_ROOT_RANK = """int tx_priority=0;
+        if(best>=0 && n->records[i].candidate.tx_count && n->records[best].candidate.tx_count) {
+            const triple_entry_tx_t *x=&n->records[i].candidate.txs[0], *y=&n->records[best].candidate.txs[0];
+            if(x->nonce==y->nonce && !memcmp(x->from,y->from,32)) {
+                uint8_t first[32],second[32]; k2_model_tx_id(x,first); k2_model_tx_id(y,second);
+                tx_priority=memcmp(first,second,32);
+            }
+        }
+        if(tx_priority<0 || (tx_priority==0 && (best<0 || n->records[i].candidate.tx_count>n->records[best].candidate.tx_count ||
+           (n->records[i].candidate.tx_count==n->records[best].candidate.tx_count &&
+            memcmp(n->records[i].header,n->records[best].header,K2_MODEL_HEADER_BYTES)<0)))) best=(int)i;"""
+REJECT_CONFLICTING_ROOTS = """for(size_t i=0;i<n->record_count;i++) if(n->records[i].valid && !memcmp(n->records[i].candidate.parent,n->config->anchor_id,32))
+        for(size_t j=0;j<i;j++) if(n->records[j].valid && !memcmp(n->records[j].candidate.parent,n->config->anchor_id,32))
+            for(size_t x=0;x<n->records[i].candidate.tx_count;x++) for(size_t y=0;y<n->records[j].candidate.tx_count;y++) {
+                const triple_entry_tx_t *first=&n->records[i].candidate.txs[x], *second=&n->records[j].candidate.txs[y];
+                if(first->nonce==second->nonce && !memcmp(first->from,second->from,32)) {
+                    uint8_t first_id[32],second_id[32]; k2_model_tx_id(first,first_id); k2_model_tx_id(second,second_id);
+                    if(memcmp(first_id,second_id,32)) return K2_MODEL_INVALID;
+                }
+            }
+    /* This model does not select between competing complete histories. */"""
 MUTANTS = [
+    ("recovery-reject-conflicting-roots", "test-dsf-k2-recovery", "sim/k2_recovery_model.c",
+     "/* This model does not select between competing complete histories. */", REJECT_CONFLICTING_ROOTS),
+    ("recovery-tx-hash-overrides-block", "test-dsf-k2-recovery", "sim/k2_recovery_model.c",
+     ROOT_RANK, TX_OVERRIDES_ROOT_RANK),
+    ("recovery-sibling-selected-state", "test-dsf-k2-recovery", "sim/k2_recovery_model.c",
+     "*state=n->config->anchor_state;", "*state=n->state;"),
+    ("recovery-requeue-anchor-state", "test-dsf-k2-recovery", "sim/k2_recovery_model.c",
+     "bool conflict=false; *scratch=n->state;", "bool conflict=false; *scratch=n->config->anchor_state;"),
     ("recovery-message-count", "test-dsf-k2-recovery", "sim/k2_recovery_model.c",
      "n->records[i].candidate.tx_count>n->records[best].candidate.tx_count",
      "n->records[i].candidate.tx_count<n->records[best].candidate.tx_count"),

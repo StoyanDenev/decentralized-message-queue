@@ -201,15 +201,66 @@ static void test_requeue_conflict_and_dedup(void) {
     }
     CHECK(funding==1 && conflicting==1); /* Repeated omission is deduplicated. */
 }
-static void test_unsupported_conflicting_roots(void) {
-    setup(); k2_model_candidate_t conflict=low; conflict.txs[0]=transaction(0,1,19,1); receipt(&conflict.txs[0],0xff);
+static void test_conflicting_roots_keep_block_rank(bool count_wins) {
+    setup();
+    cfg.authority_count=0; cfg.receipt_count=0;
+    high=low;
+    high.tx_count=count_wins?2:1;
+    if(count_wins) high.txs[1]=transaction(4,5,7,1);
+    uint8_t low_tx_id[32], high_tx_id[32];
+    uint8_t low_header[K2_MODEL_HEADER_BYTES], high_header[K2_MODEL_HEADER_BYTES];
+    k2_model_tx_id(&low.txs[0],low_tx_id); k2_model_header(&low,low_header);
+    bool found=false;
+    /* Find a bounded, reproducible fixture with opposing preferences. The
+     * losing message has the smaller hash. For count mode the losing block
+     * also has the smaller header; for tie mode the winner has that header. */
+    for(uint64_t amount=1;amount<=100;amount++) {
+        high.txs[0]=transaction(0,3,amount,1);
+        k2_model_tx_id(&high.txs[0],high_tx_id); k2_model_header(&high,high_header);
+        int header_order=memcmp(high_header,low_header,sizeof(high_header));
+        if(memcmp(low_tx_id,high_tx_id,32)<0 && (count_wins?header_order>0:header_order<0)) {
+            found=true; break;
+        }
+    }
+    CHECK(found);
+    CHECK(memcmp(low_tx_id,high_tx_id,32)<0);
+    CHECK(high.tx_count==(count_wins?low.tx_count+1:low.tx_count));
+    CHECK(count_wins?memcmp(high_header,low_header,sizeof(high_header))>0:
+                     memcmp(high_header,low_header,sizeof(high_header))<0);
+    uint8_t parent[32]; k2_model_id(&high,parent);
+    high_child=candidate(parent,2,4,1);
+    high_child.tx_count=1; high_child.txs[0]=transaction(3,7,1,1);
+    authorize(&low); authorize(&low_child); authorize(&high_child);
+    receipt(&low.txs[0],0xff); receipt(&low_child.txs[0],0xff);
+    for(size_t i=0;i<high.tx_count;i++) receipt(&high.txs[i],0xff);
+    receipt(&high_child.txs[0],0xff);
+
     CHECK(k2_model_init(&a,&cfg)==K2_MODEL_OK); CHECK(k2_model_init(&b,&cfg)==K2_MODEL_OK);
-    receive(&a,&low,K2_MODEL_OK); receive(&b,&conflict,K2_MODEL_OK);
-    memcpy(&before,&a,sizeof(a));
-    CHECK(k2_model_receive(&a,&conflict,&work)==K2_MODEL_UNSUPPORTED_CONFLICT); CHECK(!memcmp(&a,&before,sizeof(a)));
-    memcpy(&before,&b,sizeof(b));
-    CHECK(k2_model_receive(&b,&low,&work)==K2_MODEL_UNSUPPORTED_CONFLICT); CHECK(!memcmp(&b,&before,sizeof(b)));
-    CHECK(a.state.accounts[1].balance!=b.state.accounts[1].balance); /* No convergence claim outside model domain. */
+    receive(&a,&low_child,K2_MODEL_PENDING); receive(&a,&low,K2_MODEL_OK);
+    receive(&b,&high_child,K2_MODEL_PENDING); receive(&b,&high,K2_MODEL_OK);
+    selected(&a,&low); selected(&b,&high);
+    CHECK(a.state.accounts[6].balance==12 && b.state.accounts[6].balance==0);
+    /* Both arrival orders admit both original-parent-valid nonce-1 messages. */
+    receive(&a,&high,K2_MODEL_OK); selected(&a,&high);
+    CHECK(a.selected_count==1 && a.state.accounts[6].balance==0);
+    receive(&a,&high_child,K2_MODEL_OK);
+    receive(&b,&low,K2_MODEL_OK); receive(&b,&low_child,K2_MODEL_OK);
+    selected(&a,&high); selected(&b,&high); equal_state(&a,&b);
+    CHECK(a.selected_count==2 && b.selected_count==2);
+    CHECK(a.state.accounts[0].nonce==1 && a.state.accounts[1].balance==0);
+    CHECK(a.state.accounts[6].balance==0 && a.state.accounts[7].balance==1);
+    CHECK(a.requeue_count==0 && b.requeue_count==0);
+    CHECK(a.rejected_requeue_count==2 && b.rejected_requeue_count==2);
+    CHECK(a.record_count==4 && b.record_count==4);
+    for(size_t i=0;i<a.record_count;i++) CHECK(a.records[i].valid && b.records[i].valid);
+    /* Losing records remain valid on their original ancestry, not reparented. */
+    CHECK(!memcmp(a.records[0].candidate.parent,low_child.parent,32));
+    size_t len=0;
+    CHECK(k2_model_journal(&a,journal,sizeof(journal),&len)==K2_MODEL_OK);
+    CHECK(k2_model_init(&c,&cfg)==K2_MODEL_OK);
+    CHECK(k2_model_restore(&c,&cfg,journal,len,&other)==K2_MODEL_OK);
+    oracle(&c); selected(&c,&high); equal_state(&a,&c);
+    CHECK(c.requeue_count==0 && c.rejected_requeue_count==2);
 }
 static void test_restore_invalidates_preparation(void) {
     setup(); CHECK(k2_model_init(&a,&cfg)==K2_MODEL_OK); CHECK(k2_model_init(&b,&cfg)==K2_MODEL_OK);
@@ -261,7 +312,9 @@ static void schedule(uint32_t seed,uint8_t out[32]) {
 }
 int main(void) {
     test_split_heal(); test_same_body_header_and_restart(); test_admission_atomicity(); test_capacity_and_ambiguity();
-    test_requeue_conflict_and_dedup(); test_unsupported_conflicting_roots(); test_restore_invalidates_preparation();
+    test_requeue_conflict_and_dedup();
+    test_conflicting_roots_keep_block_rank(true); test_conflicting_roots_keep_block_rank(false);
+    test_restore_invalidates_preparation();
     setup();
     for(uint32_t seed=1;seed<=8;seed++) { uint8_t first[32],second[32]; schedule(seed,first); schedule(seed,second); CHECK(!memcmp(first,second,32)); }
     puts("PASS: finite anchored DSF model, original-parent replay, atomic publication and journal restart");

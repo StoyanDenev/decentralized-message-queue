@@ -6172,3 +6172,42 @@ is Darwin arm64; no Linux/Windows runtime or C++ FAST result is claimed. Source,
 integration and documentation review found no remaining actionable finding within
 these increments' declared scope. Cross-shard dependency recovery is the next model
 increment, not a property established by this one.
+
+## 2026-09-22 — Transaction-hash preference is assembly/requeue only
+
+**Owner decision:** "Assembly/requeue only; keep block ranking unchanged."
+This resolves the question recorded in the preceding recovery-model increment.
+Among valid competing blocks, distinct included message count and then smaller
+numeric header remain the ranking rules, including when their bodies contain
+conflicting transactions from the same sender at the same nonce. Smaller message
+data hash chooses among valid transaction alternatives during assembly/requeue;
+it neither overrides block ranking nor substitutes a transaction into an already
+selected block. Requeue must still reject a consumed nonce or invalid spend.
+
+**Implemented increment.** The bounded C99 model removes its cross-root conflict
+rejection and unused UNSUPPORTED_CONFLICT status. Each candidate is still validated
+against its original parent history. Losing candidates remain valid on their own
+ancestry; selected state is replayed from the winning history. The finite-convergence
+argument consequently no longer excludes conflicting root bodies. The unique-child
+restriction below the first split remains a model bound; this increment supplies
+no new complete-history/work ordering, production assembly or cryptographic verifier.
+
+**Gate design.** Two signed fixtures deliberately oppose transaction-hash preference
+to block preference. One winner has more messages despite both its larger conflicting
+transaction hash and larger header; the other wins by smaller header at equal count,
+still carrying the larger conflicting transaction hash. Both delivery orders check
+admission, convergence, descendant detachment, original-parent validity, consumed
+nonce rejection and journal replay. The new regression first built successfully and
+failed against the prior conflict guard, then passed after its removal. New mutants
+restore conflict rejection, prioritize transaction hash over block ranking, replay
+siblings against selected state, or revalidate the queue against the anchor.
+Execution and independent review are recorded below after completion.
+
+**Execution and review:** `ci_local --c99 --jobs 4` passes 19/19 targets;
+`ci_local --c99-mutants --jobs 4` rejects 48/48 isolated mutants after successful
+fresh builds, including all four cases above; `ci_local --docs-only` passes 16/16
+guards. The strict C99 `-Wall -Wextra -Werror -pedantic` Makefile build also passes.
+Execution is Darwin arm64; no Linux/Windows runtime or C++ FAST result is claimed.
+Independent adversarial review of the final source, fixtures, mutations, proof
+scope and decision record found no actionable finding. This closes the stated
+message-hash/block-ranking ambiguity without asserting production sharding readiness.

@@ -201,29 +201,36 @@ body commitment. It is not a production header, public DH proof or VDF construct
 The native ledger-root helpers are not used for this commitment.
 
 The supported domain selects valid anchor children by distinct included transaction
-count descending, then full fixed-width big-endian header value ascending. Subsequent
-parents have at most one valid child. Conflicting root messages at the same
-sender/nonce and ambiguous descendant branches return unsupported without publishing
-partial state. Opposite input orders can remain different outside that domain;
-these exclusions do not resolve the open production comparison rules.
+count descending, then full fixed-width big-endian header value ascending. Root bodies
+with conflicting transactions at the same sender/nonce are supported: each is
+validated on its original parent, and the winning block may contain the larger
+transaction data hash. Smaller transaction data hash applies only during assembly
+and requeue, not block ranking. The model implements requeue, not production assembly.
+Subsequent parents still have at most one valid child. Ambiguous descendant branches
+return unsupported without publishing partial state, and opposite input orders can
+remain different outside that domain. Complete-history and validated-work ordering
+remain open separately.
 
 Every candidate is replayed on its own immutable ancestry. Selected state is rebuilt
 from the common anchor and published atomically; losing descendants are retained
 under their original parents. Requeued omissions are deduplicated, individually
 revalidated at the selected state and filtered by smaller data hash for ready
-same-sender/nonce alternatives. Queue membership does not assert joint executability.
+same-sender/nonce alternatives. This cannot override a chosen block or revive a nonce
+already consumed by its history. Queue membership does not assert joint executability.
 Journal replay reconstructs state in memory and invalidates preparations made before
 restore; it does not implement durable filesystem recovery.
 
 Given the same immutable fixtures and anchor, collision-free commitments for the
 supplied data, a common finite input set within the arena bounds, eventual complete
-delivery, no conflicting root bodies and unique valid descendants, original-parent
-replay yields the same validity set. Deterministic root order and unique descendants
+delivery and unique valid descendants, original-parent replay yields the same
+validity set, including independently valid conflicting roots. Deterministic root order and unique descendants
 then yield the same selected history and ledger state. This is a conditional
 finite-model argument, not a production convergence or reachability proof.
 [DSF-SPEC §10.4](DSF-SPEC.md#104-bounded-c99-fork-recovery-model) gives the assumptions,
 publication contract and test scope. `test-dsf-k2-recovery` includes fixed negative
 and correction scenarios plus eight seeded delivery schedules, each run twice.
+Conflicting-root fixtures check both delivery orders, count/header winners with a
+larger conflicting transaction hash, descendants and journal replay.
 Independent arithmetic checks state; receiver/replayer mutants challenge the model
 rules. Execution results require successful fresh builds through `tools/ci_local.sh`.
 No seed coverage closes the outstanding cryptographic, timing, membership,

@@ -428,17 +428,21 @@ format, and the variant is not a VDF output or an anti-grinding construction. Th
 commitment uses explicit signing bytes, not the native-structure ledger-root helpers.
 
 Among valid children of the common anchor, prefer more distinct included messages,
-then the smaller full numeric header. The supported domain excludes root bodies
-containing different transaction data hashes at the same sender/nonce and permits
-at most one valid child per nonanchor parent. Such competing inputs return
-`K2_MODEL_UNSUPPORTED_CONFLICT` or `K2_MODEL_UNSUPPORTED_BRANCHING` atomically.
-Nodes can remain different after opposite first deliveries outside this domain.
-These exclusions preserve open protocol composition choices; they are model limits,
-not newly adopted rejection rules or a whole-history fork-choice design.
+then the smaller full numeric header. Different root bodies may contain conflicting
+transactions at the same sender/nonce: each body is validated on its own original
+parent, and the same count/header ranking applies. The winning block can contain
+the larger conflicting transaction data hash. The owner's smaller-data-hash rule
+applies only during transaction assembly/requeue; it cannot change block ranking.
+The model implements requeue filtering, not production assembly.
+
+The supported domain still permits at most one valid child per nonanchor parent.
+Competing valid descendant branches return `K2_MODEL_UNSUPPORTED_BRANCHING`
+atomically. Nodes can remain different after opposite first deliveries outside this
+domain. This model limit does not decide complete-history or validated-work ordering.
 
 **Recovery and publication.** At the model's single-threaded API boundaries, rebuild
-state from the common anchor in scratch space, following only exact original-parent links from the selected root. Retain losing
-candidates and their descendants under their original parents; do not transplant
+state from the common anchor in scratch space, following only exact original-parent
+links from the selected root. Retain losing candidates and their descendants under their original parents; do not transplant
 their effects. Prepare changes no visible node state. Publish installs the complete
 history/state only for its original node and unchanged local revision. Admission,
 capacity and unsupported-input failures leave visible state unchanged. Nodes
@@ -448,9 +452,10 @@ remains immutable throughout a node lifetime.
 Collect omissions from candidates valid on their original ancestry, exclude
 selected transaction data hashes, deduplicate, and check each transaction against a
 fresh copy of selected state. For individually valid same-sender/nonce alternatives,
-keep the smaller data hash. The resulting queue is individually valid, not guaranteed
-jointly executable. A detached same-body descendant may supply a valid future
-transaction; an unfunded dependent spend remains invalid. Canonical journal bytes
+keep the smaller data hash. This cannot replace a transaction in the selected block:
+a smaller-hash alternative whose nonce is already consumed fails revalidation.
+The resulting queue is individually valid, not guaranteed jointly executable. A
+detached same-body descendant may supply a valid future transaction; an unfunded dependent spend remains invalid. Canonical journal bytes
 record the model inputs and are independently replayed into an initialized node.
 Restore advances the local revision so a preparation made before restore cannot
 replace the restored history. Old/new journal cuts model crash/restart in memory;
@@ -459,9 +464,9 @@ there is no file write, fsync or durable-storage claim.
 **Conditional finite-convergence argument.** Assume identical immutable anchor and
 fixture configuration, collision-free commitments for the supplied data, a common
 finite input set fitting the eight-record/four-transaction/four-block limits,
-eventual delivery of every required ancestor and candidate, no conflicting root
-bodies, and at most one valid child per nonanchor parent. Original-parent replay
-then gives each receiver the same valid candidate set once delivery completes.
+eventual delivery of every required ancestor and candidate, and at most one valid
+child per nonanchor parent. Original-parent replay then gives each receiver the
+same valid candidate set once delivery completes.
 The count/header order deterministically chooses the same root; exact parent links
 choose the same unique valid suffix. Deterministic ledger replay therefore gives
 equal selected histories and ledger states. Requeue filtering likewise operates on
@@ -469,14 +474,18 @@ the same valid omissions and selected state. Intermediate pending or divergent
 views are allowed. This argument compares selected histories and semantic state,
 not arrival-ordered journals or local revision counters. It does not prove that
 these fixtures are reachable under a production eligibility/cryptographic design,
-or convergence with unbounded growth, unavailable histories or unsupported conflicts.
+or convergence with unbounded growth, unavailable histories or competing descendant
+branches outside the supported domain.
 
 **Gate coverage and bound.** Fixed scenarios witness a local split, healing,
 message-count replacement, same-body numeric-header correction, descendant
-detachment and dependency revalidation. Negative cases cover invalid signatures,
-one-sided receipt, unauthorized/context-mismatched creators, duplicate bodies,
-impossible ancestry, invalid transactions, capacity, ambiguous descendants and
-unsupported root conflicts. The state oracle independently calculates balances,
+detachment and dependency revalidation. Conflicting-root cases deliver both orders
+and require count and header winners even when they contain the larger conflicting
+transaction data hash; descendant and journal checks preserve original-parent
+recovery. Negative cases cover invalid signatures, one-sided receipt,
+unauthorized/context-mismatched creators, duplicate bodies, impossible ancestry,
+invalid transactions, capacity and ambiguous descendants. The state oracle
+independently calculates balances,
 nonces, fees and conservation from each selected history; it does not call the model
 replayer or `ledger_apply_tx`. Separate assertions check selection, omissions,
 stale preparations, journal tampering and unchanged state on failure. Eight seeds
