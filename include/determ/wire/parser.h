@@ -87,14 +87,6 @@ wire_status_t wire_bundle_vdf_input(const uint8_t *reveal_a, uint32_t len_a,
                                     size_t *out_written_len);
 
 /*
- * Safe Concatenation with socket drop on overflow violation:
- */
-wire_status_t wire_concat_reveals_stream(const uint8_t *reveal_a, uint32_t len_a,
-                                         const uint8_t *reveal_b, uint32_t len_b,
-                                         uint8_t *bundle_out, size_t max_bundle_len,
-                                         size_t *out_written_len, int socket_fd);
-
-/*
  * ── Canonical Block Header Specification ─────────────────────────────────────
  * Strict Big-Endian binary encoding:
  *   1. height                   (8 bytes, uint64_t BE)

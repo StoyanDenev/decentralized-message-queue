@@ -8,7 +8,6 @@
 #include <determ/wire/parser.h>
 #include <determ/crypto/sha2/sha2.h>
 #include <string.h>
-#include <unistd.h>
 
 static inline uint16_t read_be16(const uint8_t *b) {
     return (uint16_t)(((uint16_t)b[0] << 8) | (uint16_t)b[1]);
@@ -228,52 +227,6 @@ wire_status_t wire_bundle_vdf_input(const uint8_t *reveal_a, uint32_t len_a,
     offset += 4;
     if (len_b > 0 && reveal_b) {
         memcpy(&out_buf[offset], reveal_b, len_b);
-        offset += len_b;
-    }
-
-    *out_written_len = offset;
-    return WIRE_OK;
-}
-
-wire_status_t wire_concat_reveals_stream(const uint8_t *reveal_a, uint32_t len_a,
-                                         const uint8_t *reveal_b, uint32_t len_b,
-                                         uint8_t *bundle_out, size_t max_bundle_len,
-                                         size_t *out_written_len, int socket_fd) {
-    if (!bundle_out || !out_written_len) {
-        if (socket_fd >= 0) { close(socket_fd); }
-        return ERR_INVALID_ARGUMENT;
-    }
-
-    size_t offset = 0;
-    size_t parsed_length = 4 + (size_t)len_a;
-    if (offset + parsed_length > 131104) {
-        if (socket_fd >= 0) { close(socket_fd); }
-        return ERR_BUFFER_OVERFLOW;
-    }
-    if (offset + parsed_length > max_bundle_len) {
-        if (socket_fd >= 0) { close(socket_fd); }
-        return ERR_BUFFER_OVERFLOW;
-    }
-    write_be32(&bundle_out[offset], len_a);
-    offset += 4;
-    if (len_a > 0 && reveal_a) {
-        memcpy(&bundle_out[offset], reveal_a, len_a);
-        offset += len_a;
-    }
-
-    parsed_length = 4 + (size_t)len_b;
-    if (offset + parsed_length > 131104) {
-        if (socket_fd >= 0) { close(socket_fd); }
-        return ERR_BUFFER_OVERFLOW;
-    }
-    if (offset + parsed_length > max_bundle_len) {
-        if (socket_fd >= 0) { close(socket_fd); }
-        return ERR_BUFFER_OVERFLOW;
-    }
-    write_be32(&bundle_out[offset], len_b);
-    offset += 4;
-    if (len_b > 0 && reveal_b) {
-        memcpy(&bundle_out[offset], reveal_b, len_b);
         offset += len_b;
     }
 
