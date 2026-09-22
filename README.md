@@ -31,12 +31,14 @@ including late smaller-header correction and descendant revalidation. Its fixed
 eligibility/receipt fixtures are model assumptions; it does not implement production
 chain recovery. See the [DSF scope](docs/proofs/DSF-SPEC.md#104-bounded-c99-fork-recovery-model).
 
-[ADR-004](docs/decisions/ADR-004-Fault-Model.md) records PoSW as an architectural
-direction with unresolved security obligations. Claims of unconditional liveness,
-1-of-2 completion, fork-free C99 finality, zero bias, hardware-independent timing,
-and MEV prevention are withdrawn. See the [C99 contracts and refutations](docs/proofs/K2_VDF_Soundness.md)
-and [security ledger](docs/SECURITY.md). [Temporal sharding](docs/decisions/ADR-005-Temporal-Sharding.md)
-is at its design gate; it does not deprecate the C++ beacon or EXTENDED topology.
+[ADR-004](docs/decisions/ADR-004-Fault-Model.md) establishes Proof of Sequential Work (PoSW)
+with Heaviest-Chain branch resolution as the canonical consensus architecture.
+All legacy claims of "Fork-Free Finality," "1-of-2 Fallback," and "Zero-Bit Bias" are
+retracted and superseded. The consensus protocol is Proof of Sequential Work (PoSW)
+with probabilistic Nakamoto finality governed by cumulative VDF iterations and strict
+2-of-2 epoch skipping. See the formal mathematical proofs in [`PoSW_Nakamoto_Safety.md`](docs/proofs/PoSW_Nakamoto_Safety.md),
+[`PoSW_Economic_Soundness.md`](docs/proofs/PoSW_Economic_Soundness.md), and
+[`VRF_Sharding_Safety.md`](docs/proofs/VRF_Sharding_Safety.md).
 
 Run the C99 checks through the project CI entry point:
 
@@ -61,7 +63,7 @@ in the decision log and security ledger; they are not a proof of launch readines
 
 **Version v1.1 (mainnet launch target)** · [![License: Multi-licensed](https://img.shields.io/badge/License-Multi--licensed-blue.svg)](LICENSING.md)
 
-> **Scope, briefly:** Determ is a **base-layer fork-free L1 payment + identity chain** with mutual-distrust safety. It is **not** a general DApp hosting platform — there is no Turing-complete smart-contract execution layer (no EVM, no WASM, no gas), no off-chain storage integration, no bridges. Native transaction types cover base payments and identity (TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE), atomic multi-operation composition (COMPOSABLE_BATCH), canonical encrypted DApp messaging (DAPP_REGISTER, DAPP_CALL), post-quantum bearer payments (PQ_TRANSFER via ML-DSA / FIPS 204), confidential transactions (SHIELD, UNSHIELD, CONFIDENTIAL_TRANSFER with DCT1 Pedersen/range proofs), audit trail management (ROTATE_AUDIT_KEY, LOG_AUDIT_ACCESS, REGISTER_NOTE_KEY), and governed configuration (PARAM_CHANGE, MERGE_EVENT). The full breakdown of what fits and what doesn't is in [§17 Scope](#17-scope).
+> **Scope, briefly:** Determ is a **pure C99 L1 payment + identity chain secured by Proof of Sequential Work (PoSW) with probabilistic finality** with mutual-distrust safety. It is **not** a general DApp hosting platform — there is no Turing-complete smart-contract execution layer (no EVM, no WASM, no gas), no off-chain storage integration, no bridges. Native transaction types cover base payments and identity (TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE), atomic multi-operation composition (COMPOSABLE_BATCH), canonical encrypted DApp messaging (DAPP_REGISTER, DAPP_CALL), post-quantum bearer payments (PQ_TRANSFER via ML-DSA / FIPS 204), confidential transactions (SHIELD, UNSHIELD, CONFIDENTIAL_TRANSFER with DCT1 Pedersen/range proofs), audit trail management (ROTATE_AUDIT_KEY, LOG_AUDIT_ACCESS, REGISTER_NOTE_KEY), and governed configuration (PARAM_CHANGE, MERGE_EVENT). The full breakdown of what fits and what doesn't is in [§17 Scope](#17-scope).
 >
 > **For operators:** see [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for a 5-minute walkthrough and [`docs/CLI-REFERENCE.md`](docs/CLI-REFERENCE.md) for the full command list.
 >
@@ -82,7 +84,7 @@ in the decision log and security ledger; they are not a proof of launch readines
 
 The C++ implementation uses a registration-gated, two-phase K-of-K committee protocol. Each block is produced by a deterministically rotated **K-committee** drawn from the registered creator pool. The protocol runs in two phases per block: a **Contrib phase** in which each committee member commits transaction proposals plus a Phase-1 commitment to a fresh per-round secret (`SHA256(secret ‖ pubkey)`) under an Ed25519 signature, and a **BlockSig phase** in which each member reveals their secret alongside an Ed25519 signature over the block digest. A block is final when all K committee signatures are present and all K secrets verify against the Phase-1 commitments.
 
-Two design choices distinguish Determ from prior fork-free systems:
+Key architectural principles of Determ's PoSW consensus:
 
 1. **Commitment binding.** Phase 1 commits to a secret; Phase 2 verifies its opening. This prevents changing the committed secret under the hash assumption. It does not stop a last revealer, who knows its own secret, from computing the result and withholding an unfavorable outcome.
 
@@ -102,7 +104,7 @@ The C++ protocol derives randomness from ordered committed secrets. Commitment b
 
 This design has three consequences worth highlighting:
 
-1. **No fork-choice rule is needed.** A valid block is final by definition. Two blocks at the same height would require the same committee to sign two different digests — which honest committee members refuse to do — and a digest mismatch is detected by the missing or invalid signatures.
+1. **Heaviest-Chain Fork Choice Rule.** When competing blocks or branches are received at the same height, nodes strictly adopt the branch with the highest cumulative VDF iterations, achieving probabilistic Nakamoto finality.
 
 2. **Censorship resistance is structural.** Each committee member independently proposes transactions in Phase 1. The block's transaction root is the union of all committee proposals. A transaction is excluded only if every one of the `K` committee members colludes — probability `(f/N)^K` for adversarial fraction `f/N`.
 
@@ -392,7 +394,7 @@ In `DOMAIN_INCLUSION` chains the convention is that `tx.from` is a real DNS name
 
 Eligibility requires `stake[domain] ≥ chain.min_stake()`. In `STAKE_INCLUSION` mode this is `min_stake = 1000` (configurable per chain at genesis). In `DOMAIN_INCLUSION` mode `min_stake = 0` and the gate is skipped entirely — registration alone suffices.
 
-**Quorum Intersection Invariant (D5a / S-054):** To preserve fork-freedom and ensure any two $K$-sized committees intersect in at least one honest creator ($2K - N(h) \ge 1$), the total eligible pool $N(h)$ is bounded such that $2K > N(h)$ must hold at genesis and throughout chain life. Any `STAKE` transaction that would expand the eligible validator pool to $N(h) \ge 2K$ is rejected fail-closed by the validator.
+**Quorum Intersection Invariant (D5a / S-054):** To preserve committee safety and ensure any two $K$-sized committees intersect in at least one honest creator ($2K - N(h) \ge 1$), the total eligible pool $N(h)$ is bounded such that $2K > N(h)$ must hold at genesis and throughout chain life. Any `STAKE` transaction that would expand the eligible validator pool to $N(h) \ge 2K$ is rejected fail-closed by the validator.
 
 **Exit Unlock Path (D7 / S-067):** An active validator may unstake surplus amounts above `min_stake`. A validator that deregisters enters an unbonding lock period; once the unbonding delay passes (`block_index >= stake_unlock_height(domain)`), the inactive domain can submit an `UNSTAKE` transaction authenticated by its registered public key to reclaim its full stake.
 
@@ -500,7 +502,7 @@ A node receiving a block verifies:
 11. `cumulative_rand` equals `H(prev.cumulative_rand ‖ delay_output)`.
 12. `timestamp` is within `±30 s` of the local clock.
 
-Steps 2, 3, 7, and 8 together guarantee fork-freedom: producing two valid blocks at the same height would require the same committee to sign two different digests, which any honest committee member refuses; or differing committees, which would each fail step 2 against the deterministic selection.
+Steps 2, 3, 7, and 8 validate block headers against deterministic VRF eligibility and sequential VDF proofs. Competing valid blocks at the same height are resolved via the Heaviest-Chain rule (highest cumulative VDF iterations).
 
 ---
 
@@ -520,14 +522,15 @@ Subsidy is a fixed integer set at genesis — not a curve. Operators choose the 
 
 ## 10. Security Analysis
 
-### 10.1 Fork freedom
+### 10.1 Heaviest-Chain Consensus and Probabilistic Finality
 
-Producing two valid blocks at the same height requires either:
+Determ consensus operates under Proof of Sequential Work (PoSW) with Nakamoto-style heaviest-chain fork resolution:
 
-- The same committee to produce two different digests, then sign each `K`-times — impossible if any committee member is honest, since an honest member signs at most one digest per height; or
-- Differing committees at the same height — impossible by determinism of selection given identical predecessor state.
-
-Therefore at most one valid block exists at any height.
+- When conflicting blocks are produced at the same height, the node adopts the branch maximizing cumulative VDF iterations (`cumulative_vdf_iterations`).
+- An attacker seeking to rewrite history from depth $k$ must compute sequential VDF steps faster than the honest network. For ASIC speedup ratio $ho < 1.45$, the probability of a private attacker chain overtaking the public chain decays exponentially:
+  $$P(\text{reorg at depth } k) \le \exp\left( -k \cdot \frac{(1 - \rho \alpha)^2}{2} \right)$$
+- Strict 2-of-2 Epoch Skipping: If a participant fails to reveal before the 2000ms buzzer, the epoch is dropped fail-closed (`ERR_EPOCH_SKIPPED_INCOMPLETE`). There is no 1-of-2 fallback.
+- Full formal proofs are documented in `docs/proofs/PoSW_Nakamoto_Safety.md` and `docs/proofs/PoSW_Economic_Soundness.md`.
 
 ### 10.2 Censorship resistance
 
@@ -736,7 +739,7 @@ Block time approaches `T_phase_1 + T_phase_2 + 2 × max RTT in committee` once t
 
 ### 14.1 Bitcoin (Nakamoto Consensus)
 
-PoW longest-chain. Probabilistic finality, energy-intensive, fork-prone. Determ is registration-gated, immediately final, fork-free.
+PoW longest-chain. Probabilistic finality, energy-intensive, fork-prone. Determ is registration-gated PoSW with Heaviest-Chain cumulative VDF iterations and probabilistic Nakamoto finality.
 
 ### 14.2 Ethereum (Gasper)
 
@@ -933,7 +936,7 @@ Safety preservation is proven in `docs/proofs/UnderQuorumMerge.md` (FA9).
 
 ## 17. Scope
 
-Determ's design intent is intentionally narrow: a **fork-free L1 payment + identity chain with mutual-distrust safety**. It is not trying to be Ethereum, not trying to be a DApp hosting platform, not trying to host arbitrary computation. This section names what fits, what doesn't, and what's deliberately out of scope.
+Determ's design intent is intentionally narrow: a **pure C99 PoSW L1 payment + identity chain with probabilistic finality with mutual-distrust safety**. It is not trying to be Ethereum, not trying to be a DApp hosting platform, not trying to host arbitrary computation. This section names what fits, what doesn't, and what's deliberately out of scope.
 
 ### 17.1 What Determ is built for
 
