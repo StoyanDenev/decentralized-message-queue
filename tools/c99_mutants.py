@@ -19,6 +19,27 @@ from pathlib import Path
 # name, target, repository-relative source, literal old text, literal new text.
 # Each replacement must match exactly once in the unmutated source snapshot.
 MUTANTS = [
+    ("routing-zero-count", "test-shard-routing", "src/ledger/shard_routing.c",
+     "if (!out || !salt || shard_count == 0)", "if (!out || !salt)"),
+    ("routing-domain", "test-shard-routing", "src/ledger/shard_routing.c",
+     'static const char tag[] = "shard-route";', 'static const char tag[] = "shard-routex";'),
+    ("routing-salt", "test-shard-routing", "src/ledger/shard_routing.c",
+     "determ_sha256_update(&hash, config->salt, sizeof(config->salt));", "/* mutant: omit salt */"),
+    ("routing-key-length", "test-shard-routing", "src/ledger/shard_routing.c",
+     "pubkey_len != 32", "pubkey_len == 99"),
+    ("routing-hash-width", "test-shard-routing", "src/ledger/shard_routing.c",
+     "i < 8;", "i < 4;"),
+    ("routing-rpc-duplicate-field", "test-rpc-shard-routing", "src/rpc/json_rpc.c",
+     "if (seen & bit) return -32600;", "if (0) return -32600;"),
+    ("routing-rpc-method-key", "test-rpc-shard-routing", "src/rpc/json_rpc.c",
+     "const determ_json_tok_t *method_tok = rpc_method_token(request_json, tokens, (size_t)num_tokens);",
+     'const determ_json_tok_t *method_tok = determ_json_find_key(request_json, tokens, (size_t)num_tokens, &tokens[0], "method");'),
+    ("routing-rpc-request-bound", "test-rpc-shard-routing", "src/rpc/json_rpc.c",
+     "len > RPC_ROUTING_MAX_REQUEST_LEN", "len > RPC_ROUTING_MAX_REQUEST_LEN + 1"),
+    ("routing-rpc-error-id", "test-rpc-shard-routing", "src/rpc/json_rpc.c",
+     'error == -32602 ? id : "null"', '"null"'),
+    ("routing-node-context", "determ-node", "src/determ_node.c",
+     "rcfg.rpc_ctx.routing = &routing;", "rcfg.rpc_ctx.routing = NULL;"),
     ("ledger-fee-wrap", "test-triple-entry-ledger", "src/ledger/state.c",
      "if (UINT64_MAX - state->total_fees < tx_fee)", "if (0)"),
     ("ledger-fee-exact-fit", "test-triple-entry-ledger", "src/ledger/state.c",
@@ -114,7 +135,9 @@ def main():
         raise RuntimeError("no mutation cases configured")
     cases = MUTANTS
     if sys.platform in ("win32", "cygwin", "msys"):
-        cases = [case for case in MUTANTS if case[1] not in ("determ-node", "test-k2-net-rpc")]
+        cases = [case for case in MUTANTS if case[1] not in
+                 ("determ-node", "test-k2-net-rpc", "test-rpc-shard-routing",
+                  "test-triple-entry-ledger")]
         for case in MUTANTS:
             if case not in cases:
                 print("PLATFORM-SKIP(mutant): " + case[0] + " (POSIX prototype)", flush=True)

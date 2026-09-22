@@ -6098,3 +6098,31 @@ rejected 24/24 freshly built mutants, including removed and overrestrictive fee
 preflights. `ci_local --docs-only` passed all 16 guards. The prior snapshot taken
 while routing tests were being edited failed its baseline and was discarded;
 no mutant verdict was credited from that run.
+
+## 2026-09-22 — C99 canonical account-routing query
+
+**Implemented scope.** A bounded C99 mirror now maps 32-byte anonymous account
+keys through their canonical lowercase `0x` address and the existing salted
+`shard-route` hash/modulus formula. Count is a validated nonzero u32, including
+65536 and UINT32_MAX; no per-shard allocation is inferred from that count.
+`determ-node` exposes `get_shard_for_pubkey` using count/salt fixed at startup.
+The result explicitly identifies local configuration and says consensus is not
+enforced. This implements useful routing, not authenticated genesis, membership,
+transaction admission, sharded execution or settlement. C++ behavior is unchanged.
+
+**Review.** Independent review checked implementation, integration and proof scope,
+and found and resolved request-ID correlation, response truncation and method-key
+selection errors. In particular, an ID string equal to `method` must not be mistaken
+for a JSON object key. Request parsing remains narrow to the new endpoint; there
+is no claim that unrelated legacy RPC methods have a strict JSON grammar. Fixed
+vectors use an independent SHA-256 oracle, and live HTTP tests verify actual node
+startup configuration and rejection of per-request reconfiguration.
+
+**Verification:** the routing-only staged snapshot independently built and passed
+all 18 of its C99 targets, including actual HTTP queries. The whole workspace's
+strict `-std=c99 -Wall -Wextra -Werror -pedantic` Makefile build passed. Ten routing
+mutations were rejected after successful isolated builds, including reversion of
+the actual-object-key method selector; all existing mutation cases also passed.
+The final full-workspace mutation total is recorded with the following recovery
+increment. Documentation guards pass; independent review found no remaining
+routing source, integration or documentation finding.

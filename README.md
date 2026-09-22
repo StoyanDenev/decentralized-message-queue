@@ -11,6 +11,12 @@ sequential-hardness bound or succinct proof. A completed evaluation is not an
 accepted ledger block. The driver has no authenticated election, production block
 validation, chain selection/reorganization, or cross-shard settlement.
 
+The C99 node provides `get_shard_for_pubkey`, a read-only query using the existing
+salted modulus map and canonical lowercase account addresses. Configure its local
+inputs with `--routing-shards` and `--routing-salt`; defaults are one shard and a
+zero salt. Responses identify these as local settings, not authenticated genesis
+or enforced transaction ownership. See the [routing contract](docs/proofs/ShardRoutingSoundness.md#c99-local-routing-query-2026-09-22).
+
 [ADR-004](docs/decisions/ADR-004-Fault-Model.md) records PoSW as an architectural
 direction with unresolved security obligations. Claims of unconditional liveness,
 1-of-2 completion, fork-free C99 finality, zero bias, hardware-independent timing,

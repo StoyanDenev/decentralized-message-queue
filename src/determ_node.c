@@ -61,7 +61,10 @@ static void print_usage(const char *prog) {
     printf("  --data-dir <path>         Directory for persistent block storage (.blocks)\n");
     printf("  --domain <name>           Node domain advertisement (default: node.local)\n\n");
     printf("HTTP JSON-RPC Server:\n");
-    printf("  --rpc-port <port>         Listen port for HTTP JSON-RPC endpoint (e.g. 8545)\n\n");
+    printf("  --rpc-port <port>         Listen port for HTTP JSON-RPC endpoint (e.g. 8545)\n");
+    printf("  --routing-shards <S>      Query-only shard count, 1..4294967295 (default: 1)\n");
+    printf("  --routing-salt <hex64>    Query-only 32-byte salt (default: all zero)\n");
+    printf("                           Fixed at startup; not authenticated genesis configuration\n\n");
     printf("Diagnostics & Calibration:\n");
     printf("  --benchmark               Measure this machine's AES evaluation rate\n");
     printf("  --version                 Print version and architectural info\n");
@@ -113,6 +116,39 @@ static void on_p2p_connect(peer_mesh_t *mesh, int peer_idx, void *ud) {
     printf("[P2P Mesh] Peer #%d connected successfully.\n", peer_idx);
 }
 
+static int routing_count_arg(const char *text, uint32_t *out) {
+    uint32_t value = 0;
+    if (!text || !*text) return -1;
+    for (size_t i = 0; text[i]; ++i) {
+        uint32_t digit;
+        if (text[i] < '0' || text[i] > '9') return -1;
+        digit = (uint32_t)(text[i] - '0');
+        if (value > (UINT32_MAX - digit) / 10) return -1;
+        value = value * 10 + digit;
+    }
+    if (value == 0) return -1;
+    *out = value;
+    return 0;
+}
+
+static int routing_salt_arg(const char *text, uint8_t out[32]) {
+    if (!text || strlen(text) != 64) return -1;
+    for (size_t i = 0; i < 32; ++i) {
+        unsigned value = 0;
+        for (size_t j = 0; j < 2; ++j) {
+            char c = text[2 * i + j];
+            unsigned digit;
+            if (c >= '0' && c <= '9') digit = (unsigned)(c - '0');
+            else if (c >= 'a' && c <= 'f') digit = (unsigned)(c - 'a') + 10;
+            else if (c >= 'A' && c <= 'F') digit = (unsigned)(c - 'A') + 10;
+            else return -1;
+            value = value * 16 + digit;
+        }
+        out[i] = (uint8_t)value;
+    }
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
     bool is_aggregator = false;
     bool is_contributor = false;
@@ -125,6 +161,12 @@ int main(int argc, char *argv[]) {
     const char *peer_target = NULL;
     const char *data_dir = NULL;
     const char *domain = "node.local";
+    /* These match GenesisConfig field defaults, not an authenticated chain's
+     * configuration. They configure only the read-only routing RPC query. */
+    uint32_t routing_count = 1;
+    uint8_t routing_salt[32] = {0};
+    bool have_routing_count = false, have_routing_salt = false;
+    shard_routing_config_t routing;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--aggregator") == 0) {
@@ -139,6 +181,18 @@ int main(int argc, char *argv[]) {
             p2p_port = (uint16_t)atoi(argv[++i]);
         } else if (strcmp(argv[i], "--rpc-port") == 0 && i + 1 < argc) {
             rpc_port = (uint16_t)atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--routing-shards") == 0) {
+            if (have_routing_count || i + 1 >= argc || routing_count_arg(argv[++i], &routing_count) != 0) {
+                fprintf(stderr, "--routing-shards requires one decimal count in 1..4294967295\n");
+                return 1;
+            }
+            have_routing_count = true;
+        } else if (strcmp(argv[i], "--routing-salt") == 0) {
+            if (have_routing_salt || i + 1 >= argc || routing_salt_arg(argv[++i], routing_salt) != 0) {
+                fprintf(stderr, "--routing-salt requires one 64-character hexadecimal salt\n");
+                return 1;
+            }
+            have_routing_salt = true;
         } else if (strcmp(argv[i], "--peer") == 0 && i + 1 < argc) {
             peer_target = argv[++i];
         } else if (strcmp(argv[i], "--data-dir") == 0 && i + 1 < argc) {
@@ -158,6 +212,11 @@ int main(int argc, char *argv[]) {
             print_usage(argv[0]);
             return 0;
         }
+    }
+
+    if (shard_routing_init(&routing, routing_count, routing_salt) != 0) {
+        fprintf(stderr, "Invalid read-only routing configuration\n");
+        return 1;
     }
 
     if (do_benchmark) {
@@ -251,6 +310,7 @@ int main(int argc, char *argv[]) {
         rcfg.rpc_ctx.mesh = mesh_active ? &g_mesh : NULL;
         rcfg.rpc_ctx.dda = &g_dda;
         rcfg.rpc_ctx.node_version = "v2.18-c99";
+        rcfg.rpc_ctx.routing = &routing; /* main's lifetime exceeds all server use */
 
         if (http_rpc_server_init(&g_rpc, &rcfg) != 0 || http_rpc_server_start(&g_rpc) != 0) {
             fprintf(stderr, "Error: Failed to start HTTP JSON-RPC server on port %u\n", rpc_port);

@@ -10,10 +10,10 @@ case "$JOBS" in ''|*[!0-9]*|0) echo "FAIL: --jobs must be a positive integer"; r
 # the source checkout or the isolated snapshots.
 ulimit -c 0 || { echo "FAIL: cannot disable core dumps for C99 tests"; return 1; }
 C99_PORTABLE=(test-k2-duel test-k2-duel-fallback test-dda test-qpc-clock-overflow
-              test-binary-codec fuzzer-parser)
+              test-binary-codec fuzzer-parser test-shard-routing)
 C99_UNIX=(test-dsf-k2-duel test-k2-net-rpc test-peer-mesh test-block-store
           test-http-rpc test-ledger-dsso fuzz-ledger test-opaque-dsso
-          test-triple-entry-ledger determ-node)
+          test-triple-entry-ledger test-rpc-shard-routing determ-node)
 C99_IS_UNIX=1
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) C99_IS_UNIX=0 ;; esac
 
@@ -29,8 +29,8 @@ if [ "${#C99_TESTS[@]}" -eq 0 ]; then
 fi
 for target in "${C99_TESTS[@]}"; do
   case "$target" in
-    test-k2-duel|test-k2-duel-fallback|test-dda|test-qpc-clock-overflow|test-binary-codec|fuzzer-parser) ;;
-    test-dsf-k2-duel|test-k2-net-rpc|test-peer-mesh|test-block-store|test-http-rpc|test-ledger-dsso|fuzz-ledger|test-opaque-dsso|test-triple-entry-ledger|determ-node)
+    test-k2-duel|test-k2-duel-fallback|test-dda|test-qpc-clock-overflow|test-binary-codec|fuzzer-parser|test-shard-routing) ;;
+    test-dsf-k2-duel|test-k2-net-rpc|test-peer-mesh|test-block-store|test-http-rpc|test-ledger-dsso|fuzz-ledger|test-opaque-dsso|test-triple-entry-ledger|test-rpc-shard-routing|determ-node)
       [ "$C99_IS_UNIX" -eq 1 ] || {
         echo "FAIL: requested target $target requires POSIX transport"; return 1; } ;;
     *) echo "FAIL: unsupported C99 target: $target"; return 1 ;;
@@ -74,7 +74,7 @@ for target in "${C99_TESTS[@]}"; do
     return 1
   fi
   echo "RUN(c99): $target [$binary]"
-  # CLI help and refusal to persist local duel output; not chain adoption proof.
+  # CLI refusals and a live local routing query; not chain adoption proof.
   if [ "$target" = determ-node ]; then
     python3 tools/c99_node_smoke.py "$binary" "$BUILD_DIR" >"$BUILD_DIR/$target.log" 2>&1
   else
@@ -100,5 +100,5 @@ for target in "${C99_TESTS[@]}"; do
   fi
 done
 if [ "$C99_FAILED" -ne 0 ]; then return 1; fi
-echo "PASS: ci-local C99 scope (${#C99_TESTS[@]} targets; determ-node covers help and persistence refusal)"
+echo "PASS: ci-local C99 scope (${#C99_TESTS[@]} targets; determ-node covers CLI and local routing RPC)"
 return 0

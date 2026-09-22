@@ -227,3 +227,49 @@ A reviewer can confirm routing soundness by:
 SR-1 through SR-5 establish that the address-to-shard routing primitive is a **deterministic, total, chain-consistent partition** of the address space, near-uniform under A3-ROM and salt-bound under A2 + S-039. These are precisely the premises that FA7 (`CrossShardReceipts.md`, the `dst_shard == shard_id_for_address(...)` clause), FA8 (`RegionalSharding.md` §3.4, producer/receiver routing agreement), FA-Apply-13 (`CrossShardOutboundApply.md` T-O4, source-side emission), and FA-Apply-17 (`CrossShardSupplyConservation.md`, every address belongs to exactly one shard) invoke without proof. This document closes that obligation: the cross-shard atomicity and aggregate-supply theorems rest on a routing map that is now proved to be a single, deterministic, total, chain-wide partition — not assumed to be one.
 
 The remaining gaps (optimal shard-count selection, dynamic resharding) are deployment/roadmap concerns; they do not undermine the per-property routing soundness proved here.
+
+## C99 local routing query (2026-09-22)
+
+This section alone specifies the new C99 consumer. It does not inherit the C++
+receipt-validation, genesis-authentication or load-security claims above.
+
+`shard_routing_for_pubkey` accepts exactly 32 account-key bytes and a configuration
+with `1 <= shard_count <= UINT32_MAX`. It encodes the account as the existing
+66-byte lowercase `0x` plus hexadecimal key address and computes
+`BE64(SHA256(salt32 || "shard-route" || address66)[0:8]) % shard_count`.
+For one shard the result is zero. The folding shifts an unsigned 64-bit value at
+most eight times and the modulus is nonzero; the result is uniquely defined and
+less than the count. Identical key, salt and count produce identical results. No
+curve validity, account registration, randomness or population balance follows
+from accepting arbitrary 32 bytes as a routing input.
+
+All storage is bounded independently of the count; there is no per-shard arena or
+new heap allocation. Invalid pointers, key length or zero count return an error
+without writing the result. Initialization copies the full salt and rejects an
+invalid configuration without modifying its destination.
+
+`determ-node` parses `--routing-shards` as a nonzero u32 decimal and
+`--routing-salt` as exactly 64 hexadecimal digits once, before starting services.
+Defaults are one shard and 32 zero bytes. These settings are **local query inputs**,
+not an authenticated genesis or a new consensus configuration mechanism. RPC cannot
+change them. `get_shard_for_pubkey` takes exactly `params:{"pubkey":"<64 hex>"}`
+and returns the normalized address, shard ID, count, salt, `scope:"routing-query"`,
+`config_source:"local"` and `consensus_enforced:false`. Uppercase input normalizes
+before hashing. Absence of configuration returns unavailable.
+
+This method validates its complete request envelope with a 512-byte bound. It
+rejects unknown/duplicate fields, malformed separators, trailing data and escaped
+strings. Its optional ID is null, an integer of at most 20 characters, or an
+unescaped printable ASCII string of at most 32 characters. Invalid params retain
+a valid request ID. Responses must fit the supplied output buffer. These narrow
+endpoint rules do not establish strict JSON handling by unrelated legacy methods.
+
+`test-shard-routing` pins 25 independently computed vectors over five salt/key
+combinations and counts 1, 3, 7, 65536 and UINT32_MAX, plus failure-output invariants.
+`test-rpc-shard-routing` tests dispatch, context isolation, malformed inputs, bounds
+and ID correlation. The `determ-node` CI smoke starts actual local HTTP servers
+with default and configured inputs and checks their replies and immutable settings.
+Isolated mutations target the domain, salt, folding width, zero count, key length,
+request bounds/duplicates, error correlation and the node's routing-context wiring.
+This is a useful routing consumer; C99 signed transaction admission, ownership at
+apply, election and cross-shard execution remain unimplemented.

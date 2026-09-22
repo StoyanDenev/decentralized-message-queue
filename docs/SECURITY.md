@@ -15,6 +15,7 @@ closures, including S-044, do not establish C99 consensus safety or liveness.
 | Alleged evidence/slashing/fork choice | Unused arbitrary-byte evidence and unvalidated work-comparison APIs are removed. Authenticated evidence and production fork choice remain **unimplemented**. |
 | Delay/security model | Custom AES/SHA-256 evaluator is verified by reevaluation. Sequential hardness, hardware advantage, challenge freshness, selective-abort bias and adversarial chain-growth bounds are **unproved**. |
 | Sharding and settlement | Authenticated election, state ownership, data availability and reorganization-safe receipts are **open**; ADR-005 is proposed only. |
+| C99 routing query | Matches the existing canonical anonymous-address map using bounded, local startup configuration. Strict read-only RPC and live node tests enforce its declared inputs. No genesis authentication or transaction ownership enforcement is claimed. |
 | Standalone ledger boundaries | Self-transfers debit the fee once and advance the nonce once. Nonces cannot wrap after exhaustion; the last representable nonce remains usable. Accumulated-fee overflow rejects before account creation or balance writes. Verifier/apply regressions check rejection without mutation. Portable root encoding remains open. |
 
 The [local contracts and counterexamples](proofs/K2_VDF_Soundness.md) define the
