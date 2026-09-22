@@ -161,5 +161,15 @@ failure. A repeated nonce or insufficient gross balance rejects without mutation
 `test-triple-entry-ledger` checks these outcomes at `ledger_apply_tx`, including
 full-state equality after rejection. Isolated mutations restore the aliasing bug,
 charge the gross debit, or omit the nonce update. This closes the self-transfer
-defect only; nonce exhaustion, fee-accumulator overflow and portable state/transaction
-root encoding require separate corrections before broader ledger claims.
+defect only; the fee-accumulator overflow and portable state/transaction root
+encoding require separate corrections before broader ledger claims.
+
+## 9. C99 ledger nonce exhaustion
+
+The transaction verifier rejects a sender nonce of `UINT64_MAX` before adding
+one. For every smaller sender nonce `n`, `n + 1` is representable and is the only
+accepted transaction nonce. The final `UINT64_MAX - 1` to `UINT64_MAX` transition
+therefore remains valid, while wrapping to zero cannot reopen the nonce sequence.
+Apply calls this verifier before any write. The signed boundary regression checks
+both layers and bytewise unchanged state after rejected wrapped, repeated and stale
+nonces. Its isolated mutant removes the exhaustion guard.

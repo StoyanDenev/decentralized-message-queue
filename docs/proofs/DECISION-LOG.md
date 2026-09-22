@@ -6063,3 +6063,17 @@ first mutation run could not start its localhost listener and was treated as an
 infrastructure failure; the recorded run enabled localhost sockets. Independent
 diff review approved the runtime rule and required a byte-copy test snapshot to
 avoid unspecified structure-padding comparisons; that correction is included.
+
+## 2026-09-22 — C99 nonce exhaustion
+
+The standalone transaction verifier now rejects an exhausted sender nonce before
+addition. The final representable increment remains valid; an unsigned wrap to
+zero can no longer restart a sender's nonce sequence. Apply invokes this guard
+before any mutation. This is separate from the preceding self-transfer fix.
+
+**Verification:** independent design and diff reviews found no actionable defect.
+The signed boundary gate covers the final valid increment and rejects zero, one
+and the repeated maximum at verifier and apply, preserving the complete state.
+`ci_local --c99-mutants --jobs 4` passed its fresh baseline and rejected 22/22
+freshly built mutants, including removal of the exhaustion guard. C99 root
+encoding and accumulated-fee overflow are not closed by this increment.

@@ -19,6 +19,9 @@ from pathlib import Path
 # name, target, repository-relative source, literal old text, literal new text.
 # Each replacement must match exactly once in the unmutated source snapshot.
 MUTANTS = [
+    ("ledger-nonce-wrap", "test-triple-entry-ledger", "src/ledger/state.c",
+     "sender_nonce == UINT64_MAX || tx_nonce != sender_nonce + 1",
+     "tx_nonce != sender_nonce + 1"),
     ("ledger-self-alias", "test-triple-entry-ledger", "src/ledger/state.c",
      "if (sender == receiver)", "if (0)"),
     ("ledger-self-fee", "test-triple-entry-ledger", "src/ledger/state.c",

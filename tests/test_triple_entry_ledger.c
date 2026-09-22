@@ -60,6 +60,35 @@ static void test_self_transfer(void) {
     TEST_ASSERT(state.total_fees == 0);
 }
 
+static void test_nonce_exhaustion(void) {
+    ledger_state_t state, before;
+    triple_entry_tx_t tx;
+    uint8_t seed[32] = {8}, key[32];
+    determ_ed25519_pubkey_from_seed(seed, key);
+    ledger_state_init(&state);
+    account_t *sender = ledger_register_account(&state, key, 100);
+    TEST_ASSERT(sender != NULL);
+    sender->nonce = UINT64_MAX - 1;
+    memset(&tx, 0, sizeof(tx));
+    memcpy(tx.from, key, 32);
+    memcpy(tx.to, key, 32);
+    tx.amount = 1;
+    tx.nonce = UINT64_MAX;
+    sign_tx(&tx, seed);
+    TEST_ASSERT(ledger_apply_tx(&state, &tx, 0) == LEDGER_OK);
+    TEST_ASSERT(sender->nonce == UINT64_MAX);
+    TEST_ASSERT(sender->balance == 100);
+    memcpy(&before, &state, sizeof(before));
+    const uint64_t rejected_nonces[] = {0, 1, UINT64_MAX};
+    for (size_t i = 0; i < sizeof(rejected_nonces) / sizeof(rejected_nonces[0]); ++i) {
+        tx.nonce = rejected_nonces[i];
+        sign_tx(&tx, seed);
+        TEST_ASSERT(verify_triple_entry_tx(sender, &tx, 0) == LEDGER_ERR_INVALID_NONCE);
+        TEST_ASSERT(ledger_apply_tx(&state, &tx, 0) == LEDGER_ERR_INVALID_NONCE);
+        TEST_ASSERT(memcmp(&before, &state, sizeof(state)) == 0);
+    }
+}
+
 static void test_triple_entry_ledger_overflow_immunity(void) {
     printf("[TEST] Triple-Entry Ledger UINT64_MAX Overflow Rejection...\n");
 
@@ -127,6 +156,7 @@ int main(void) {
     test_harness_init("test_triple_entry_ledger");
     test_triple_entry_ledger_overflow_immunity();
     test_self_transfer();
+    test_nonce_exhaustion();
     test_harness_finish("test_triple_entry_ledger");
     return 0;
 }

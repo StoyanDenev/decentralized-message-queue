@@ -81,7 +81,7 @@ int verify_triple_entry_tx(const account_t *sender,
     memcpy(&sender_balance, &sender->balance, sizeof(uint64_t));
 
     /* 2. Strictly incrementing nonce defense against replay attacks */
-    if (tx_nonce != sender_nonce + 1) {
+    if (sender_nonce == UINT64_MAX || tx_nonce != sender_nonce + 1) {
         return LEDGER_ERR_INVALID_NONCE;
     }
 
