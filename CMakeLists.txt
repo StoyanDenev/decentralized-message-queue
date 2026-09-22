@@ -660,6 +660,12 @@ if(ENABLE_PARSER_LIBFUZZER)
 endif()
 
 # The canonical envelope codec is independent of the POSIX node transport.
+add_executable(test-dsf-k2-recovery tests/test_dsf_k2_recovery.c
+  sim/k2_recovery_model.c src/ledger/state.c)
+target_compile_features(test-dsf-k2-recovery PRIVATE c_std_99)
+target_include_directories(test-dsf-k2-recovery PRIVATE include sim)
+target_link_libraries(test-dsf-k2-recovery PRIVATE determ-crypto-c99)
+
 add_executable(test-shard-routing tests/test_shard_routing.c src/ledger/shard_routing.c)
 target_compile_features(test-shard-routing PRIVATE c_std_99)
 target_include_directories(test-shard-routing PRIVATE include)

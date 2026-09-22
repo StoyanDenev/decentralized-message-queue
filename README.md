@@ -17,6 +17,11 @@ inputs with `--routing-shards` and `--routing-salt`; defaults are one shard and 
 zero salt. Responses identify these as local settings, not authenticated genesis
 or enforced transaction ownership. See the [routing contract](docs/proofs/ShardRoutingSoundness.md#c99-local-routing-query-2026-09-22).
 
+`test-dsf-k2-recovery` separately tests finite sibling selection and state replay,
+including late smaller-header correction and descendant revalidation. Its fixed
+eligibility/receipt fixtures are model assumptions; it does not implement production
+chain recovery. See the [DSF scope](docs/proofs/DSF-SPEC.md#104-bounded-c99-fork-recovery-model).
+
 [ADR-004](docs/decisions/ADR-004-Fault-Model.md) records PoSW as an architectural
 direction with unresolved security obligations. Claims of unconditional liveness,
 1-of-2 completion, fork-free C99 finality, zero bias, hardware-independent timing,

@@ -7,6 +7,12 @@
 > [ADR-004](decisions/ADR-004-Fault-Model.md) does not replace the C++ accept rules;
 > [ADR-005](decisions/ADR-005-Temporal-Sharding.md) is an unaccepted design gate.
 
+The separate C99 node now exposes a local `get_shard_for_pubkey` routing query
+matching §7.2 for canonical anonymous addresses. Its startup count/salt are not
+genesis-authenticated and it performs no transaction admission. The bounded
+[C99 recovery model](proofs/DSF-SPEC.md#104-bounded-c99-fork-recovery-model) is a test target,
+not a replacement for this specification's chain rules.
+
 This document specifies wire formats, hash inputs, and the consensus state machine at a level sufficient for an external implementer to build a compatible client. The reference implementation is in this repository; where implementation behavior diverges from this document, treat the implementation as authoritative and file an issue to reconcile.
 
 **Status:** v1 (rev. 8 + sharding through B6.basic) plus shipped v2 foundation. Frozen for the v1 series.

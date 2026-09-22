@@ -12,6 +12,11 @@
 > supersede the previous K=2 finality, zero-bias and unconditional-liveness claims.
 > Temporal sharding remains [proposed](decisions/ADR-005-Temporal-Sharding.md).
 
+The C99 foundation includes a read-only modulus-routing query and a bounded
+[recovery model](proofs/DSF-SPEC.md#104-bounded-c99-fork-recovery-model). The query uses local
+configuration; the model assumes a finite candidate set and fixed eligibility and
+receipt facts. Neither establishes production shard execution or settlement.
+
 ## Abstract
 
 Determ explores a payment and identity ledger using K-of-K committee co-creation. This paper records the existing C++ architecture; its claims depend on the cited fault assumptions and the open security ledger. The separate C99 experiment checks two-party payload commitments and bounded local deadlines, but provides no production chain acceptance or finality.

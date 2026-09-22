@@ -3,7 +3,7 @@
 # ADR 005: Temporal Sharding — Design Gate
 
 **Date:** 2026-09-22
-**Status:** PROPOSED; implementation blocked on the consensus and settlement design.
+**Status:** PROPOSED; bounded model and routing-query increments implemented; production consensus and settlement incomplete.
 **Owner constraint (2026-09-22):** One elected pair per shard, with a separately
 proved timeout and replacement rule. Competing pairs are not the selected path.
 Each shard is provisioned with a large eligible population; initial and subsequent
@@ -53,31 +53,28 @@ arithmetic or a successful socket exchange cannot close these architectural gaps
 Specify authenticated membership and admission cost; eligible stake/identity snapshot;
 network synchrony assumptions; adversarial identities, hardware and concurrent work;
 and the producer rule for each shard. The owner selected an **exclusive elected
-pair**, with timeout/replacement proved separately. Specify authenticated replacement,
-what prevents conflicting replacement authority, and the assumptions under which a
-withholding pair is eventually replaced. A local timeout supplies none of these rules.
-Multiple competing pairs are not authorized by this choice.
+pair**. Available prior state determines the next pair under the shard-local
+eligibility rule. The VDF delays knowledge of that pair; it does not authorize
+production or serve as an independent replacement proof. Define the production
+state machine, shared round start, attempt timing and receiver checks that determine
+when each state-derived pair may act, and the recovery transitions after incomplete
+cooperation. Multiple concurrently authorized pairs are not the selected path.
 
-**Replacement gate — refutation of a local-counter implementation.** Let the
-membership/seed select pair P0 for attempt 0 and P1 for attempt 1. An honest node A
-receives nothing from P0 and locally times out; node B's clock/receipt schedule is
-behind and it receives P0's result before its own timeout. If A treats P1 as the
-exclusive authority while B still accepts P0, a counter alone has not established
-common exclusive production rights. More directly, if verifiers trust a submitted
-attempt number without replacement evidence, an adversary can skip to any attempt
-whose derived pair it controls. If they require equality to their own local counter,
-the same candidate's admission depends on delivery schedule. Neither rule proves a
-canonical replacement sequence.
+**Local-counter limitation.** Let the prior state determine pair P0 for attempt 0
+and P1 for attempt 1. Node A receives nothing from P0 and locally times out; node B
+receives P0's result before its own timeout. Merely incrementing A's local counter
+does not specify how both receivers validate late results, determine the relevant
+prior state or reconcile their histories. Trusting an arbitrary submitted attempt
+number also fails to establish that the named pair may act; requiring equality to
+a receiver's local counter makes admission depend on its delivery schedule. This is
+a missing state-transition and recovery specification, not a requirement to invent
+a timeout certificate or give a VDF output production authority.
 
-This trace does not assert that temporary forks are forbidden under ADR-004; it
-shows that pair exclusivity, admissible work and recovery remain undefined even
-before a probabilistic fork-choice proof can start. A replacement specification must
-choose an objectively verifiable authority transition and state its assumptions:
-for example, a precisely defined timeout certificate with its own participation and
-fault threshold, or a clock/slot rule with bounded skew, validity and offline-verification
-semantics, or a delay certificate whose freshness and hardness are actually proved.
-These are alternatives for review, not implemented or accepted mechanisms. A claimed
-VDF output from the current custom evaluator cannot stand in for that proof.
+Temporary forks are permitted by §3.4. The task is to define which candidates remain
+valid on their actual prior states and how local histories recover, under explicit
+timing and delivery assumptions. Public DH/VDF verification, the production
+state machine and its receiving checks remain to be implemented and reviewed. The
+bounded fixture model in §3.5 does not discharge those requirements.
 
 The local driver's failed attempt followed by caller-controlled retry is deliberately
 outside this consensus rule: its explicit restart elects nobody and confers no signing rights.
@@ -136,9 +133,16 @@ existing definition pins salt and S at genesis. See
 contract and scope. This mapping is the account-routing baseline, not a new owner
 decision still to be made. It does not itself select the two block co-creators.
 
-The C99 path still needs to integrate that mapping with its canonical account
-representation and enforce ownership at transaction admission and state application,
-including account nonces and the effects of transactions involving other shards.
+The C99 mirror in `src/ledger/shard_routing.c` now maps an exact 32-byte public key
+through the canonical anonymous address `"0x" + lowercase_hex(pubkey)` and the
+existing modulus formula. The read-only `get_shard_for_pubkey` RPC uses local
+`--routing-shards` / `--routing-salt` settings and labels its response
+`config_source: "local"`, `consensus_enforced: false`. It does not authenticate a
+genesis configuration, assign producers, admit transactions or execute a shard.
+
+The C99 path still needs ownership enforcement at transaction admission and state
+application, including account nonces and the effects of transactions involving
+other shards.
 A client-requested target shard must match derived ownership. Splitting queues into
 arenas alone does not enforce these checks.
 Specify hard limits, admission/backpressure, per-shard arena ownership and reclamation,
@@ -191,14 +195,16 @@ discussion, not shipped C99 consensus behavior or a completed convergence proof:
   the smaller produced successor header to resolve conflicting successor candidates.
   Define precisely how these rules compose with ADR-004's intended validated-work
   ordering, transaction dependencies and comparison of complete histories before
-  implementing the comparator. A header value is not interchangeable with its hash.
+  implementing the production history comparator. A header value is not interchangeable
+  with its hash.
 - The owner explicitly adopts the same-body case: among valid competing blocks at
   the same height with an identical message body, prefer the smaller header interpreted
   as a number. A node that received only the larger-header candidate may temporarily
   follow it; later receipt of the preferred candidate triggers local history correction
   and revalidation of affected descendants. This tie-break is decided. Its canonical
-  header representation and the recovery transitions still need implementation and
-  verification; no additional tie-break is required for this case.
+  production header representation and recovery transitions still need implementation
+  and verification. The bounded model below exercises this case with a model-only
+  header; no additional tie-break is required for this case.
 - Senders attach their known-history hash to messages so differing views can be
   discovered and reconciled through gossip coordinated by co-creators. A difference
   may indicate lag as well as competing histories; retrieve and validate the relevant
@@ -230,59 +236,56 @@ discussion, not shipped C99 consensus behavior or a completed convergence proof:
 
 ### 3.5 DSF convergence and recovery design gate
 
-The owner selects deterministic simulation to test this recovery model. Extend the
-existing DSF approach in a separate, explicitly scoped increment. Current capabilities
-must not be confused with coverage of the proposed protocol:
+The owner selects deterministic simulation to test recovery. The first bounded
+one-chain increment is now implemented in `sim/k2_recovery_model.c` and
+`tests/test_dsf_k2_recovery.c`; its exact contract and conditional finite-convergence
+argument are in [DSF-SPEC §10.4](../proofs/DSF-SPEC.md#104-bounded-c99-fork-recovery-model).
+This is a partial design gate, not a production implementation of this ADR.
 
-- The standalone `determ-dsf` runner uses scripted model nodes under `sim/`.
-- The [C++ deterministic scheduler](../proofs/DeterministicSchedulerDesign.md) drives
-  the existing C++ Node with loss, duplication, partition/heal, delayed delivery and
-  crash/rejoin. Its `FaStepMonitor` asserts immutability below the head and height
-  monotonicity for that older engine. Preserve those existing checks; do not present
-  them as verification of this different recovery model.
-- The [C99 DSF seams](../proofs/DSF-SPEC.md#10-separate-c99-local-attempt-test-harness)
-  and `tests/test_dsf_k2_duel.c` currently exercise bounded local attempts. They have
-  no distributed block admission, branch selection or ledger recovery to drive.
+The surfaces remain separate. The standalone `determ-dsf` runner uses scripted
+model nodes. The [C++ deterministic scheduler](../proofs/DeterministicSchedulerDesign.md)
+drives the existing C++ Node and retains its existing settled-history monitor.
+The [C99 local-attempt seams](../proofs/DSF-SPEC.md#10-separate-c99-local-attempt-test-harness)
+and `test-dsf-k2-duel` still exercise local attempts. The new recovery target drives
+a bounded model receiver/replayer with the real C99 sender-signature and ledger-apply
+functions; it does not drive `determ-node` block admission.
 
-**First increment: one-chain model.** Specify the candidate-admission, whole-history
-comparison and recovery transitions before writing their scenario. Fix a finite set
-of eligible candidate data for this first experiment and state the delivery and
-availability assumptions. Include two conflicting candidates from the same elected
-pair, different local receipt schedules, shared versus one-sided message receipt,
-the stated message/header selection cases, and a transaction whose validity depends
-on the initially selected history. Witness a temporary split and a local correction.
-Include the adopted same-height, identical-body case with different header values:
-deliver the larger-header candidate first to one node, then the preferred candidate,
-and verify selection and correction of any affected descendants. Every candidate
-and descendant used by the scenario must satisfy the model's admission and producer
-eligibility rules; do not assume an isolated branch may advance without checking them.
-Then heal the partition, deliver/retransmit the missing eligible data and drive
-recovery to a specified quiescent observation point. The harness controls delivery;
-it must not tell nodes which history wins or copy one node's state into another.
+**Implemented domain.** One common anchor, at most eight candidate records, four
+transactions per candidate and four selected blocks; immutable fixtures supply
+pair authority and joint receipt facts. Each candidate is validated on its original
+parent history. Valid root siblings rank by distinct included message count, then
+fixed-width big-endian model-header value. Losing descendants retain their original
+parents; replay never transplants them onto a preferred root. Each nonanchor parent
+has at most one valid child in the supported domain.
 
-Check all of the following:
+Differing root transactions with the same sender and nonce, and competing valid
+children of a nonanchor parent, return `UNSUPPORTED` without publishing partial
+state. Opposite delivery orders may remain different outside that domain. This
+restriction avoids deciding the still-open composition of conflicting-message,
+header and complete-history preferences; it is not a new protocol rule. Frozen
+pair/receipt fixtures do not prove production eligibility, public DH derivation,
+VDF verification or that the modeled competing histories are reachable.
 
-1. After healing and delivery/recovery under the scenario's stated assumptions,
-   proper nodes select the same complete history **and** ledger state, including
-   balances and nonces. Temporary differing local histories are allowed before that
-   point. Disagreement at a recovery bound justified by the model falsifies that
-   bound; reaching an arbitrary simulation step/time cap alone is inconclusive about
-   eventual convergence.
-2. At every externally visible state boundary, a node's state equals independent
-   replay of its own selected, validated history from the common anchor. No mixed
-   ancestry, effects from an abandoned history, duplicate application or invalid
-   dependent transaction may survive correction. Recovery publishes a consistent
-   state, including after a crash/restart during correction.
-3. Omitted transactions are requeued without duplication and admitted only if valid
-   against the selected state. Losing same-nonce transactions must not be counted as
-   successful retries. Check conservation against that history's explicit monetary
-   rules, without assuming a subsidy or receipt mechanism from another engine.
-4. Record witnesses that the split, relevant injected faults, correction and healing
-   actually occurred. Replaying the same scenario/seeds produces the same trace.
-5. After a successful fresh build, mutants breaking selection, rollback/replay,
-   dependency revalidation or duplicate rejection must fail the corresponding
-   receiver/apply check. The state oracle must not simply call the same recovery
-   routine being checked.
+**Implemented checks.** Fixed scenarios witness a temporary split and later
+correction, greater-message-count preference, identical-body lower-header preference,
+original-parent descendant detachment, dependent-spend rejection, one-sided receipts,
+invalid signatures/bodies, bounded capacity and atomic failure. The independent
+arithmetic oracle checks selected-history ancestry, balances, nonces and conservation;
+nodes never copy another node's state. Omitted transactions are deduplicated and
+individually revalidated against selected state; smaller data hash resolves ready
+same-sender/nonce alternatives. A ready queue is not a promise that all entries form
+a valid batch. Eight seeded delivery permutations are each replayed twice to compare
+traces. Canonical journal bytes test old/new in-memory crash cuts and independent
+state reconstruction, not filesystem durability.
+
+For a common finite candidate set within the supported bounds, eventual delivery of
+all required ancestors gives every node the same original-parent validity results,
+the same deterministically preferred root and the same unique descendant suffix.
+Deterministic replay then produces the same selected ledger state. This conditional
+argument does not extend to indefinitely growing histories, arbitrary faults,
+production confirmation depth or unavailable data. Gates and mutants exercise the
+model receiver/apply rules; their execution is recorded separately after a successful
+fresh build through `tools/ci_local.sh` and independent review.
 
 **Next increment: cross-shard dependencies.** Apply the reviewed one-chain recovery
 model to a transaction dependency crossing two shards, then to a dependent onward
@@ -299,8 +302,8 @@ defect. Passing them does not prove convergence under indefinitely produced comp
 histories or establish a confirmation depth. Independent design/adversarial review
 and stated fault/network assumptions remain required. Model results are labeled as
 model results; production claims require driving the actual surviving verifier and
-apply path. Run all gates through `tools/ci_local.sh`; no new recovery gate or
-production behavior is claimed by this documentation increment.
+apply path. Run all gates through `tools/ci_local.sh`. The bounded recovery gate
+above is implemented; production recovery and cross-shard behavior remain open.
 
 ## 4. Corrected execution instructions
 

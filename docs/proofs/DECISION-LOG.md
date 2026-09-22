@@ -6126,3 +6126,49 @@ the actual-object-key method selector; all existing mutation cases also passed.
 The final full-workspace mutation total is recorded with the following recovery
 increment. Documentation guards pass; independent review found no remaining
 routing source, integration or documentation finding.
+
+## 2026-09-22 — Bounded C99 recovery model
+
+**Implemented scope.** `test-dsf-k2-recovery` drives a new test-only receiver and
+replayer from one common anchor. It admits at most eight records, four transactions
+per candidate and four blocks in the selected suffix. Frozen configuration supplies
+pair eligibility and shared-receipt facts; these are explicit model oracles, not
+cryptographic or production membership proofs. Sender signatures and ledger apply
+are real. Canonical model headers bind body/context and are compared as full
+big-endian numbers, not hashes. Hashes identify original parent relationships only.
+
+Within the supported finite domain, valid root siblings rank by distinct included
+message count and then smaller numeric header. Descendants remain attached to their
+original parents. Recovery replays from the anchor into scratch, publishes coherent
+history/state in one model transition, and revalidates/deduplicates omitted messages.
+Individually valid same-sender/nonce queue alternatives keep the smaller data hash;
+the queue is not asserted to be jointly executable. Memory-journal replay models
+old/new crash cuts and invalidates preparations made before restore, without a
+filesystem-durability claim. The model introduces no new dynamic allocation; the
+called Ed25519 implementation's existing allocation behavior is unchanged.
+
+**Domain boundary and proof.** With the same immutable fixtures, a finite fitting
+candidate set, collision-free commitments and eventual delivery of its ancestry,
+each receiver derives the same validity set. The deterministic root order and unique
+valid descendants then yield the same history and deterministic ledger state.
+Conflicting transaction bodies among root siblings and competing descendants below
+that first split remain outside this argument and return UNSUPPORTED atomically.
+This does not decide the production composition of conflict-message preference,
+block ranking and complete-history comparison. No sender quorum, irreversible
+finality, full sharding implementation or production VDF/election proof is inferred.
+The owner has been asked to clarify whether smaller conflicting-message hashes act
+only during assembly/requeue or override block ranking; no answer is assumed.
+
+**Independent review and verification.** Review corrected impossible ancestry being
+left pending, stale prepared publication across restore, and unspecified structure
+padding in snapshots. It also found a masked receipt mutation: another conflict
+rule rejected the same fixture. The fixture now uses an independent funded sender,
+so deleting the shared-receipt check actually admits the forbidden candidate.
+The final `ci_local --c99-mutants --jobs 4` run passes its fresh baseline and rejects
+44/44 freshly built mutants: 24 prior cases, ten routing cases and ten recovery
+cases. The complete final C99 suite passes 19/19 targets, documentation guards
+pass 16/16, and the strict C99 Makefile build passes. All runtime execution here
+is Darwin arm64; no Linux/Windows runtime or C++ FAST result is claimed. Source,
+integration and documentation review found no remaining actionable finding within
+these increments' declared scope. Cross-shard dependency recovery is the next model
+increment, not a property established by this one.

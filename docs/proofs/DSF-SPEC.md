@@ -390,7 +390,7 @@ Actual socket integration is separately checked by `test-k2-net-rpc`.
 With `DETERM_DSF_ENABLED`, `determ_dsf_set_vdf_bypass(true, TARGET_VDF_MS)` returns a
 mock hash and advances virtual time by the configured 3000 ms. This is a simulation
 convenience, not a delay proof, hardware benchmark or authenticated block timestamp.
-The DDA test supplies synthetic ordered timestamps through its timestamp-only API;
+The DDA test supplies synthetic ordered timestamps and work through its commit API;
 it does not feed local elapsed durations into a production block verifier.
 
 ### 10.3 Verification scope
@@ -403,14 +403,91 @@ one-party fallback. Native evaluation is checked separately by `test-k2-duel`.
 No simulated block finalization, global-liveness proof or performance guarantee is
 inferred from these tests. See [K2_VDF_Soundness.md](K2_VDF_Soundness.md).
 
-### 10.4 Proposed C99 fork-recovery coverage
+### 10.4 Bounded C99 fork-recovery model
 
-The owner's 2026-09-22 clarification permits temporary forks, local acceptance and
-local history correction. Senders verify for themselves; no collective sender
-approval is required before production continues. The proposed DSF gate is recorded
-in [ADR-005 §3.5](../decisions/ADR-005-Temporal-Sharding.md#35-dsf-convergence-and-recovery-design-gate):
-one-chain recovery first, then cross-shard transaction dependencies as a separate
-increment. This is a test-design requirement, not a shipped scenario or a security
-claim. It must check convergence after healing and state equivalence to independent
-history replay, while allowing the temporary divergence the owner explicitly permits.
-The older C++ engine's settled-history monitor remains scoped to that engine.
+`sim/k2_recovery_model.c` and `test-dsf-k2-recovery` implement the first bounded
+one-chain increment from [ADR-005 §3.5](../decisions/ADR-005-Temporal-Sharding.md#35-dsf-convergence-and-recovery-design-gate).
+This is a test model separate from `determ-node` and the C++ consensus engine.
+Its fixed caller-owned arenas admit at most eight candidate records, four
+transactions per candidate and four blocks in the selected history after one
+common anchor. The model adds no dynamic allocation; the existing signature
+primitive's allocation behavior is unchanged. This is not a zero-heap claim for
+the complete call path. No live production routing is involved.
+
+**Admission and selection.** Immutable configuration fixtures supply one authorized
+pair per parent/height/round and joint-receipt facts. These are
+trusted model oracles, not implementations of membership, election, creator
+endorsement or receipt proofs. The model checks those fixtures, distinct included
+transaction data hashes, real Ed25519 sender signatures and real `ledger_apply_tx`
+results on each candidate's original ancestry. Missing ancestors remain pending;
+impossible ancestry is rejected. The model header canonically binds chain, shard,
+height, round, parent, pair, ordered signing-byte body commitment and a fixture
+variant. Its fixed 136-byte big-endian representation supplies numeric comparison;
+its hash is used only for immutable ancestry. This is not a production wire
+format, and the variant is not a VDF output or an anti-grinding construction. The body
+commitment uses explicit signing bytes, not the native-structure ledger-root helpers.
+
+Among valid children of the common anchor, prefer more distinct included messages,
+then the smaller full numeric header. The supported domain excludes root bodies
+containing different transaction data hashes at the same sender/nonce and permits
+at most one valid child per nonanchor parent. Such competing inputs return
+`K2_MODEL_UNSUPPORTED_CONFLICT` or `K2_MODEL_UNSUPPORTED_BRANCHING` atomically.
+Nodes can remain different after opposite first deliveries outside this domain.
+These exclusions preserve open protocol composition choices; they are model limits,
+not newly adopted rejection rules or a whole-history fork-choice design.
+
+**Recovery and publication.** At the model's single-threaded API boundaries, rebuild
+state from the common anchor in scratch space, following only exact original-parent links from the selected root. Retain losing
+candidates and their descendants under their original parents; do not transplant
+their effects. Prepare changes no visible node state. Publish installs the complete
+history/state only for its original node and unchanged local revision. Admission,
+capacity and unsupported-input failures leave visible state unchanged. Nodes
+and workspaces must be disjoint as required by the model header; configuration
+remains immutable throughout a node lifetime.
+
+Collect omissions from candidates valid on their original ancestry, exclude
+selected transaction data hashes, deduplicate, and check each transaction against a
+fresh copy of selected state. For individually valid same-sender/nonce alternatives,
+keep the smaller data hash. The resulting queue is individually valid, not guaranteed
+jointly executable. A detached same-body descendant may supply a valid future
+transaction; an unfunded dependent spend remains invalid. Canonical journal bytes
+record the model inputs and are independently replayed into an initialized node.
+Restore advances the local revision so a preparation made before restore cannot
+replace the restored history. Old/new journal cuts model crash/restart in memory;
+there is no file write, fsync or durable-storage claim.
+
+**Conditional finite-convergence argument.** Assume identical immutable anchor and
+fixture configuration, collision-free commitments for the supplied data, a common
+finite input set fitting the eight-record/four-transaction/four-block limits,
+eventual delivery of every required ancestor and candidate, no conflicting root
+bodies, and at most one valid child per nonanchor parent. Original-parent replay
+then gives each receiver the same valid candidate set once delivery completes.
+The count/header order deterministically chooses the same root; exact parent links
+choose the same unique valid suffix. Deterministic ledger replay therefore gives
+equal selected histories and ledger states. Requeue filtering likewise operates on
+the same valid omissions and selected state. Intermediate pending or divergent
+views are allowed. This argument compares selected histories and semantic state,
+not arrival-ordered journals or local revision counters. It does not prove that
+these fixtures are reachable under a production eligibility/cryptographic design,
+or convergence with unbounded growth, unavailable histories or unsupported conflicts.
+
+**Gate coverage and bound.** Fixed scenarios witness a local split, healing,
+message-count replacement, same-body numeric-header correction, descendant
+detachment and dependency revalidation. Negative cases cover invalid signatures,
+one-sided receipt, unauthorized/context-mismatched creators, duplicate bodies,
+impossible ancestry, invalid transactions, capacity, ambiguous descendants and
+unsupported root conflicts. The state oracle independently calculates balances,
+nonces, fees and conservation from each selected history; it does not call the model
+replayer or `ledger_apply_tx`. Separate assertions check selection, omissions,
+stale preparations, journal tampering and unchanged state on failure. Eight seeds
+shuffle four candidate deliveries to each of two nodes; each delivery is repeated,
+and each seeded schedule runs twice with equal canonical trace digests. This is a
+finite seed bound, not an exhaustive schedule/fault search or a measured timing bound.
+Run the receiver/replayer gate and its isolated mutants through `tools/ci_local.sh`;
+record fresh build success, execution and independent review before crediting results.
+
+The older C++ settled-history monitor remains unchanged. Public verification of
+co-creator DH derivation, VDF proofs, authenticated production eligibility and timing,
+complete-history selection, durable recovery and cross-shard transaction dependencies
+remain separate work. No production security or sharding claim follows from this
+bounded model. See [K2_VDF_Soundness §11](K2_VDF_Soundness.md#11-bounded-recovery-model-contract).

@@ -121,12 +121,15 @@ slashing, authenticated broadcast or secure fork choice is claimed as a replacem
 The existing C++ evidence path is unaffected.
 
 Production PoSW requires decisions and proofs for authenticated membership and Sybil
-resistance; exclusive-pair eligibility, timeout authorization, replacement and recovery; canonical challenge/context
-binding; a delay construction and explicit hardness assumptions; timestamp validity;
+resistance; prior-state-derived exclusive-pair eligibility, attempt timing, receiver
+checks and recovery; canonical challenge/context binding; a delay construction and
+explicit hardness assumptions; timestamp validity;
 validated cumulative work; transaction/state validity; data availability; synchronization;
 atomic branch adoption, persistence and recovery. The
 [sharding design gate](../decisions/ADR-005-Temporal-Sharding.md) depends on these
-obligations and cannot remove them by adding shard identifiers.
+obligations and cannot remove them by adding shard identifiers. The owner's VDF
+election requirement delays knowledge of the next state-derived pair; it does not
+supply an independent replacement proof or authorize that pair to act early.
 
 ## 7. Verification boundary
 
@@ -186,3 +189,42 @@ valid. The gate checks self, existing-recipient and new-recipient paths, includi
 full-state rejection snapshots and mutations removing or overrestricting the guard.
 The standalone transaction verifier checks sender-local conditions; accumulated
 fees are an apply-level condition, not a claim of complete block admission.
+
+## 11. Bounded recovery model contract
+
+The separate `sim/k2_recovery_model.c` receiver/replayer exercises one common anchor,
+at most eight candidate records, four transactions per candidate and four selected
+blocks. It calls the real sender-signature verifier and `ledger_apply_tx`; pair
+identity/authority and joint receipt are immutable trusted fixture facts. The
+136-byte model header binds original-parent context and ordered canonical signing-byte
+body commitment. It is not a production header, public DH proof or VDF construction.
+The native ledger-root helpers are not used for this commitment.
+
+The supported domain selects valid anchor children by distinct included transaction
+count descending, then full fixed-width big-endian header value ascending. Subsequent
+parents have at most one valid child. Conflicting root messages at the same
+sender/nonce and ambiguous descendant branches return unsupported without publishing
+partial state. Opposite input orders can remain different outside that domain;
+these exclusions do not resolve the open production comparison rules.
+
+Every candidate is replayed on its own immutable ancestry. Selected state is rebuilt
+from the common anchor and published atomically; losing descendants are retained
+under their original parents. Requeued omissions are deduplicated, individually
+revalidated at the selected state and filtered by smaller data hash for ready
+same-sender/nonce alternatives. Queue membership does not assert joint executability.
+Journal replay reconstructs state in memory and invalidates preparations made before
+restore; it does not implement durable filesystem recovery.
+
+Given the same immutable fixtures and anchor, collision-free commitments for the
+supplied data, a common finite input set within the arena bounds, eventual complete
+delivery, no conflicting root bodies and unique valid descendants, original-parent
+replay yields the same validity set. Deterministic root order and unique descendants
+then yield the same selected history and ledger state. This is a conditional
+finite-model argument, not a production convergence or reachability proof.
+[DSF-SPEC §10.4](DSF-SPEC.md#104-bounded-c99-fork-recovery-model) gives the assumptions,
+publication contract and test scope. `test-dsf-k2-recovery` includes fixed negative
+and correction scenarios plus eight seeded delivery schedules, each run twice.
+Independent arithmetic checks state; receiver/replayer mutants challenge the model
+rules. Execution results require successful fresh builds through `tools/ci_local.sh`.
+No seed coverage closes the outstanding cryptographic, timing, membership,
+availability, complete-history or cross-shard proof obligations.
