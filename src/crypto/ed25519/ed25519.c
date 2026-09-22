@@ -275,6 +275,7 @@ void determ_ed25519_pubkey_from_seed(const u8 seed[32], u8 pk[32]) {
 int determ_ed25519_sign(const u8 seed[32], const u8 pk[32],
                         const u8 *msg, size_t msglen, u8 sig[64]) {
     u8 h[64], a[32], rh[64], hram[64];
+    u8 sign_buf[512]; /* Bounded messages use automatic storage; no VLA. */
     gf P[4];
     i64 x[64]; int i, j;
     u8 *buf;
@@ -285,7 +286,7 @@ int determ_ed25519_sign(const u8 seed[32], const u8 pk[32],
     h[0] &= 248; h[31] &= 127; h[31] |= 64;
     for (i = 0; i < 32; i++) a[i] = h[i];        /* clamped scalar a */
 
-    buf = (u8 *)malloc(64 + msglen);
+    buf = msglen <= sizeof sign_buf - 64u ? sign_buf : (u8 *)malloc(64 + msglen);
     if (buf == NULL) {
         determ_secure_zero(h, sizeof h);
         determ_secure_zero(a, sizeof a);
@@ -319,13 +320,14 @@ int determ_ed25519_sign(const u8 seed[32], const u8 pk[32],
     determ_secure_zero(rh, sizeof rh);
     determ_secure_zero(x, sizeof x);
     determ_secure_zero(buf, 64 + msglen);
-    free(buf);
+    if (buf != sign_buf) free(buf);
     return 0;
 }
 
 int determ_ed25519_verify(const u8 pk[32],
                           const u8 *msg, size_t msglen, const u8 sig[64]) {
     u8 hram[64], t[32];
+    u8 verify_buf[512];
     gf P[4], Q[4];
     int i, rc;
     u8 *buf;
@@ -335,7 +337,7 @@ int determ_ed25519_verify(const u8 pk[32],
     if (!sc_lt_L(sig + 32)) return -1;           /* RFC 8032 §5.1.7: reject S >= L (anti-malleability) */
     if (unpackneg(Q, pk)) return -1;             /* Q = -A */
 
-    buf = (u8 *)malloc(64 + msglen);
+    buf = msglen <= sizeof verify_buf - 64u ? verify_buf : (u8 *)malloc(64 + msglen);
     if (buf == NULL) return -1;
 
     for (i = 0; i < 32; i++) { buf[i] = sig[i]; buf[32 + i] = pk[i]; }
@@ -349,7 +351,7 @@ int determ_ed25519_verify(const u8 pk[32],
     pack(t, P);
 
     rc = determ_ct_memcmp(sig, t, 32);            /* accept iff encodes R */
-    free(buf);
+    if (buf != verify_buf) free(buf);
     return rc;
 }
 

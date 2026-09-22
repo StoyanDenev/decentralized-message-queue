@@ -235,3 +235,31 @@ Independent arithmetic checks state; receiver/replayer mutants challenge the mod
 rules. Execution results require successful fresh builds through `tools/ci_local.sh`.
 No seed coverage closes the outstanding cryptographic, timing, membership,
 availability, complete-history or cross-shard proof obligations.
+
+## 12. Bounded Ed25519 storage contract
+
+The shared C99 Ed25519 signer and verifier use a fixed 512-byte automatic buffer
+for messages of at most 448 bytes. Larger messages retain the existing heap
+fallback. Both paths first reject lengths greater than `SIZE_MAX - 64`; signing
+cleanses the used buffer span before release, and only heap storage is freed.
+This is a bounded-input allocation contract, not a whole-node allocation claim
+or a change to signature validity.
+
+For message length `m <= 448`, the longest hash input is `R || public_key || message`,
+of length `64 + m <= 512`. The earlier signing input `prefix || message` uses
+`32 + m` bytes. Both inputs are completely written before hashing. Storage choice
+therefore preserves the exact hash inputs, scalar computations and verification
+predicates; only allocation behavior changes. Automatic storage adds a fixed
+512-byte buffer per call and no shared mutable state.
+
+`test-ed25519-bounded` compiles the actual primitive with allocator interception
+confined to its test object. Published RFC 8032 signatures pin empty, one-byte and
+two-byte messages; fixed signatures from an independent OpenSSL oracle pin 88,
+195, 448, 449 and 1,024 bytes. The gate counts allocation/free calls, denies
+allocation on the bounded path, checks fallback failure without signature writes,
+length-overflow refusal, changed-message/signature rejection and existing key/scalar
+canonicality checks. Its allocator also checks heap-buffer cleansing before a
+signing free and rejects an attempted free of automatic storage. These checks do
+not prove erasure of every compiler-generated secret copy. Shared C++ consumers
+require the existing `ci_local` crypto/consensus-vector checks in addition to the
+C99 gate; isolated mutants challenge the allocation and length boundaries.

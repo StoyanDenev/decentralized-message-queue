@@ -49,6 +49,7 @@ TEST_FUZZER_PARSER_BIN = $(BIN_DIR)/fuzzer-parser
 TEST_SHARD_ROUTING_BIN = $(BIN_DIR)/test-shard-routing
 TEST_RPC_SHARD_ROUTING_BIN = $(BIN_DIR)/test-rpc-shard-routing
 TEST_DSF_K2_RECOVERY_BIN = $(BIN_DIR)/test-dsf-k2-recovery
+TEST_ED25519_BOUNDED_BIN = $(BIN_DIR)/test-ed25519-bounded
 
 CFLAGS_DSF = $(CFLAGS) -DDETERM_DSF_ENABLED
 BUILD_DIR_DSF = $(BUILD_DIR)/dsf
@@ -56,6 +57,8 @@ ALL_CORE_DSF_OBJS = $(ALL_CORE_SRCS:%.c=$(BUILD_DIR_DSF)/%.o)
 TEST_DSF_K2_DUEL_BIN = $(BIN_DIR)/test-dsf-k2-duel
 
 .PHONY: all clean test check
+
+all: $(TEST_ED25519_BOUNDED_BIN)
 
 all: $(NODE_BIN) $(TEST_DUEL_BIN) $(TEST_DSF_K2_DUEL_BIN) $(TEST_NET_RPC_BIN) $(TEST_BINARY_CODEC_BIN) $(TEST_PEER_MESH_BIN) $(TEST_BLOCK_STORE_BIN) $(TEST_DDA_BIN) $(TEST_QPC_BIN) $(TEST_HTTP_RPC_BIN) $(TEST_LEDGER_DSSO_BIN) $(TEST_FUZZ_LEDGER_BIN) $(TEST_K2_DUEL_FALLBACK_BIN) $(TEST_OPAQUE_DSSO_BIN) $(TEST_TRIPLE_ENTRY_LEDGER_BIN) $(TEST_FUZZER_PARSER_BIN) $(TEST_SHARD_ROUTING_BIN) $(TEST_RPC_SHARD_ROUTING_BIN) $(TEST_DSF_K2_RECOVERY_BIN)
 
@@ -92,6 +95,14 @@ $(TEST_DDA_BIN): $(ALL_CORE_OBJS) $(BUILD_DIR)/tests/test_dda.o
 	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
 
 $(TEST_QPC_BIN): $(BUILD_DIR)/tests/test_qpc_clock_overflow.o
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
+
+$(BUILD_DIR)/tests/ed25519_bounded_impl.o: tests/test_ed25519_bounded.c src/crypto/ed25519/ed25519.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INCLUDES) -DED25519_BOUNDED_IMPL=1 -c $< -o $@
+
+$(TEST_ED25519_BOUNDED_BIN): $(BUILD_DIR)/tests/ed25519_bounded_impl.o $(BUILD_DIR)/tests/test_ed25519_bounded.o $(BUILD_DIR)/src/crypto/sha2/sha512.o $(BUILD_DIR)/src/crypto/secure_zero.o $(BUILD_DIR)/src/crypto/ct.o
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
 

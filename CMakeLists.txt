@@ -614,6 +614,18 @@ add_executable(test-dda
 target_compile_features(test-dda PRIVATE c_std_99)
 target_include_directories(test-dda PRIVATE include src tests)
 
+# Compile the real Ed25519 source with allocator interception confined to its
+# test object. Production consumers continue to link the ordinary crypto library.
+add_library(ed25519-bounded-test-object OBJECT tests/test_ed25519_bounded.c)
+target_compile_features(ed25519-bounded-test-object PRIVATE c_std_99)
+target_compile_definitions(ed25519-bounded-test-object PRIVATE ED25519_BOUNDED_IMPL=1)
+target_include_directories(ed25519-bounded-test-object PRIVATE include)
+add_executable(test-ed25519-bounded tests/test_ed25519_bounded.c
+  src/crypto/sha2/sha512.c src/crypto/secure_zero.c src/crypto/ct.c
+  $<TARGET_OBJECTS:ed25519-bounded-test-object>)
+target_compile_features(test-ed25519-bounded PRIVATE c_std_99)
+target_include_directories(test-ed25519-bounded PRIVATE include)
+
 
 
 # ── test-opaque-dsso: Identity Proof (OPRF Handshake) ─────────────────────────

@@ -410,9 +410,11 @@ one-chain increment from [ADR-005 §3.5](../decisions/ADR-005-Temporal-Sharding.
 This is a test model separate from `determ-node` and the C++ consensus engine.
 Its fixed caller-owned arenas admit at most eight candidate records, four
 transactions per candidate and four blocks in the selected history after one
-common anchor. The model adds no dynamic allocation; the existing signature
-primitive's allocation behavior is unchanged. This is not a zero-heap claim for
-the complete call path. No live production routing is involved.
+common anchor. The model adds no dynamic allocation. Its 88-byte signature inputs
+fit the shared primitive's bounded automatic-buffer path; the allocation contract
+and dedicated gate are documented in [K2_VDF_Soundness §12](K2_VDF_Soundness.md#12-bounded-ed25519-storage-contract).
+Larger signature inputs retain a heap fallback; no whole-node allocation claim follows.
+No live production routing is involved.
 
 **Admission and selection.** Immutable configuration fixtures supply one authorized
 pair per parent/height/round and joint-receipt facts. These are

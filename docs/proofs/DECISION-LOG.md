@@ -6211,3 +6211,30 @@ Execution is Darwin arm64; no Linux/Windows runtime or C++ FAST result is claime
 Independent adversarial review of the final source, fixtures, mutations, proof
 scope and decision record found no actionable finding. This closes the stated
 message-hash/block-ranking ambiguity without asserting production sharding readiness.
+
+## 2026-09-22 — Bounded Ed25519 storage prerequisite
+
+**Implemented boundary.** The shared Ed25519 signer/verifier now use a fixed
+512-byte automatic buffer for messages up to 448 bytes; larger messages retain
+the existing allocation fallback. The length-overflow check, hash inputs and
+signature-verification predicates are unchanged. Signing still wipes the used
+buffer span; only heap storage is freed. This makes the standalone ledger/model's
+88-byte and canonical anonymous TRANSFER's 195-byte preimages fit without heap
+allocation, without claiming that every node feature or generic message does so.
+The public API comment also corrects an older false signature-uniqueness claim:
+rejecting S+L does not force a signer to use a deterministic nonce.
+
+**Proof and independent review.** `64 + message_length <= 512` bounds the longest
+hash input; both signing hash inputs remain fully initialized and byte-identical.
+The design and final diff received independent adversarial review. The gate
+intercepts allocator calls in the actual primitive translation unit, pins published
+RFC signatures and independent OpenSSL boundary signatures, tests denied allocation,
+fallback success/failure, output neutrality, scalar/key rejection and overflow.
+The pre-change source built and failed the new bounded-allocation assertion.
+
+**Verification.** The focused C99 target passes. All nine new allocator/boundary/
+cleansing mutants reject after successful fresh builds in a crypto-only source
+snapshot. The ordinary `ci_local.sh --jobs 4` freshly builds shared C++ consumers
+and passes 333 FAST wrappers, zero platform skips, and all 16 documentation guards
+on Darwin arm64. No Linux/Windows runtime result is claimed. The crypto prerequisite
+is kept separate from the subsequent signed-pending-inbox increment.
