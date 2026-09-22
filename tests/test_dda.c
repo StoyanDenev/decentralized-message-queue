@@ -1,221 +1,192 @@
-/*
- * SPDX-License-Identifier: Apache-2.0
- * Copyright 2026 Determ Contributors
- *
- * Test Suite: Dynamic Difficulty Adjustment (DDA) & ASIC Resistance
+/* SPDX-License-Identifier: Apache-2.0
+ * Tests the isolated timestamp arithmetic helper, not production consensus,
+ * timestamp authenticity, VDF security, or resistance to faster hardware.
  */
-
 #include <determ/consensus/dda.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define TEST_ASSERT(cond) do { \
+#define CHECK(cond) do { \
     if (!(cond)) { \
-        fprintf(stderr, "ASSERTION FAILED: %s (%s:%d)\n", #cond, __FILE__, __LINE__); \
+        fprintf(stderr, "FAIL: %s at line %d\n", #cond, __LINE__); \
         exit(1); \
     } \
 } while (0)
 
-#define TEST_PASS(name) printf("  [PASS] %s\n", name)
+static void append_expected(dda_tracker_t *tracker, uint64_t timestamp) {
+    CHECK(dda_commit_block(tracker, timestamp, dda_get_next_iterations(tracker)));
+}
 
-/*
- * 1. Test Sliding Window and Moving Average Ring Buffer
- */
-static void test_sliding_window_average(void) {
+static void reject_unchanged(dda_tracker_t *tracker, uint64_t timestamp, uint64_t work) {
+    dda_tracker_t before;
+    memcpy(&before, tracker, sizeof(before));
+    CHECK(!dda_commit_block(tracker, timestamp, work));
+    CHECK(memcmp(tracker, &before, sizeof(*tracker)) == 0);
+}
+
+static void test_timestamp_window(void) {
     dda_tracker_t tracker;
+    size_t i;
     dda_init(&tracker, 50000);
+    CHECK(tracker.count == 0);
+    CHECK(calculate_average_vdf_time(&tracker) == TARGET_VDF_MS);
 
-    /* Empty tracker defaults to TARGET_VDF_MS */
-    TEST_ASSERT(calculate_average_vdf_time(&tracker) == TARGET_VDF_MS);
+    /* Zero is a valid first timestamp, but contributes no interval. */
+    CHECK(dda_commit_block(&tracker, 0, 50000));
+    CHECK(tracker.count == 1);
+    CHECK(calculate_average_vdf_time(&tracker) == TARGET_VDF_MS);
+    CHECK(dda_get_next_iterations(&tracker) == 50000);
 
-    /* Record 4 samples: 4000, 4200, 4400, 4600 -> sum=17200 / 4 = 4300 */
-    dda_record_vdf_time(&tracker, 4000);
-    dda_record_vdf_time(&tracker, 4200);
-    dda_record_vdf_time(&tracker, 4400);
-    dda_record_vdf_time(&tracker, 4600);
-    TEST_ASSERT(tracker.count == 4);
-    TEST_ASSERT(calculate_average_vdf_time(&tracker) == 4300);
-
-    /* Fill remaining 6 slots with 5000 -> 17200 + 30000 = 47200 / 10 = 4720 */
-    for (int i = 0; i < 6; i++) {
-        dda_record_vdf_time(&tracker, 5000);
+    /* Four intervals: 2000, 2200, 2400, 2600; average 2300. */
+    append_expected(&tracker, 2000);
+    append_expected(&tracker, 4200);
+    append_expected(&tracker, 6600);
+    append_expected(&tracker, 9200);
+    CHECK(tracker.count == 5);
+    CHECK(calculate_average_vdf_time(&tracker) == 2300);
+    for (i = 1; i <= 6; ++i) {
+        append_expected(&tracker, 9200 + 3000 * i);
     }
-    TEST_ASSERT(tracker.count == 10);
-    TEST_ASSERT(calculate_average_vdf_time(&tracker) == 4720);
+    CHECK(tracker.count == DDA_WINDOW_SIZE + 1);
+    CHECK(calculate_average_vdf_time(&tracker) == 2720);
 
-    /* Test ring buffer wraparound: overwrite first slot (4000) with 6000 */
-    dda_record_vdf_time(&tracker, 6000);
-    TEST_ASSERT(tracker.count == 10);
-    /* 47200 - 4000 + 6000 = 49200 / 10 = 4920 */
-    TEST_ASSERT(calculate_average_vdf_time(&tracker) == 4920);
+    /* Eleven timestamps represent ten intervals; discard the 2000ms
+     * interval and append 4000ms, yielding 29200/10 = 2920. */
+    append_expected(&tracker, 31200);
+    CHECK(tracker.count == DDA_WINDOW_SIZE + 1);
+    CHECK(calculate_average_vdf_time(&tracker) == 2920);
 
-    TEST_PASS("test_sliding_window_average");
+    /* Repeated wraparound must not mistake ten timestamps for ten intervals. */
+    dda_init(&tracker, 50000);
+    for (i = 0; i < 50; ++i) {
+        CHECK(dda_commit_block(&tracker, 3000 * i, 50000));
+        CHECK(calculate_average_vdf_time(&tracker) == TARGET_VDF_MS);
+        CHECK(dda_get_next_iterations(&tracker) == 50000);
+    }
 }
 
-/*
- * 2. Test ASIC Resistance: Incremental Scaling on 3000ms Blocks
- * Verifies that when simulated block times drop to 3000ms (below 5000ms target),
- * the DDA algorithm incrementally ratchets up vdf_iterations by exactly 5% per block.
- */
-static void test_asic_resistance_incremental_scaling(void) {
+static void test_atomic_admission(void) {
     dda_tracker_t tracker;
-    const uint64_t initial_iters = 100000ULL;
-    dda_init(&tracker, initial_iters);
+    dda_init(&tracker, 100000);
+    reject_unchanged(&tracker, 0, 0);
+    reject_unchanged(&tracker, 0, 100001);
+    CHECK(dda_commit_block(&tracker, 1000, 100000));
+    CHECK(dda_commit_block(&tracker, 2500, 100000));
+    CHECK(calculate_average_vdf_time(&tracker) == 1500);
+    CHECK(dda_get_next_iterations(&tracker) == 150000);
+    CHECK(dda_verify_block_iterations(&tracker, 150000));
+    CHECK(!dda_verify_block_iterations(&tracker, 100000));
+    reject_unchanged(&tracker, 2500, 150000);
+    reject_unchanged(&tracker, 2499, 150000);
+    reject_unchanged(&tracker, 4000, 100000);
+    reject_unchanged(&tracker, 4000, 150001);
+    reject_unchanged(&tracker, 4000, UINT64_MAX);
 
-    printf("  [DDA Simulation] Initial baseline: %llu iterations (Target: %u ms)\n",
-           (unsigned long long)tracker.current_iterations, TARGET_VDF_MS);
-
-    /* Seed the tracker with a baseline 3000ms sample to indicate incoming fast blocks */
-    dda_record_vdf_time(&tracker, 3000);
-
-    /*
-     * Simulate an adversary deploying ASICs: block execution times collapse to 3000ms.
-     * With a 3000ms time, the disparity is 2000ms (a 66.7% shortfall).
-     * The dampening rule must strictly clamp the per-block increase to 5.0%.
-     */
-    uint64_t prev_iters = initial_iters;
-    for (int block = 1; block <= 10; block++) {
-        /* Next block expected iterations */
-        uint64_t next_iters = dda_get_next_iterations(&tracker);
-
-        /* Verify 5% maximum dampening clamp */
-        uint64_t max_allowed_step = (prev_iters * DDA_MAX_ADJUST_PERCENT) / 100ULL;
-        uint64_t actual_increase = next_iters - prev_iters;
-
-        TEST_ASSERT(next_iters > prev_iters);
-        TEST_ASSERT(actual_increase <= max_allowed_step);
-        /* Since 66.7% > 5%, it must hit exactly the 5% ceiling */
-        TEST_ASSERT(actual_increase == max_allowed_step);
-
-        /* Commit the block with simulated 3000ms execution time */
-        dda_commit_block(&tracker, 3000);
-
-        printf("  [DDA Simulation] Block #%d: time=3000ms -> iterations scaled %llu -> %llu (+%.2f%%)\n",
-               block, (unsigned long long)prev_iters, (unsigned long long)tracker.current_iterations,
-               ((double)actual_increase / (double)prev_iters) * 100.0);
-
-        prev_iters = tracker.current_iterations;
-    }
-
-    /*
-     * After 10 blocks of 5% compounded growth:
-     * 100,000 * (1.05)^10 ≈ 162,889 iterations
-     */
-    TEST_ASSERT(tracker.current_iterations > 160000ULL);
-    TEST_ASSERT(tracker.current_iterations < 165000ULL);
-
-    /* Now simulate reaching target equilibrium: block time returns to 5000ms */
-    for (int i = 0; i < 10; i++) {
-        dda_record_vdf_time(&tracker, 5000);
-    }
-    TEST_ASSERT(calculate_average_vdf_time(&tracker) == 5000);
-    uint64_t stabilized_iters = dda_get_next_iterations(&tracker);
-    /* At exact 5000ms target, iterations remain stable with 0% delta */
-    TEST_ASSERT(stabilized_iters == tracker.current_iterations);
-
-    TEST_PASS("test_asic_resistance_incremental_scaling");
+    /* The incoming timestamp must not influence its own expected work. */
+    CHECK(dda_commit_block(&tracker, 1000000, 150000));
+    CHECK(tracker.current_iterations == 150000);
+    CHECK(calculate_average_vdf_time(&tracker) == 499500);
+    CHECK(dda_get_next_iterations(&tracker) == 142500);
+    reject_unchanged(&tracker, 1000000, 142500);
+    CHECK(!dda_commit_block(NULL, 0, 100000));
+    CHECK(!dda_verify_block_iterations(NULL, 100000));
 }
 
-/*
- * 3. Test Dampening Rule Under Extreme Attacks & Sanity Clamps
- */
-static void test_dampening_rules_bounds(void) {
-    const uint64_t iters = 200000ULL;
+static void test_large_timestamps_and_replay(void) {
+    dda_tracker_t tracker, replay;
+    uint64_t timestamp;
+    dda_init(&tracker, 100000);
+    CHECK(dda_commit_block(&tracker, 0, 100000));
+    CHECK(dda_commit_block(&tracker, UINT64_MAX, 100000));
+    CHECK(calculate_average_vdf_time(&tracker) == UINT32_MAX);
+    CHECK(dda_get_next_iterations(&tracker) == 95000);
+    reject_unchanged(&tracker, UINT64_MAX, 95000);
 
-    /* Extreme ASIC speedup: 1ms block time */
-    uint64_t next_high = calibrate_vdf_iterations(iters, 1);
-    uint64_t max_increase = (iters * DDA_MAX_ADJUST_PERCENT) / 100ULL;
-    TEST_ASSERT(next_high == iters + max_increase);
+    dda_init(&tracker, 100000);
+    CHECK(dda_commit_block(&tracker, UINT64_MAX - 3000, 100000));
+    CHECK(dda_commit_block(&tracker, UINT64_MAX, 100000));
+    CHECK(calculate_average_vdf_time(&tracker) == TARGET_VDF_MS);
 
-    /* Extreme network slowdown: 30,000ms block time */
-    uint64_t next_low = calibrate_vdf_iterations(iters, 30000);
-    uint64_t max_decrease = (iters * DDA_MAX_ADJUST_PERCENT) / 100ULL;
-    TEST_ASSERT(next_low == iters - max_decrease);
+    dda_init(&tracker, 100000);
+    CHECK(dda_commit_block(&tracker, 0, 100000));
+    CHECK(dda_commit_block(&tracker, UINT32_MAX, 100000));
+    CHECK(calculate_average_vdf_time(&tracker) == UINT32_MAX);
 
-    /* Architectural minimum clamping */
-    uint64_t at_min = calibrate_vdf_iterations(DDA_MIN_ITERATIONS, 30000);
-    TEST_ASSERT(at_min >= DDA_MIN_ITERATIONS);
+    /* Values just beyond uint32_t must not wrap to a short/zero interval and
+     * reverse the direction of calibration. UINT64_MAX alone has low bits
+     * UINT32_MAX, so it cannot distinguish saturation from truncation. */
+    dda_init(&tracker, 100000);
+    CHECK(dda_commit_block(&tracker, 0, 100000));
+    CHECK(dda_commit_block(&tracker, (uint64_t)UINT32_MAX + 1, 100000));
+    CHECK(calculate_average_vdf_time(&tracker) == UINT32_MAX);
+    CHECK(dda_get_next_iterations(&tracker) == 95000);
+    dda_init(&tracker, 100000);
+    CHECK(dda_commit_block(&tracker, 0, 100000));
+    CHECK(dda_commit_block(&tracker, (uint64_t)UINT32_MAX + 43, 100000));
+    CHECK(calculate_average_vdf_time(&tracker) == UINT32_MAX);
+    CHECK(dda_get_next_iterations(&tracker) == 95000);
 
-    /* Architectural maximum clamping */
-    uint64_t at_max = calibrate_vdf_iterations(DDA_MAX_ITERATIONS, 100);
-    TEST_ASSERT(at_max <= DDA_MAX_ITERATIONS);
-
-    TEST_PASS("test_dampening_rules_bounds");
+    /* Same caller-supplied history produces identical state; local elapsed
+     * times are absent from the API. This is not a branch-validation test. */
+    dda_init(&tracker, 100000);
+    dda_init(&replay, 100000);
+    for (timestamp = 0; timestamp < 100000; timestamp += 3301) {
+        uint64_t expected = dda_get_next_iterations(&tracker);
+        CHECK(dda_commit_block(&tracker, timestamp, expected));
+        CHECK(dda_commit_block(&replay, timestamp, expected));
+        CHECK(memcmp(&tracker, &replay, sizeof(tracker)) == 0);
+    }
 }
 
-/*
- * 4. Test Big-Endian Consensus Header Serialization & Deserialization
- */
-static void test_header_serialization(void) {
-    consensus_block_header_t hdr;
-    hdr.block_index = 42ULL;
-    hdr.timestamp_ms = 1774000000000ULL;
-    hdr.vdf_iterations = 105000ULL;
-    memset(hdr.prev_hash, 0xAA, 32);
-    memset(hdr.merkle_root, 0xBB, 32);
-    memset(hdr.vdf_output, 0xCC, 32);
+static void test_calibration_limits(void) {
+    dda_tracker_t tracker;
+    CHECK(calibrate_vdf_iterations(200000, 1) == 300000);
+    CHECK(calibrate_vdf_iterations(200000, 30000) == 190000);
+    CHECK(calibrate_vdf_iterations(200000, 3000) == 200000);
+    CHECK(calibrate_vdf_iterations(200000, 3001) == 199934);
+    CHECK(calibrate_vdf_iterations(DDA_MIN_ITERATIONS, UINT32_MAX) == DDA_MIN_ITERATIONS);
+    CHECK(calibrate_vdf_iterations(DDA_MAX_ITERATIONS, 1) == DDA_MAX_ITERATIONS);
+    CHECK(calibrate_vdf_iterations(0, 3000) == DDA_MIN_ITERATIONS);
+    CHECK(calibrate_vdf_iterations(UINT64_MAX, 3000) == DDA_MAX_ITERATIONS);
+    dda_init(&tracker, 0);
+    CHECK(tracker.current_iterations == DDA_MIN_ITERATIONS);
+    dda_init(&tracker, UINT64_MAX);
+    CHECK(tracker.current_iterations == DDA_MAX_ITERATIONS);
+}
 
-    uint8_t wire_buf[256];
+static void test_header_codec(void) {
+    consensus_block_header_t header, decoded;
+    uint8_t bytes[CONSENSUS_BLOCK_HEADER_SIZE];
     size_t written = 0;
-    TEST_ASSERT(consensus_block_header_encode(wire_buf, sizeof(wire_buf), &hdr, &written) == 0);
-    TEST_ASSERT(written == CONSENSUS_BLOCK_HEADER_SIZE);
-
-    /* Verify Big-Endian wire encoding of vdf_iterations (offset 16) */
-    uint64_t be_iters = ((uint64_t)wire_buf[16] << 56) |
-                        ((uint64_t)wire_buf[17] << 48) |
-                        ((uint64_t)wire_buf[18] << 40) |
-                        ((uint64_t)wire_buf[19] << 32) |
-                        ((uint64_t)wire_buf[20] << 24) |
-                        ((uint64_t)wire_buf[21] << 16) |
-                        ((uint64_t)wire_buf[22] << 8)  |
-                        ((uint64_t)wire_buf[23]);
-    TEST_ASSERT(be_iters == 105000ULL);
-
-    /* Decode and compare */
-    consensus_block_header_t decoded;
-    TEST_ASSERT(consensus_block_header_decode(wire_buf, written, &decoded) == 0);
-    TEST_ASSERT(decoded.block_index == hdr.block_index);
-    TEST_ASSERT(decoded.timestamp_ms == hdr.timestamp_ms);
-    TEST_ASSERT(decoded.vdf_iterations == hdr.vdf_iterations);
-    TEST_ASSERT(memcmp(decoded.prev_hash, hdr.prev_hash, 32) == 0);
-    TEST_ASSERT(memcmp(decoded.merkle_root, hdr.merkle_root, 32) == 0);
-    TEST_ASSERT(memcmp(decoded.vdf_output, hdr.vdf_output, 32) == 0);
-
-    TEST_PASS("test_header_serialization");
-}
-
-/*
- * 5. Test Consensus Rejection of Manipulated Block Iterations
- */
-static void test_consensus_rejection(void) {
-    dda_tracker_t local_tracker;
-    dda_init(&local_tracker, 100000ULL);
-    dda_record_vdf_time(&local_tracker, 3000);
-
-    /* Node deterministically computes the only valid next iteration count */
-    uint64_t expected_iters = dda_get_next_iterations(&local_tracker);
-    TEST_ASSERT(expected_iters == 105000ULL);
-
-    /* Honest Aggregator proposes matching iterations -> ACCEPTED */
-    TEST_ASSERT(dda_verify_block_iterations(&local_tracker, expected_iters) == true);
-
-    /* Malicious Aggregator tries to understate difficulty (bypass DDA) -> REJECTED */
-    TEST_ASSERT(dda_verify_block_iterations(&local_tracker, 100000ULL) == false);
-
-    /* Malicious Aggregator tries to artificially inflate difficulty -> REJECTED */
-    TEST_ASSERT(dda_verify_block_iterations(&local_tracker, 110000ULL) == false);
-
-    TEST_PASS("test_consensus_rejection");
+    memset(&header, 0, sizeof(header));
+    header.block_index = 42;
+    header.timestamp_ms = 1774000000000ULL;
+    header.vdf_iterations = 105000;
+    memset(header.prev_hash, 0xAA, 32);
+    memset(header.merkle_root, 0xBB, 32);
+    memset(header.vdf_output, 0xCC, 32);
+    CHECK(consensus_block_header_encode(bytes, sizeof(bytes), &header, &written) == 0);
+    CHECK(written == CONSENSUS_BLOCK_HEADER_SIZE);
+    CHECK(bytes[16] == 0 && bytes[17] == 0 && bytes[18] == 0 && bytes[19] == 0);
+    CHECK(bytes[20] == 0 && bytes[21] == 1 && bytes[22] == 0x9A && bytes[23] == 0x28);
+    CHECK(consensus_block_header_decode(bytes, written, &decoded) == 0);
+    CHECK(decoded.block_index == header.block_index);
+    CHECK(decoded.timestamp_ms == header.timestamp_ms);
+    CHECK(decoded.vdf_iterations == header.vdf_iterations);
+    CHECK(memcmp(decoded.prev_hash, header.prev_hash, 32) == 0);
+    CHECK(memcmp(decoded.merkle_root, header.merkle_root, 32) == 0);
+    CHECK(memcmp(decoded.vdf_output, header.vdf_output, 32) == 0);
+    CHECK(consensus_block_header_encode(bytes, sizeof(bytes) - 1, &header, &written) != 0);
+    CHECK(consensus_block_header_decode(bytes, sizeof(bytes) - 1, &decoded) != 0);
 }
 
 int main(void) {
-    printf("=== Starting C99 Dynamic Difficulty Adjustment (DDA) Test Suite ===\n");
-    test_sliding_window_average();
-    test_asic_resistance_incremental_scaling();
-    test_dampening_rules_bounds();
-    test_header_serialization();
-    test_consensus_rejection();
-    printf("=== All C99 DDA Tests Passed Successfully ===\n");
+    test_timestamp_window();
+    test_atomic_admission();
+    test_large_timestamps_and_replay();
+    test_calibration_limits();
+    test_header_codec();
+    puts("PASS: isolated deterministic timestamp DDA and header codec");
     return 0;
 }

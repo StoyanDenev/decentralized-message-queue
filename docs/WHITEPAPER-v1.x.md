@@ -1,16 +1,31 @@
-# Determ: A Fork-Free L1 Payment and Identity Chain with Mutual-Distrust Safety
+# Determ: C++ Protocol Reference and C99 Research Status
 
 **Version 1.x specification, 2026**
 
 ---
 
+> **Implementation scope (2026-09-22):** This paper's committee, ledger, beacon and
+> wire descriptions refer to the C++ `determ` implementation. The C99
+> `determ-node` experiment is separate and does not implement this protocol.
+> [ADR-004](decisions/ADR-004-Fault-Model.md) records a PoSW direction, not a
+> completed consensus-security proof. The [C99 contract and refutations](proofs/K2_VDF_Soundness.md)
+> supersede the previous K=2 finality, zero-bias and unconditional-liveness claims.
+> Temporal sharding remains [proposed](decisions/ADR-005-Temporal-Sharding.md).
+
+The C99 foundation includes a read-only modulus-routing query, an opt-in bounded
+inbox for signed intra-shard transfers, and a bounded
+[recovery model](proofs/DSF-SPEC.md#104-bounded-c99-fork-recovery-model). The query uses local
+configuration; the inbox checks signatures/context/routing but not balances or
+nonce readiness. The model assumes a finite candidate set and fixed eligibility and
+receipt facts. These increments do not establish production shard execution or settlement.
+
 ## Abstract
 
-We present Determ, a Layer-1 blockchain protocol designed around three structural properties: fork freedom (at most one block finalizes per height), censorship resistance (any single honest validator suffices to defeat censorship), and zero-trust safety (no protocol component trusts any participant). Safety is achieved through the $K=2$ Fast-Block VDF Duel architecture — consensus roles operate as exactly one Designated Aggregator and one Contributor. Liveness is guaranteed via a 1-of-2 straggler fallback, completely eliminating liveness halting.
+Determ explores a payment and identity ledger using K-of-K committee co-creation. This paper records the existing C++ architecture; its claims depend on the cited fault assumptions and the open security ledger. The separate C99 experiment checks two-party payload commitments and bounded local deadlines, but provides no production chain acceptance or finality.
 
-The protocol uses only two cryptographic primitives — Ed25519 signatures and SHA-256 hashes — and avoids proof-of-work, multi-round voting, and trusted leaders. Randomness is generated via a SHA-256 commit-reveal protocol that defeats selective-abort attacks by information-theoretic construction rather than economic disincentive. Determ scales horizontally via a beacon + shard architecture with cross-shard receipts; in EXTENDED mode, shards group validators by region for sub-second in-shard finality on the public internet.
+The C++ consensus path uses individual signatures and hash commitments. Its existing beacon/shard architecture and receipt paths remain in the source. These are separate from the proposed C99 PoSW architecture; neither hash commitments nor two-party evaluation proves unbiased completed-round randomness.
 
-This v1.x specification covers consensus, sharding, regional pinning with under-quorum merge, governance via N-of-N keyholder PARAM_CHANGE, economic primitives (block subsidy, finite-pool option, lottery distribution, negative entry fee), and a separate wallet binary implementing distributed seed recovery via Shamir's Secret Sharing layered with AEAD envelopes under a passphrase-derived key schedule. Every safety-critical mechanism has a corresponding formal-verification proof under standard cryptographic assumptions (Ed25519 EUF-CMA, SHA-256 collision and preimage resistance, with a random-oracle treatment of the commit-reveal binding); a parallel TLA+ specification covers the state-machine layer.
+This reference covers committee consensus, existing sharding, governance, ledger operations and wallet recovery. Individual proofs and models have explicit scope; the security ledger and decision log record open or withdrawn claims. There is no blanket proof of every safety-critical behavior.
 
 ---
 
@@ -20,19 +35,19 @@ This v1.x specification covers consensus, sharding, regional pinning with under-
 
 Existing blockchain protocols make different tradeoffs across the safety-liveness axis. Nakamoto consensus achieves liveness at the cost of probabilistic, eventual finality and a deep fork tail. Traditional committee protocols achieve finality conditional on supermajorities (`f < N/3`), trading away unconditional safety. Pipelined and DAG-based designs (Solana, Aleph) sacrifice further on the safety axis for throughput.
 
-Determ targets a superior point in this design space: the **$K=2$ Fast-Block VDF Duel**. The protocol assigns consensus roles to exactly one Designated Aggregator and one Contributor. Network liveness is guaranteed via a 1-of-2 straggler fallback, completely eliminating liveness halting. A single honest participant suffices to prevent forks, and censorship resistance is enforced by unioning proposed transactions across the duel pair.
+The C++ committee design and the C99 PoSW experiment have different fault models. A successful two-party exchange alone proves neither unique finality nor progress against a withholding participant. PoSW requires a defined producer population, validated work, an adversarial resource bound and a reorganization rule before chain-security claims can be made.
 
 This positioning suits applications where safety failures are intolerable (payments, identity, settlement) and where transient stalls under adversarial load are acceptable. It is explicitly unsuitable for applications requiring arbitrary computation (no contract VM), high-throughput at any cost (no optimistic concurrency), or eventual-consistency semantics (no fork tail).
 
 ### 1.2 Contributions
 
-- **$K=2$ Fast-Block VDF Duel**: consensus roles are defined as exactly one Designated Aggregator and one Contributor. Network liveness is guaranteed via a 1-of-2 straggler fallback, completely eliminating liveness halting.
-- **SHA-256 commit-reveal randomness**: defeats selective-abort by information-theoretic construction. Committee members commit to their secrets in phase 1 before observing any block content; reveal in phase 2 produces a uniform random output bound to the committee but unpredictable at commit time.
+- **C99 experiment:** a strict two-party commit/reveal driver with explicit failure and caller-controlled retry; no 1-of-2 fallback or network-liveness theorem.
+- **SHA-256 commitments:** receivers check openings against prior commitments. The last-revealer selective-abort limitation remains open; see §3.2.
 - **Union transaction root**: censorship requires exhaustive collusion of every validator that ever rotates onto a committee — structurally impossible without full registry capture.
 - **Regional sharding (EXTENDED mode)** with under-quorum merge: shards group validators by region tag for intra-region RTT block times; when a regional pool drops below safety threshold, the protocol transparently merges committee operations with the modular-next shard.
 - **Genesis-mode governance**: a single bit at chain creation selects "uncontrolled" (consensus constants immutable forever) or "governed" (N-of-N keyholder multisig may mutate a whitelisted subset of parameters mid-chain). The whitelist is enforced by validator; off-list parameters require a new chain identity.
 - **Distributed wallet recovery primitive**: T-of-N Shamir secret sharing layered with AES-256-GCM AEAD envelopes under a PBKDF2-derived passphrase key schedule, providing threshold key recovery without weakening the chain's identity model.
-- **Full formal-verification coverage**: every safety-critical mechanism (consensus, sharding, governance, recovery) has a corresponding analytic proof under standard cryptographic assumptions plus a machine-checkable TLA+ specification of its state-machine layer.
+- **Verification record:** analytic arguments and TLA+ models cover named properties under explicit assumptions. Coverage gaps, withdrawn claims and open findings are recorded in the security ledger.
 
 ### 1.3 Document organization
 
@@ -61,13 +76,14 @@ We consider three composable adversary capabilities:
 
 **(C3) Cryptographic adversary.** A polynomial-time attacker with budget `Q` may attempt forgeries against honest signatures or preimage / collision attacks against SHA-256. Per standard cryptographic assumptions: Ed25519 EUF-CMA forgery probability is `≤ 2⁻¹²⁸ + ε_Ed25519` per attempt; SHA-256 collision finding is `≤ 2⁻¹²⁸` per attempt; SHA-256 preimage is `≤ 2⁻²⁵⁶`.
 
-### 2.3 Safety and Liveness in the $K=2$ VDF Duel
+### 2.3 C99 experiment: safety and liveness limits
 
-In the $K=2$ Fast-Block VDF Duel:
-- **Consensus roles:** Consensus operates with exactly one Designated Aggregator and one Contributor.
-- **Liveness guarantee:** Network liveness is guaranteed via a 1-of-2 straggler fallback, completely eliminating liveness halting. If the Contributor fails to publish or verify within the deadline, the Aggregator completes the block under the 1-of-2 fallback with the VDF proof.
-- **Unconditional safety:** Fork freedom is anchored to the Time-Lock Inequality Theorem ($T_{vdf} > W_{reveal} + \Delta$) via Enforced Blindness.
-- **Censorship resistance:** Transactions are included via unioning the Aggregator and Contributor pools. Censorship requires adversarial control of both participants.
+The local C99 state machine requires both commitments and matching reveals before
+evaluation. One participant can withhold and make every attempt fail. There is no
+authenticated election/replacement mechanism or production chain validator.
+Colluding parties know both input payloads in advance and may precompute. A
+sequential evaluator does not prevent competing branches, unavailable block data,
+or selective participation. See [K2_VDF_Soundness.md](proofs/K2_VDF_Soundness.md).
 
 ---
 
@@ -98,23 +114,24 @@ Each block is produced in two phases by a K-member committee selected determinis
 - `state_root` = the v2.1 Merkle commitment over the post-apply canonical state, populated by the finalizing node via a tentative-chain dry-run between body assembly and broadcast (S-038 producer-side wiring; see PROTOCOL.md §4.1.1 + §5.1). Peer apply re-derives and rejects on divergence, enforcing the apply-layer closure of S-030 D1/D2.
 - The block is finalized with `consensus_mode = MUTUAL_DISTRUST`.
 
-### 3.2 Selective-abort defense
+### 3.2 Selective-abort limitation
 
-The classical attack against commit-reveal randomness is selective abort: a committee member, after seeing other reveals, refuses to reveal its own if the resulting block would be unfavorable. Determ's commit-reveal design defeats this structurally:
+A last revealer already knows its own secret. After receiving the other reveals,
+it can compute a deterministic output locally before deciding whether to publish.
+Hash preimage resistance does not hide that output from its own input holder.
+Consequently the former zero-bias argument in this section is withdrawn. A retry
+policy must analyze selective abort and grinding explicitly; fixed commitments
+alone do not establish an unbiased distribution of *completed* attempts.
 
-- `dh_input_i = SHA-256(secret_i ‖ pubkey_i)` is published before any other phase-2 message.
-- `delay_seed` is computed entirely from phase-1 data — it is committed before any reveal.
-- `delay_output` (and consequently `cumulative_rand`) is determined by `delay_seed ‖ ordered(secrets)`.
+### 3.3 Separate C99 two-participant experiment
 
-An adversary observing `K - 1` reveals before deciding its own action gains nothing: by SHA-256's preimage resistance, the adversary cannot predict `delay_output` without revealing its own `secret_i`. Refusing to reveal aborts the round; revealing publishes a `secret_i` that produces a `delay_output` whose distribution is uniform from the adversary's perspective (random oracle on the unrevealed secret in the random-oracle model, or `≤ 2⁻²⁵⁶` distinguishing advantage in the standard model).
-
-Concrete-security bound: `2⁻²⁵⁶` per selective-abort attempt. See `docs/proofs/SelectiveAbort.md` (FA3) for the full proof in both the random-oracle and standard models.
-
-### 3.3 $K=2$ Fast-Block VDF Duel and 1-of-2 Straggler Fallback
-
-The consensus protocol defines roles as exactly one Designated Aggregator and one Contributor. 
-
-Under normal execution, both the Aggregator and Contributor produce Phase-1 contributions and Phase-2 reveals. If the Contributor is unresponsive or partitioned, network liveness is guaranteed via a 1-of-2 straggler fallback, completely eliminating liveness halting. The Designated Aggregator invokes the fallback with valid VDF proofs over its proposed payload, preventing stalls while preserving fork freedom and Enforced Blindness.
+The C99 driver opens a local attempt, requires both hash commitments, checks both
+payload openings, and evaluates their canonical length-prefixed concatenation.
+Its commit deadline is T+1000 ms and total commit/reveal deadline T+2000 ms. A
+missing commitment or reveal fails the attempt; it never produces a one-party
+result. An explicit caller retry resets attempt state, without claiming that it
+elects a replacement participant or advances the ledger. These are local API
+contracts, not C++ block-acceptance rules or a PoSW security proof.
 
 ### 3.4 Equivocation slashing
 
@@ -178,7 +195,7 @@ Beacon block times run at the wide-area RTT envelope (~1.5s on the global timing
 Account routing uses a salted SHA-256 over the address:
 
 ```
-shard_id(addr) = first_8_bytes_be(SHA-256(shard_address_salt ‖ addr)) mod S
+shard_id(addr) = first_8_bytes_be(SHA-256(shard_address_salt ‖ "shard-route" ‖ addr)) mod S
 ```
 
 The `shard_address_salt` is 32 random bytes pinned at genesis. The assignment is deterministic and stable for the chain's lifetime. Users who care about latency can grind addresses for a target shard; this is application-level concern, not protocol-level.
@@ -408,7 +425,7 @@ The v1.x release ships exactly one recovery scheme — the passphrase scheme abo
 
 ## 10. Formal verification
 
-Determ's safety-critical mechanisms have full coverage in two parallel tracks: analytic proofs against standard cryptographic assumptions, and machine-checkable state-machine specifications in TLA+.
+The proof set and TLA+ models analyze specified properties under individual assumptions. Coverage is incomplete; withdrawn claims and the security ledger take precedence over this index.
 
 ### 10.1 FA-track (analytic proofs)
 
@@ -417,7 +434,7 @@ Determ's safety-critical mechanisms have full coverage in two parallel tracks: a
 | F0 | `Preliminaries.md` | Notation, validity predicates V1–V15 | — |
 | FA1 | `Safety.md` | MD-mode K-of-K safety | `2⁻¹²⁸` per fork attempt |
 | FA2 | `Censorship.md` | Union-tx-root censorship resistance | `(f/N)^K` per epoch |
-| FA3 | `SelectiveAbort.md` | Commit-reveal hiding (ROM + std-model) | `2⁻²⁵⁶` per attempt |
+| FA3 | `SelectiveAbort.md` | Completed-round unbiasedness argument withdrawn; commitment binding only survives | No selective-abort bound established |
 | FA4 | `Liveness.md` | Bounded-round termination | Geometric in `p_honest` |
 | FA5 | `BFTSafety.md` | BFT-mode conditional safety | `f_h < |K_h|/3` + slashing recovery |
 | FA6 | `EquivocationSlashing.md` | No false-positive slashing | `2⁻¹²⁸` per fabrication |
@@ -452,9 +469,9 @@ Machine-checkable state-machine projections of the consensus, sharding, and rece
 
 ### 10.3 Concrete-security summary
 
-Under standard assumptions (Ed25519 EUF-CMA, SHA-256 collision and preimage resistance, random oracle where used), every FA-track property holds with cumulative failure probability `≤ Q · 2⁻¹²⁸` over polynomial adversary budget `Q`. For `Q = 2⁶⁰`: `≤ 2⁻⁶⁸` — strongly negligible.
+Cryptographic forgery bounds do not bound protocol failure caused by withholding, equivocation, unavailable data or an incomplete fault model. No single failure bound is asserted for all FA-track properties.
 
-Under post-quantum threat (Grover's algorithm reducing collision and signature-finding to square-root cost), bounds degrade to `Q · 2⁻⁶⁴`. The protocol remains operationally secure but a post-quantum signature migration (Dilithium, Falcon) is the recommended forward path.
+Post-quantum security requires analyzing the selected primitives and their composition separately; no post-quantum consensus guarantee follows from halving classical security exponents.
 
 ---
 
@@ -462,7 +479,7 @@ Under post-quantum threat (Grover's algorithm reducing collision and signature-f
 
 ### 11.1 Nakamoto consensus (Bitcoin)
 
-Probabilistic eventual finality via proof-of-work and longest-chain selection. Safety is asymptotic in confirmation depth; fork tails are routine. Determ inverts this: immediate unconditional finality per block, no fork tail, no proof-of-work. Trade: Determ's per-block latency is ~200ms–1.5s (committee-RTT bounded); Bitcoin's is ~10 minutes.
+Nakamoto-style designs use validated work and an explicit adversarial resource assumption to analyze probabilistic finality. The C99 PoSW direction still lacks those rules and bounds; no finality or latency comparison is established here.
 
 ### 11.2 Tendermint / Cosmos / Algorand
 
@@ -480,7 +497,7 @@ Pipeline-parallel PoS with proof-of-history. High throughput but documented inte
 
 Hybrid finality gadget (Casper FFG) layered over a fork-choice rule (LMD GHOST). Probabilistic safety with checkpoint finality every 32 blocks. Determ trades the smart-contract platform for stronger per-block safety; the two protocols target different use cases.
 
-The general pattern: existing protocols trade between liveness, finality latency, and economic security in standard combinations. Determ targets a less common point — unconditional safety in steady state with 1-of-2 straggler fallback — which suits payment + identity use cases but is less suitable for arbitrary computation.
+These designs make different safety, liveness and resource assumptions. No superiority claim for the C99 experiment follows from its fixed pair size; its consensus fault model is incomplete.
 
 ---
 
@@ -527,18 +544,18 @@ The v2 themes cover Theme 1 (Trust minimization), Theme 2 (Scale + concurrency),
 
 ### 12.3 Network partition behavior
 
-A partition that splits the committee blocks progress on both sides until it heals (with liveness guaranteed via the 1-of-2 straggler fallback). Appropriate for a financial ledger (CP, not AP). Under EXTENDED sharding, a region losing connectivity stalls cross-shard receipts; in-shard production continues.
+A partition can prevent a required committee exchange from completing. The C99 experiment fails an incomplete attempt; it cannot guarantee chain progress under a partition. C++ cross-shard progress separately depends on its topology and receipt-validation rules.
 
 ---
 
 ## 13. Conclusion
 
-Determ demonstrates that fork-free, immediately-final consensus is achievable at sub-second block times with only two well-known cryptographic primitives — Ed25519 and SHA-256 — without proof-of-work, multi-round voting, or a trusted leader. The two-phase Contrib + BlockSig protocol places randomness generation under a SHA-256-based commit-reveal binding, defeating selective abort by structural construction rather than economic disincentive. The union-of-committee transaction root makes inclusion a collaborative property: a single honest committee member suffices to defeat censorship.
-
-The protocol is intentionally minimal: two consensus message types per block, one signature scheme, one hash function, no exotic cryptography or external dependencies. This makes it auditable, implementable, and amenable to formal verification of its core safety property: no two valid blocks at the same height. The v1.x specification covers consensus, sharding (CURRENT + EXTENDED with regional pinning and under-quorum merge), governance (uncontrolled + governed modes with N-of-N keyholder PARAM_CHANGE), economic primitives (block subsidy, finite-pool option, lottery distribution, negative entry fee), and distributed wallet recovery via Shamir + AEAD under a passphrase key schedule.
-
-Every safety-critical mechanism has a corresponding formal-verification proof under standard cryptographic assumptions; a parallel TLA+ specification covers the state-machine layer. The reference implementation ships in ~17 KLOC of C++ across the chain daemon and wallet binary, with 167 shell-driven integration test suites in `tools/test_*.sh` covering every protocol feature (consensus, sharding, equivocation slashing, governance PARAM_CHANGE, A1 unitary balance, A9 atomic apply, S-008 mempool bounds, S-014 rate-limit on both RPC and gossip + a unit-level S-035 Option 1 seed for the `net::RateLimiter` shared token-bucket helper, S-018 field-name diagnostics + foundation-helper direct unit test for `token_require<T>` / `_hex` / `_array`, S-021 chain-file integrity, S-022 per-message-type caps, S-026 TCP keepalive, S-028 anon-address case normalization, v2.18 / v2.19 DApp substrate, S-037 DApp-active snapshot bootstrap + S-018 defense-in-depth wrong-type rejection lock-in for restore_from_snapshot collections, v2.2 light-client `verify-state-proof` + `headers` RPC + gossip-layer HEADERS_REQUEST/RESPONSE wire messages + `verify-headers` + `verify-block-sigs` + standalone `verify-genesis` operator-validation CLI + `--format-output` flag coverage on info CLIs / `snapshot inspect` / `show-account` / `show-tx` + cryptographic-primitive unit tests for v2.1 Merkle + committee-selection (S-020 hybrid + epoch_committee_seed) + shard-routing + Ed25519 sign/verify (foundation for every signature claim) + SHA-256 wrapper (NIST FIPS 180-4 vectors + Preliminaries §1.3 big-endian uint64_t encoding) + anon-address helpers (S-028 case-insensitive parsing) + genesis-message hash-mix contract + Chain::compute_state_root() commitment algebra (S-033 / v2.1 / S-037 / S-038) + V8 randomness primitives (compute_delay_seed / compute_block_rand / proposer_idx / required_block_sigs / count_round1_aborts — the FA1 / FA5 / FA8 foundation) + Transaction signing_bytes / compute_hash / Ed25519 sign-verify integration + MergeEvent (R4 wire format) encode/decode + ContribMsg / BlockSigMsg / AbortClaimMsg consensus message round-trip + commitment hashes (make_contrib_commitment, make_abort_claim_message) + compute_tx_root FA2 union semantics + compute_genesis_hash chain identity (with S-039 diagnostic-UX gap registered + lock-in test) + AES-256-GCM + PBKDF2 wallet envelope (A2 Phase 2 share-encryption + S-004 option 2 keyfile-encryption) AEAD safety properties + Chain::resolve_fork (S-029 fork-choice: heaviest sigs / fewer aborts / smallest hash priority) + Shamir's Secret Sharing over GF(2^8) T-of-N reconstruction + threshold-safety property (A2 Phase 1 wallet recovery) + V8 random-state foundation layer (compute_dh_output_m M-share fold + compute_abort_hash S5 anti-cartel defense + update_random_state per-block chain) + types.hpp foundation hex/encoding helpers (to_hex / from_hex / from_hex_arr<N> + ChainRole / ShardingMode to_string) + Chain read-API safety-critical defaults (balance(unknown)==0, next_nonce(unknown)==0, shard_count==1 single-shard degenerate case) + Block::serialize/deserialize full field-set round-trip with compute_hash invariance + Config::serialize/deserialize operator-config save+reload preservation across 32 tunable fields + Transaction binary-codec round-trip (the S-002 critical fixed-slot path for amount/fee/nonce that pre-S-002-closure was dropping during binary transit) + S-018 defense-in-depth hardening on gossip envelopes (ABORT_EVENT / SHARD_TIP / CROSS_SHARD_RECEIPT_BUNDLE) + on Block::deserialize optional-array iterations + on Chain::restore_from_snapshot collection fields + on CrossShardReceipt::deserialize + on ContribMsg::tx_hashes + on Block::deserialize minimum-valid input (7 required fields outside j.contains() guards), Config::deserialize permissive contract (operator-facing tolerance for unknown / future / typo'd / nested fields — dual of S-018 strict-mode on consensus surfaces), Chain::set_shard_routing + is_cross_shard chain-wrapper contract (short-circuit for single-shard mode + multi-shard delegation to shard_id_for_address + my_shard_id sensitivity + salt sensitivity), passphrase-scheme wallet recovery (Shamir + PBKDF2 + AES-256-GCM envelope), and end-to-end cross-shard transfer + under-quorum merge).
-Determ's design space — unconditional safety in steady state, conditional liveness with tagged fallback — suits applications where safety failures are intolerable: inter-organization settlement, regional payment networks, federated identity registries, validator-coordinated directories. It is explicitly unsuitable for applications requiring arbitrary computation or eventual-consistency semantics. Within its target scope, it provides a strictly more conservative safety posture than Traditional consensus protocols at comparable latency, making it a reasonable choice for deployments where the cost of a safety failure exceeds the cost of an transient stall.
+The C++ implementation and its security ledger remain the reference for existing
+ledger behavior. The C99 experiment establishes only its tested local contracts.
+Production PoSW and sharding require the missing fault model, admission rules,
+work-security argument, data-availability policy and reorganization semantics.
+Test success is necessary evidence of enforcement, not proof that these missing
+properties hold. No launch-readiness or unconditional-security claim follows.
 
 ---
 

@@ -1,4 +1,4 @@
-> **DEPRECATED**: This proof analyzes the legacy $K$-of-$K$ consensus model, which was superseded by the $K=2$ VDF Duel architecture. See [K2_VDF_Soundness.md](file:///Users/stoyandenev/Desktop/sauromatae/docs/proofs/K2_VDF_Soundness.md).
+> **Implementation scope (2026-09-22):** This document concerns the existing C++ protocol, which the C99 experiment has not replaced. Its individual assumptions and open findings remain controlling. It supplies no proof of the C99 PoSW direction; see [K2_VDF_Soundness.md](K2_VDF_Soundness.md).
 
 # FA4 — Liveness theorem (probabilistic)
 

@@ -1,5 +1,7 @@
 # Determ — Roadmap & Future Directions (NON-AUTHORITATIVE)
 
+- [ADR-005: Temporal Sharding design gate](decisions/ADR-005-Temporal-Sharding.md) — proposed; producer fault model, validated PoSW and reorganization-safe settlement unresolved.
+
 > **This file is the single entry point for everything NOT in the Determ 1.0-authoritative
 > doc set.** Specs linked here are design-stage: they do **not** describe shipped code and
 > are **not** coherence-maintained against `src/`. The shipped system is documented in the

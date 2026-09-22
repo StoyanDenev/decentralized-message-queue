@@ -95,11 +95,15 @@ Phase-1 secrets `s_i ∈ {0,1}²⁵⁶` are drawn from a CSPRNG that is computat
 **EUF-CMA.** No polynomial-time adversary can forge a valid signature on an unqueried message under ML-DSA-44, ML-DSA-65, or ML-DSA-87 signature schemes (FIPS 204 / Dilithium) used in the post-quantum accept-rule. Formally, for parameter set $\kappa \in \{44, 65, 87\}$:
 $$\mathbf{Adv}^{\mathrm{EUF\text{-}CMA}}_{\mathrm{ML\text{-}DSA\text{-}}\kappa}(\mathcal{A}) \le \mathrm{negl}(\lambda)$$
 
-### 2.5 Consensus & Time-Lock Model
+### 2.5 Implementation and fault-model scope
 
-- The consensus engine operates under the $K=2$ VDF Duel architecture (`K2_VDF_Soundness.md`). Cryptographic sequentiality of the Verifiable Delay Function is governed by the Time-Lock Inequality Theorem:
-$$T_{vdf} > W_{reveal} + \Delta_{max}$$
-- We do **not** assume a trusted third party, absolute synchronized wall-clocks, or Byzantine quorum intersections ($K$-of-$K$ agreement or voting quorums). Absolute liveness and progress are guaranteed via the 1-of-2 straggler fallback state transition under asynchronous network conditions.
+The definitions below describe the existing C++ committee protocol under their
+stated assumptions. The C99 `determ-node` experiment has not replaced that chain
+validator. Its local commit/reveal checks supply no sequential-hardness reduction,
+minimum wall-clock delay, unconditional liveness or finality theorem. A required
+silent participant makes the strict two-party attempt fail; there is no 1-of-2
+fallback. See [K2_VDF_Soundness.md](K2_VDF_Soundness.md) and ADR-004 for the missing
+PoSW assumptions and ADR-005 for the unaccepted sharding design gate.
 
 ---
 

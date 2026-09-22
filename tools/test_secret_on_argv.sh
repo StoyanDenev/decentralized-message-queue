@@ -55,10 +55,10 @@
 #      code path that holds no secret; it is not zero and this gate does not
 #      claim it is.
 #
-#      On a platform with no readable /proc/<pid>/cmdline, or whose kernel does
-#      not name the FIFO wait in /proc/<pid>/wchan, the legs that need the
-#      window print SKIP: and bank nothing; A, B and C do not need /proc and
-#      still assert there.
+#      These observations require Linux kernel /proc and FIFO behavior, not
+#      MSYS emulation around native Windows children. Outside Linux, without
+#      readable /proc/<pid>/cmdline, or without a named FIFO wait in wchan,
+#      the affected legs print SKIP: and bank nothing; A, B and C still assert.
 #
 # WHAT THIS GATE DOES NOT COVER, stated because the alternative is a gate that
 # implies more than it checks:
@@ -94,7 +94,8 @@ D="$DETERM"
 unset DETERM_PASSPHRASE
 
 TMP="build/test_secret_on_argv.$$"; mkdir -p "$TMP"
-TMP_ABS="$PWD/$TMP"
+# Native Windows executables need the platform path supplied by common.sh.
+TMP_ABS="$PROJECT_ROOT/$TMP"
 trap 'rm -rf "$TMP"' EXIT
 rc=0; npass=0
 pass(){ echo "  PASS: $1"; npass=$((npass+1)); }
@@ -406,13 +407,15 @@ fifo_blocked(){
   esac
 }
 
-# Does this kernel name that wait at all? Probed ONCE, by parking a shell in a
+# Does this Linux kernel name that wait at all? Probed ONCE, by parking a shell in a
 # FIFO open exactly as the legs below do, because a gate that polls for a string
 # the platform never produces would silently degrade into the fixed sleep this
 # replaced. Costs ~40 ms where it works.
 WCHAN_SYNC=0
-[ -r /proc/self/cmdline ] && mkfifo "$TMP/probe.fifo" 2>/dev/null
-if [ -p "$TMP/probe.fifo" ]; then
+# MSYS exposes /proc, but its emulation does not establish the native MSVC
+# child's Linux FIFO/wchan contract. Do not start a FIFO probe on that basis.
+[ "$(uname -s)" = Linux ] && [ -r /proc/self/cmdline ] && mkfifo "$TMP/probe.fifo" 2>/dev/null
+if [ "$(uname -s)" = Linux ] && [ -p "$TMP/probe.fifo" ]; then
   ( exec 9> "$TMP/probe.fifo" ) 2>/dev/null &
   probe_pid=$!
   for i in $(seq 1 100); do
@@ -491,8 +494,8 @@ window_usable(){   # window_usable <label>
   esac
 }
 
-if [ ! -r /proc/self/cmdline ]; then
-  skip "D /proc/<pid>/cmdline is unreadable on this platform — the four kernel-read assertions did not run (A, B and C above did)"
+if [ "$(uname -s)" != Linux ] || [ ! -r /proc/self/cmdline ]; then
+  skip "D requires Linux kernel /proc and FIFO observation — D1-D5 kernel-read assertions did not run (A, B and C above did)"
 else
   # D1: the wallet, -from form, sampled with the child PARKED in the --out FIFO
   # open — which account-import reaches only after the key has been derived and

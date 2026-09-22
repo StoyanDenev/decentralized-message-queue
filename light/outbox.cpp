@@ -683,8 +683,8 @@ void Outbox::load() {
 
 uint64_t Outbox::highest_reserved_nonce_plus_one() const {
     uint64_t hi = has_meta_ ? meta_.nonce_floor : 0;
-    if (!slots_.empty()) hi = std::max(hi, slots_.rbegin()->first + 1);
-    if (!quarantined_.empty()) hi = std::max(hi, quarantined_.back() + 1);
+    if (!slots_.empty()) hi = (std::max)(hi, slots_.rbegin()->first + 1);
+    if (!quarantined_.empty()) hi = (std::max)(hi, quarantined_.back() + 1);
     return hi;
 }
 bool Outbox::nonce_reserved(uint64_t nonce) const {

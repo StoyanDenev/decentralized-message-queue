@@ -1,52 +1,63 @@
-# Determ: A Fork-Free Cryptocurrency with Two-Phase Co-Creation
+# Determ
 
-## The Pitch: A C99 Layer-0 Engine for AI & Institutional Settlement
+Determ contains a C++ ledger implementation (`determ`) and an experimental C99
+two-participant commit/reveal driver (`determ-node`). They are separate executables
+and protocols; the C99 driver has not replaced the C++ chain validator.
 
-Traditional distributed consensus blockchains cannot scale for machine-to-machine economies, nor can they protect institutional block-trades from Maximum Extractable Value (MEV) front-running. The $O(N^2)$ gossip overhead, liveness halting, and public mempools of legacy consensus models are mathematically incompatible with high-frequency, trustless environments.
+The C99 driver requires two commitments and two matching payload reveals. An
+incomplete attempt returns an error; a caller can explicitly begin another attempt.
+Its AES/SHA-256 evaluator is an experimental repeated-work function, with no proved
+sequential-hardness bound or succinct proof. A completed evaluation is not an
+accepted ledger block. The driver has no authenticated election, production block
+validation, chain selection/reorganization, or cross-shard settlement.
 
-**Determ** is a bare-metal C99 Layer-0 consensus engine that abandons BFT entirely in favor of an ultra-lean **$K=2$ VDF (Verifiable Delay Function) Duel**. 
+The C99 node provides `get_shard_for_pubkey`, a read-only query using the existing
+salted modulus map and canonical lowercase account addresses. Configure its local
+inputs with `--routing-shards` and `--routing-salt`; defaults are one shard and a
+zero salt. Responses identify these as local settings, not authenticated genesis
+or enforced transaction ownership. See the [routing contract](docs/proofs/ShardRoutingSoundness.md#c99-local-routing-query-2026-09-22).
 
-By utilizing two-phase ephemeral Multi-party Diffie-Hellman secret disclosure and strict VDF time-locks (Enforced Blindness), the protocol achieves:
-*   **$O(1)$ Network Complexity:** Sub-second settlement with zero global voting committees.
-*   **Absolute Liveness:** The network mathematically cannot halt due to offline peers; the time-windowed state machine seamlessly executes a 1-of-2 VDF fallback.
-*   **Hardware-Level MEV Prevention:** The time-lock inequality theorem prevents 1-bit bias and transaction reordering, ensuring absolute chronological fairness.
+An optional bounded inbox now accepts signed, intra-shard anonymous transfers via
+`submit_pending_transfer` and lists their canonical binary frames with
+`get_pending_transfers`. Enable it with `--pending-genesis <64 hex>` alongside
+`--rpc-port`; routing uses the same local count/salt. It checks signatures and
+context before retaining up to four transactions per occupied shard, eight shards
+per node. Responses say `state_validated:false`: balances, nonce readiness,
+execution, persistence and gossip are not implemented by this inbox. See the
+[pending contract](docs/proofs/ShardRoutingSoundness.md#c99-signed-pending-inbox-2026-09-22).
 
-Originally engineered to prevent RNG manipulation and state-desyncs in massive multiplayer game economies (where mutual distrust is absolute), Determ's architecture has evolved into the exact primitive required to power the next generation of decentralized infrastructure:
+`test-dsf-k2-recovery` separately tests finite sibling selection and state replay,
+including late smaller-header correction and descendant revalidation. Its fixed
+eligibility/receipt fixtures are model assumptions; it does not implement production
+chain recovery. See the [DSF scope](docs/proofs/DSF-SPEC.md#104-bounded-c99-fork-recovery-model).
 
-### 1. Autonomous AI Agent Micro-Settlement (The Crypto x AI Layer)
-AI agents (data scrapers, LLM sub-routines) cannot use legacy financial rails, and traditional BFT blockchains are too expensive and bloated for high-frequency machine-to-machine economies. Determ's $O(1)$ network complexity allows two autonomous corporate AI agents to initiate a $K=2$ time-windowed consensus, exchange thousands of sub-cent micro-transactions, and instantly settle the final state to the distributed triple-entry ledger.
+[ADR-004](docs/decisions/ADR-004-Fault-Model.md) records PoSW as an architectural
+direction with unresolved security obligations. Claims of unconditional liveness,
+1-of-2 completion, fork-free C99 finality, zero bias, hardware-independent timing,
+and MEV prevention are withdrawn. See the [C99 contracts and refutations](docs/proofs/K2_VDF_Soundness.md)
+and [security ledger](docs/SECURITY.md). [Temporal sharding](docs/decisions/ADR-005-Temporal-Sharding.md)
+is at its design gate; it does not deprecate the C++ beacon or EXTENDED topology.
 
-### 2. MEV-Proof Institutional Dark Pools (The Enterprise Layer)
-Traditional Finance demands T+0 settlement but refuses to trade on public networks due to front-running. Determ eliminates MEV at the protocol level. Institutional trades are committed blindly, and the $K=2$ Aggregator feeds the payload into the VDF. By the time the VDF finishes computing and the trade is readable, the block is already finalized. It is mathematically impossible for an HFT bot—or the network nodes themselves—to front-run the trade.
+Run the C99 checks through the project CI entry point:
 
-### 3. GovTech: Cryptographic Sortition & Public Procurement
-Government tender procedures and the assignment of judges/juries are highly susceptible to bribery and bias. Determ provides a Zero-Knowledge Randomization smart contract for the public sector. Using the protocol's modular exponentiation algorithm, opposing political parties or competing corporate bidders act as mutually distrustful nodes to co-generate the random seed that selects the winning tender or presiding judge. Enforced Blindness makes it mathematically impossible for corrupt officials to manipulate the selection.
+```sh
+bash tools/ci_local.sh --c99 --jobs 4
+bash tools/ci_local.sh --c99-mutants --jobs 4
+```
 
-### 4. Provably Fair iGaming & Casino Engine
-The online gambling market relies on centralized servers where players must blindly trust the "House" RNG. Determ functions as a Trustless Casino State-Channel. The licensed casino operator and the player's client act as the $K=2$ nodes, executing a co-generated cryptographic commit. The VDF lock ensures neither the casino nor the player can pre-calculate the outcome, allowing operators to cryptographically prove fairness to regulators while eliminating centralized server bloat.
+The arithmetic and local state-machine tests are portable C99. The network driver
+and its live socket tests currently use POSIX transport; Windows transport support
+is not established by these checks. The ordinary `ci_local.sh` path still tests the
+C++ implementation. Pull-request CI also configures a separate Ubuntu 24.04 job
+for the C99 suite, isolated mutation checks and documentation guards; local Darwin
+results do not substitute for that runner's result.
 
-### 5. DeSci: Zero-Bias Clinical Trials & Social Polling
-In pharmaceutical trials, selection bias ruins the integrity of drug approvals. Determ serves as a Cryptographic Double-Blind Allocator. Peer scientists, pharmaceutical companies, and regulators act as mutually distrustful peers to co-generate the random numbers dividing patients into placebo/treatment groups. The timestamped hash list permanently proves to medical regulators that subgroups were selected without human bias.
+## C++ implementation reference
 
-### 6. Trustless Multi-Party Encryption Key Generator
-When intelligence agencies, rival corporations, or autonomous AI systems need to establish secure communication, they typically rely on trusted third-party certificate authorities. Determ allows mutually distrustful entities to co-generate a perfectly secure symmetric encryption key. The VDF ensures no single party can steer the key generation toward a weak or predictable cryptographic state.
-
-### 7. Serverless Distributed Database Concurrency
-Global distributed databases struggle with concurrency control, often requiring expensive atomic clocks (like Google TrueTime) to prevent write-corruption. The proof of coexistence and timestamping mechanism generated by the Determ protocol acts as a perfectly ordered, cryptographically secure clock. This allows distributed databases to achieve perfect concurrency and ACID compliance without specialized hardware.
-
-### 8. Sybil-Resistant Social Media (The "Cost-to-Speak" Protocol)
-Legacy social media platforms are being destroyed by AI bot farms and algorithmic rage-bait because the cost to publish noise is zero. Determ provides the foundation for a Cryptoeconomic Social Matrix where speech requires a thermodynamic cost. 
-
-By running social media posts and comments as micro-transactions on the Triple-Entry Ledger, the protocol enforces "self-punishment by payment." A bot farm attempting to flood the network with a million spam posts is instantly bankrupted by the cumulative network fees, mathematically eliminating spam. 
-
-Furthermore, the protocol reverses the incentive structure of social media: **Silence is a reward.** The fees burned by those who choose to speak are distributed as page rewards to the silent peers actively processing the network. Determ's $K=2$ VDF Duel is the only architecture with the $O(1)$ overhead and sub-second latency required to process millions of these social micro-transactions without paralyzing network gas fees. This creates a high-signal, low-noise environment where users naturally self-moderate, and autonomous bot nets cannot survive.
-
----
-
-## Tech Stack
-A Zero-Dependency Statically Linked C99 Unikernel utilizing native OS event loops (epoll/kqueue/IOCP) and a proprietary C99 cryptographic backend (determ::c99).
-
----
+The remaining overview describes the existing C++ payment/identity chain and its
+recorded design. Its committee, beacon, storage and wire rules do not apply to the
+C99 experiment. Security claims remain subject to the assumptions and open findings
+in the decision log and security ledger; they are not a proof of launch readiness.
 
 **Version v1.1 (mainnet launch target)** · [![License: Multi-licensed](https://img.shields.io/badge/License-Multi--licensed-blue.svg)](LICENSING.md)
 
@@ -59,7 +70,7 @@ A Zero-Dependency Statically Linked C99 Unikernel utilizing native OS event loop
 > **v1.1 is THE LAUNCH** — single mainnet event, no test/main net before v1.1. All substrate bundles (per [`docs/proofs/IMPLEMENTATION-SEQUENCING.md`](docs/proofs/IMPLEMENTATION-SEQUENCING.md) Bundles 1-5) and application bundles (per [`docs/proofs/V1.1-PLAN.md`](docs/proofs/V1.1-PLAN.md) Bundles A-E) ship together at v1.1 genesis.
 >
 > **Three properties locked at v1.1 launch (immutable for chain lifetime):**
-> 1. **God protocol** (Szabo sense) — K-of-K mutual-distrust default; no trusted third party can be subverted. Default mode; §6.2 Quorum Liveness OPTIONAL is the only documented relaxation, opt-in at genesis. Block randomness uses v1.x commit-reveal (unbiasable under SHA-256 preimage resistance); block authentication uses K individual Ed25519 signatures.
+> 1. **God protocol** (Szabo sense) — K-of-K mutual-distrust default; no trusted third party can be subverted. Default mode; §6.2 Quorum Liveness OPTIONAL is the only documented relaxation, opt-in at genesis. Block randomness uses v1.x commit-reveal (commitment-bound; selective-abort bias remains open); block authentication uses K individual Ed25519 signatures.
 > 2. **Decentralized identity provider** — the mutual-distrust IdP of *Identity provider in an environment of mutual distrust* (academia.edu/80188125), realized as **threshold-OPAQUE**: OPAQUE in place of the paper's SRP, and a **t-of-n, unordered** threshold OPRF (any t of n servers, any order; no server below t learns the password) in place of the paper's sequential all-node chain. The relying-party token is the paper's **hash challenge-response** over the handshake-co-generated keys — no signature, **no FROST**, no block co-sign. Uses only already-shipped primitives (Ed25519, P-256 §3.9b OPRF, SHA-256/HKDF, DAPP_REGISTER/DAPP_CALL). See `docs/proofs/v2.25-DSSO-DAPP-SPEC.md`.
 > 3. **Perfect forward secrecy** — v2.22 per-tx PFS via OTPK; amounts irrecoverable after consumption even under future master-key compromise. *(Design-locked; Phase-2 build, not yet shipped.)*
 >
@@ -69,11 +80,11 @@ A Zero-Dependency Statically Linked C99 Unikernel utilizing native OS event loop
 
 ## Abstract
 
-Determ is a registration-gated cryptocurrency that achieves immediate, fork-free finality through a two-phase $K=2$ VDF Duel protocol. Each block is produced by a deterministically rotated **K-committee** drawn from the registered creator pool. The protocol runs in two phases per block: a **Contrib phase** in which each committee member commits transaction proposals plus a Phase-1 commitment to a fresh per-round secret (`SHA256(secret ‖ pubkey)`) under an Ed25519 signature, and a **BlockSig phase** in which each member reveals their secret alongside an Ed25519 signature over the block digest. A block is final when all K committee signatures are present and all K secrets verify against the Phase-1 commitments.
+The C++ implementation uses a registration-gated, two-phase K-of-K committee protocol. Each block is produced by a deterministically rotated **K-committee** drawn from the registered creator pool. The protocol runs in two phases per block: a **Contrib phase** in which each committee member commits transaction proposals plus a Phase-1 commitment to a fresh per-round secret (`SHA256(secret ‖ pubkey)`) under an Ed25519 signature, and a **BlockSig phase** in which each member reveals their secret alongside an Ed25519 signature over the block digest. A block is final when all K committee signatures are present and all K secrets verify against the Phase-1 commitments.
 
 Two design choices distinguish Determ from prior fork-free systems:
 
-1. **Commit-reveal selective-abort defense.** The block's randomness `R = SHA256(delay_seed ‖ ordered_secrets)` is committed-then-revealed: in Phase 1 every committee member commits to a 32-byte secret via `SHA256(secret ‖ pubkey)`; in Phase 2 they reveal. A committee member deciding whether to publish their Phase 1 commitment cannot predict `R` because the other K−1 secrets are still uniformly random under SHA-256 preimage resistance. Selective abort — the canonical attack on aggregate-signature randomness beacons — is cryptographically defeated, not just economically discouraged.
+1. **Commitment binding.** Phase 1 commits to a secret; Phase 2 verifies its opening. This prevents changing the committed secret under the hash assumption. It does not stop a last revealer, who knows its own secret, from computing the result and withholding an unfavorable outcome.
 
 2. **Union transaction set within the committee.** A transaction is included in block `n` if at least one committee member contributes it in Phase 1. Censorship requires every committee member to collude — a `K`-conjunction property that scales exponentially in `K`.
 
@@ -87,7 +98,7 @@ Most blockchain consensus protocols separate block proposal from finalization. A
 
 Determ takes a different approach: a small committee of `K` creators co-produces every block, and each block carries `K` independently-signed authenticators. A valid block requires all `K` signatures over the same digest. There is no proposer to censor and no quorum threshold to game — the only way to prevent block production is to make at least one committee member silent, which the protocol detects and reroutes around.
 
-The protocol's randomness is supplied by a **commit-reveal protocol** rather than an aggregate signature or a randomness beacon. Phase 1 seals each member's contribution to `R` under a SHA-256 commitment; Phase 2 reveals. At the moment a committee member decides whether to contribute, the K−1 other secrets are still uniformly random — preimage resistance makes `R` unpredictable until reveals gather, defeating selective abort.
+The C++ protocol derives randomness from ordered committed secrets. Commitment binding constrains the opening; it does not establish an unbiased distribution of completed rounds. Selective abort remains an explicit limitation (SECURITY.md S-077).
 
 This design has three consequences worth highlighting:
 
@@ -95,7 +106,7 @@ This design has three consequences worth highlighting:
 
 2. **Censorship resistance is structural.** Each committee member independently proposes transactions in Phase 1. The block's transaction root is the union of all committee proposals. A transaction is excluded only if every one of the `K` committee members colludes — probability `(f/N)^K` for adversarial fraction `f/N`.
 
-3. **Randomness is unbiasable.** Each member's Phase 1 commitment is sealed before any reveals; the K-of-K finalization gate ensures all K secrets are revealed together (or none, in which case the round aborts). No member can adapt their secret to the Phase-1 commitments of others — they were chosen first.
+3. **Randomness inputs are commitment-bound.** A participant cannot substitute an opening, but can withhold it. Publication order and retry policy matter to bias.
 
 ---
 
@@ -128,7 +139,7 @@ Two important caveats on this threshold:
 1. **"Rule-following" is not "honest."** The protocol doesn't require *anyone* to be honest in any moral sense — it only requires that *some* participant follows protocol rules (for whatever reason: self-interest, regulation, mistake, ethics). Following the protocol is rationally cheaper than deviating, so the property holds even under fully self-interested rational actors.
 2. **The threshold is a property of the system, not a protocol assumption.** The protocol does not *believe* that ≥1 validator is rule-following — it doesn't believe anything. The threshold is what an *external observer* needs to assume in order to expect the chain to remain useful. If the observer doesn't believe even ≥1 validator follows the protocol, they don't use the chain. That choice happens outside the system.
 
-Under the $K=2$ VDF Duel, Determ achieves unconditional safety while network liveness is guaranteed via a 1-of-2 straggler fallback, completely eliminating liveness halting.
+The C++ committee protocol has conditional safety and liveness under its recorded assumptions. The C99 two-participant experiment supplies no network-liveness or finality guarantee.
 
 ### 2.2 The three structural properties
 
@@ -138,13 +149,13 @@ The mutual-distrust model rests on:
 
 2. **Mutual inclusion via union tx_root.** A transaction enters the block if **any** committee member contributes it in Phase 1 — not just a majority. To censor a transaction, every member must omit it; a single defector breaks the censorship. Defection is the rational individual choice (a defector who includes the tx earns its fee and avoids being implicated in censorship). The total collusion required to censor is fragile because each colluder has standing incentive to defect.
 
-3. **No predictability of consequence.** The block's randomness `R = SHA256(delay_seed ‖ ordered_secrets)` is computed only once K Phase-2 reveals gather. In Phase 1, each member only sees others' commitments `SHA256(secret_j ‖ pubkey_j)`; under SHA-256 preimage resistance the underlying secrets remain uniformly random. A committee member deciding whether to participate cannot compute whether participation favors them — selective abort is cryptographically defeated.
+3. **Limits of hiding.** A participant may lack other secrets before their release, but a last revealer already knows its own secret. Once it sees the other openings it can evaluate the output before deciding to publish. Preimage resistance supplies no selective-abort defense at that point.
 
 ### 2.3 Trade-off vs. BFT
 
-Under the $K=2$ VDF Duel, network liveness is guaranteed via a 1-of-2 straggler fallback, completely eliminating liveness halting. In return it gets:
+The following are C++ design objectives, subject to the security ledger and their individual proof assumptions:
 - **Stronger censorship resistance** — `(f/N)^K` per round, exponential in K, no leader bottleneck.
-- **Unconditional fork-freedom** — no fork-choice rule needed; K-of-K signatures over the same digest at the same height are unforgeable.
+- **Conditional committee safety** — requires the committee-intersection and honest-signing assumptions recorded in the proof set; signature unforgeability alone does not prevent conflicting signatures.
 - **Lower honest-fraction requirement** — `≥1 of N` honest, not `≥2/3 of N` honest, for the chain to remain useful.
 - **Clean economic story** — every participant pursues block rewards. Deviation either earns no reward (refusal → no share), is recorded as evidence (equivocation — an on-chain record with no L1 consequence since 2026-09-16, DECISION-LOG D4; the L2 policy consumes it), or is futile (censorship → defected by any honest member). No "honest majority assumption" is bolted on.
 
@@ -152,7 +163,7 @@ Under the $K=2$ VDF Duel, network liveness is guaranteed via a 1-of-2 straggler 
 
 **Adversary model.** Concretely, an adversary may control any subset of `N` registered nodes (no fraction bound assumed for safety). Corrupted nodes may deviate arbitrarily from the protocol, delay messages within `Δ`, and choose which Phase 1 contributions to publish. The adversary cannot forge Ed25519 signatures or break SHA-256 (preimage or collision resistance). Liveness — but not safety — degrades as adversary fraction approaches 100%.
 
-**Safety assumption.** Safety (no two valid blocks at the same height) holds unconditionally — it is enforced by the K-of-K signature requirement over the same block digest.
+**Safety assumption.** No-two-finalized-blocks claims require explicit honest-signing and committee-intersection hypotheses. They do not follow unconditionally from the K-of-K signature check, and they do not apply to the C99 prototype.
 
 **Liveness assumption.** Liveness requires that at least one committee can be formed from `K` honest, online committee members. With `M_pool` registered nodes and per-node availability `(1-p)`, the probability that a specific committee is fully live is `(1-p)^K`. The committee rotates per round; persistent absence triggers suspension.
 
@@ -528,27 +539,15 @@ P(tx censored in round n) ≈ (f/N)^K
 
 With `K = 3` and `f/N = 0.10`: `P ≈ 10⁻³` per round. Since the committee rotates per round, persistent censorship is exponentially unlikely.
 
-### 10.3 Selective abort defense (commit-reveal)
+### 10.3 Commitment binding and selective abort
 
-A naive aggregate-signature randomness beacon (e.g., a BLS-based randomness beacon) is vulnerable to **selective abort**: a committee member could compute the resulting `R` from a candidate Phase 1 set, decide whether `R` favors them, and choose whether to publish their share — biasing future selection.
-
-Determ defeats this with a Phase-1/Phase-2 commit-reveal binding:
-
-- In Phase 1, each member commits to their secret via `dh_input = SHA256(secret_i ‖ pubkey_i)` — a one-way commitment under SHA-256 preimage resistance.
-- The block's randomness `R = SHA256(delay_seed ‖ ordered_secrets)` depends on **all K** revealed secrets. While a member is deciding whether to publish their Phase-1 commitment, the K−1 other secrets are still uniformly random; under SHA-256 preimage resistance, no candidate `R` can be tested.
-- Phase-2 reveals are bound to Phase-1 commitments: a malicious member cannot substitute a different secret post-hoc, since the block validator rejects unless `SHA256(reveal ‖ pubkey) == matching dh_input`.
-- `T` is set so `T_delay ≥ 2 × T_phase_1`. Within the Phase 1 window, an attacker can complete fewer than 0.5 candidate evaluations on average — far less than 1 useful trial.
-
-| `T_delay / T_phase_1` | Grinding attempts per round | Selective-abort feasibility |
-|---|---|---|
-| 0.5 | 2 | Real |
-| 1.0 | 1 | Marginal |
-| 2.0 | 0.5 | Acceptable |
-| 5.0 | 0.2 | Negligible |
-
-The default profile sets `T_delay = 2 × tx_commit_ms`, giving the "Acceptable" row above.
-
-An iterated-SHA-256 delay function (`R = SHA256^T(seed)`) was considered as an alternative selective-abort defense — sequential SHA-256 cannot be parallelized, so an attacker grinding candidates during Phase 1 would be bounded by `T`. The construction was rejected because SHA-256 is the most heavily-ASIC'd hash in existence: an attacker with optimized silicon completes `T` iterations in a fraction of the wall-clock budget, regaining the predictive-evaluation window. Commit-reveal replaces the time-bound argument with a structural one — preimage resistance is independent of compute speed.
+Receivers verify a revealed secret against its earlier SHA-256 commitment. This
+binds the opening under the hash assumption. It does not force publication. A last
+revealer knows its own secret and, after receiving the others, can compute the
+result before deciding whether to reveal. Claims that this is information-theoretically
+unbiased, or that a local delay parameter prevents the attack, are withdrawn.
+See [SelectiveAbort.md](docs/proofs/SelectiveAbort.md) and SECURITY.md S-077. The C99
+experiment additionally permits colluders to precompute both payloads before starting.
 
 ### 10.4 Liveness — per-height BFT escalation
 
@@ -753,7 +752,7 @@ VRF sortition + BA* over ~3.7 s. Tolerates adversarial fraction `f < N/3`. Deter
 
 ### 14.5 Dfinity / Internet Computer
 
-Threshold BLS beacon + ranked leader model. Determ has no leader; all `K` committee members are co-equal. Determ uses a commit-reveal randomness protocol (not threshold BLS) for per-block `R`, which avoids the selective-abort vulnerability inherent to aggregate-signature beacons without depending on the heavy threshold-BLS toolchain.
+The C++ implementation uses K-member co-creation and hash commitments for randomness. Its selective-abort limitation must be assessed separately from any comparison with threshold beacons.
 
 ### 14.6 Solana
 
@@ -1093,11 +1092,10 @@ Concrete-security bounds: every property holds with probability `≥ 1 − Q · 
 
 ## 20. Conclusion
 
-Determ demonstrates that fork-free, immediately-final consensus is achievable at sub-second block times with just two well-known cryptographic primitives — Ed25519 and SHA-256 — without proof-of-work, multi-round voting, or a trusted leader. The two-phase Contrib + BlockSig protocol places randomness generation under a SHA-256-based commit-reveal binding, defeating selective abort by construction rather than by economic disincentive or wall-clock delay. The union-of-committee transaction root makes inclusion a collaborative property: a single honest committee member suffices to defeat censorship.
-
-The two-tier identity model — registered domains for consensus, anonymous accounts for transfers — preserves both governance auditability and end-user fungibility under one unified Ed25519 signature scheme.
-
-The protocol is intentionally minimal: two consensus message types per block, one signature scheme, one hash function, no exotic cryptography or external dependencies. This makes the protocol auditable, implementable, and amenable to formal verification of its core safety property: no two valid blocks at the same height.
+The C++ ledger and C99 pair experiment have separate implementation and proof
+boundaries. The C++ security ledger records unresolved findings; the C99 experiment
+has only the local contracts stated above. Neither test success nor fixed pair size
+establishes unbiased randomness, unconditional finality or production readiness.
 
 ---
 
@@ -1109,7 +1107,7 @@ The protocol is intentionally minimal: two consensus message types per block, on
 4. Kwon, J. "Tendermint: Consensus without Mining." 2014.
 5. Hanke, T., Movahedi, M., Williams, D. "DFINITY Technology Overview Series, Consensus System." 2018.
 6. Yakovenko, A. "Solana: A new architecture for a high performance blockchain." 2018.
-7. Boneh, D., Bonneau, J., Bünz, B., Fisch, B. "Verifiable Delay Functions." CRYPTO 2018. (Theoretical context for sequential-delay primitives. Determ's iterated SHA-256 satisfies the sequentiality requirement without the succinct-verify property of true VDFs.)
+7. Boneh, D., Bonneau, J., Bünz, B., Fisch, B. "Verifiable Delay Functions." CRYPTO 2018. (Background only; this citation does not prove sequential hardness of the custom C99 evaluator.)
 
 ---
 
@@ -1121,6 +1119,6 @@ Determ is **multi-licensed** — [LICENSING.md](LICENSING.md) is the authoritati
 - **Reference DApps (`dapps/`, D.1-D.9) — BUSL-1.1**: source-available; free for development/test/CI **and for noncommercial production** (individuals, noncommercial organizations); **production use by a commercial entity or a public-sector body requires a paid grant** ([COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)); each release converts to Apache-2.0 after 4 years.
 - **End users pay nothing**: the Licensor operates reference DApp instances on the network free of charge; using a hosted instance is not a licensed activity.
 
-As of the C99 migration phase, all C++ networking, cryptography, and serialization dependencies have been eradicated in favor of native POSIX/Windows kernel APIs and the determ::c99 cryptographic suite. See [NOTICE](NOTICE) for details.
+The C++ and C99 implementations coexist. C++ networking and serialization dependencies remain; the C99 driver has not replaced them. See [NOTICE](NOTICE) and the implementation-specific build targets.
 
 Source files carry a per-component SPDX identifier (rule in [LICENSING.md](LICENSING.md)) so toolchain-level license scanners can verify provenance automatically.

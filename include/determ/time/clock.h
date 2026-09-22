@@ -18,6 +18,57 @@
 extern "C" {
 #endif
 
+/*
+ * Portable scaled conversion: floor(ticks * 1e9 / freq), saturated at
+ * UINT64_MAX. An unavailable frequency (zero) returns zero.
+ * The intermediate product need not fit in uint64_t.
+ */
+static inline uint64_t determ_qpc_to_ns(uint64_t ticks, uint64_t freq) {
+    if (freq == 0ULL) {
+        return 0ULL;
+    }
+    const uint64_t scale = 1000000000ULL;
+    const uint64_t whole = ticks / freq;
+    const uint64_t fraction_ticks = ticks % freq;
+    uint64_t quotient = 0;
+    uint64_t remainder = 0;
+    uint64_t ns;
+    uint32_t bit;
+
+    if (whole > UINT64_MAX / scale) {
+        return UINT64_MAX;
+    }
+    ns = whole * scale;
+
+    /* Long multiplication with division after each bit of scale. For each
+     * processed prefix p: quotient=floor(fraction_ticks*p/freq), and
+     * remainder=(fraction_ticks*p)%freq. Subtraction guards implement
+     * modular addition without overflowing, even when freq=UINT64_MAX.
+     * quotient is always less than scale (1e9).
+     */
+    for (bit = 1U << 29; bit != 0; bit >>= 1) {
+        quotient *= 2;
+        if (remainder >= freq - remainder) {
+            remainder -= freq - remainder;
+            quotient++;
+        } else {
+            remainder += remainder;
+        }
+        if ((scale & bit) != 0) {
+            if (remainder >= freq - fraction_ticks) {
+                remainder -= freq - fraction_ticks;
+                quotient++;
+            } else {
+                remainder += fraction_ticks;
+            }
+        }
+    }
+    if (quotient > UINT64_MAX - ns) {
+        return UINT64_MAX;
+    }
+    return ns + quotient;
+}
+
 #if defined(DETERM_DSF_ENABLED)
 
 /*
@@ -60,7 +111,9 @@ static inline uint64_t determ_clock_now_ns(void) {
     }
     LARGE_INTEGER counter;
     QueryPerformanceCounter(&counter);
-    return (uint64_t)((counter.QuadPart * 1000000000ULL) / freq.QuadPart);
+    uint64_t ticks = counter.QuadPart;
+    uint64_t f = freq.QuadPart;
+    return determ_qpc_to_ns(ticks, f);
 }
 #else
 #include <time.h>

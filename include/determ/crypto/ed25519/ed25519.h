@@ -31,7 +31,8 @@ void determ_ed25519_pubkey_from_seed(const uint8_t seed[32], uint8_t pk[32]);
  * 64-byte detached signature R||S to `sig` per RFC 8032 §5.1.6. Returns 0 on
  * success, -1 on an internal allocation failure / length overflow. Deterministic:
  * the signature is a pure function of (seed, msg). Secret intermediates are
- * zeroized before return. */
+ * zeroized before return. Messages of at most 448 bytes use a fixed automatic
+ * buffer without heap allocation; larger messages retain the heap fallback. */
 int determ_ed25519_sign(const uint8_t seed[32], const uint8_t pk[32],
                         const uint8_t *msg, size_t msglen, uint8_t sig[64]);
 
@@ -39,10 +40,13 @@ int determ_ed25519_sign(const uint8_t seed[32], const uint8_t pk[32],
  * 8032 §5.1.7. Returns 0 if the signature is valid, -1 otherwise (bad signature,
  * malformed public key, or internal allocation failure). Enforces the RFC
  * canonicality gates that defeat malleability: the scalar S is rejected unless
- * S < L (§5.1.7, so (R, S+L) does NOT re-verify — signatures are unique), and a
+ * S < L (§5.1.7, rejecting S+L encodings), and a
  * non-canonical public-key y >= q is rejected (§5.1.3). This is intentionally
  * STRICTER than OpenSSL's lenient ref10 decoder on adversarial inputs; honestly
- * generated keys/signatures are always canonical and behave identically. */
+ * generated keys/signatures are always canonical and behave identically.
+ * These checks do not enforce a deterministic signer nonce or unique signatures.
+ * Messages of at most 448 bytes require no heap allocation. Larger messages
+ * retain the existing heap fallback and all verification predicates are unchanged. */
 int determ_ed25519_verify(const uint8_t pk[32],
                           const uint8_t *msg, size_t msglen, const uint8_t sig[64]);
 

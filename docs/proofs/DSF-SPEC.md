@@ -372,34 +372,133 @@ DSF with the initial 30-scenario set unlocks:
 
 ---
 
-## 10. Bare-Metal C99 Alignment ($K=2$ VDF Duel Architecture)
+## 10. Separate C99 local-attempt test harness
 
-Following the complete eradication of C++ runtimes (`std::chrono`, `boost::asio`, and `nlohmann/json`) in favor of bare-metal C99 unikernel architecture, the DSF has been aligned with native OS event loops (`kqueue`/`epoll`) and the $K=2$ VDF Duel consensus engine.
+The C++ DSF remains present. The C99 tests use a separate clock/transport seam and
+do not replace the C++ runtime, validate a chain or establish consensus security.
 
-### 10.1 Clock Injection Seam (`include/determ/time/clock.h`)
-Production builds compile zero-cost inline wrappers directly querying hardware monotonic time (`mach_absolute_time()` on macOS, `clock_gettime(CLOCK_MONOTONIC)` on Linux).
+### 10.1 Clock and transport seams
 
-When compiled with `-DDETERM_DSF_ENABLED`:
-- `determ_clock_now_ns()` and `determ_clock_now_ms()` query a virtual nanosecond state variable.
-- Test suites can instantly jump forward (e.g. `determ_dsf_clock_advance_ms(1999)` or `determ_dsf_clock_advance_ms(2001)`) to test the sub-millisecond boundaries of the $W_{reveal} = 2000\text{ ms}$ window without sleeping the host CPU.
+`include/determ/time/clock.h` selects the native monotonic clock or, with
+`DETERM_DSF_ENABLED`, an injected nanosecond counter. Tests cover attempt start at
+zero, exact T+1000 ms commit and T+2000 ms total reveal deadlines, and counter wrap.
+The virtual transport supplies deterministic queued bytes and EWOULDBLOCK cases.
+Actual socket integration is separately checked by `test-k2-net-rpc`.
 
-### 10.2 Virtual Transport Seam (`include/determ/net/virtual_transport.h`)
-Abstracts the non-blocking socket readiness and I/O layer:
-- In production, `determ_net_recv()` and `determ_net_send()` map with zero overhead directly to POSIX `recv` and `send`.
-- Under `-DDETERM_DSF_ENABLED`:
-  - `determ_dsf_inject_ewouldblock_rx(bool)` simulates `EWOULDBLOCK` / `EAGAIN` to verify non-busy-spin quiescence.
-  - `determ_dsf_inject_drop_bytes(size_t)` forces mid-stream payload drops.
-  - `determ_dsf_queue_rx()` and `determ_dsf_read_tx()` allow deterministic injection and verification of wire frames.
-  - `determ_dsf_poll_hook()` intercepts multiplexer polling to signal simulated socket readiness events without socket descriptors.
+### 10.2 Evaluator bypass
 
-### 10.3 VDF Simulation Bypass (`include/determ/crypto/vdf.h`)
-Running the memory-hard VDF hash loop during thousands of unit tests would stall CI/CD pipelines:
-- Under `-DDETERM_DSF_ENABLED`, `determ_dsf_set_vdf_bypass(true, TARGET_VDF_MS)` enables instant evaluation.
-- `vdf_evaluate()` produces a deterministic SHA-256 mock hash in $< 2\ \mu\text{s}$, sets `ctx->elapsed_ns = TARGET_VDF_MS * 1,000,000`, and advances the virtual clock by `TARGET_VDF_MS` (5000 ms).
-- Dynamic Difficulty Adjustment (DDA) receives the exact simulated execution duration and maintains proper difficulty scaling without burning physical CPU cycles.
+With `DETERM_DSF_ENABLED`, `determ_dsf_set_vdf_bypass(true, TARGET_VDF_MS)` returns a
+mock hash and advances virtual time by the configured 3000 ms. This is a simulation
+convenience, not a delay proof, hardware benchmark or authenticated block timestamp.
+The DDA test supplies synthetic ordered timestamps and work through its commit API;
+it does not feed local elapsed durations into a production block verifier.
 
-### 10.4 Acceptance Verification
-The C99 test suite (`bin/test-dsf-k2-duel`) verifies:
-1. Instant 1999ms time-jump accepting boundary-valid reveals.
-2. 2001ms time-jump strictly dropping late Contributor reveals (`DUEL_DROPPED_BUZZER_EXCEEDED`) and executing the 1-of-2 straggler fallback.
-3. Full 10-block simulated $K=2$ Duel finalizing 70,000ms of simulated consensus time in **0.05 ms** of real wall-clock time (strictly $< 50\text{ ms}$).
+### 10.3 Verification scope
+
+Run through `tools/ci_local.sh --c99`. `test-dsf-k2-duel` exercises ten local
+attempts: seven mock computations complete, and three missing/late-reveal attempts
+terminate with failure. `test-k2-duel-fallback` is the historical target name for
+strict two-party deadlines, commitment checks and explicit retry; it tests no
+one-party fallback. Native evaluation is checked separately by `test-k2-duel`.
+No simulated block finalization, global-liveness proof or performance guarantee is
+inferred from these tests. See [K2_VDF_Soundness.md](K2_VDF_Soundness.md).
+
+### 10.4 Bounded C99 fork-recovery model
+
+`sim/k2_recovery_model.c` and `test-dsf-k2-recovery` implement the first bounded
+one-chain increment from [ADR-005 §3.5](../decisions/ADR-005-Temporal-Sharding.md#35-dsf-convergence-and-recovery-design-gate).
+This is a test model separate from `determ-node` and the C++ consensus engine.
+Its fixed caller-owned arenas admit at most eight candidate records, four
+transactions per candidate and four blocks in the selected history after one
+common anchor. The model adds no dynamic allocation. Its 88-byte signature inputs
+fit the shared primitive's bounded automatic-buffer path; the allocation contract
+and dedicated gate are documented in [K2_VDF_Soundness §12](K2_VDF_Soundness.md#12-bounded-ed25519-storage-contract).
+Larger signature inputs retain a heap fallback; no whole-node allocation claim follows.
+No live production routing is involved.
+
+**Admission and selection.** Immutable configuration fixtures supply one authorized
+pair per parent/height/round and joint-receipt facts. These are
+trusted model oracles, not implementations of membership, election, creator
+endorsement or receipt proofs. The model checks those fixtures, distinct included
+transaction data hashes, real Ed25519 sender signatures and real `ledger_apply_tx`
+results on each candidate's original ancestry. Missing ancestors remain pending;
+impossible ancestry is rejected. The model header canonically binds chain, shard,
+height, round, parent, pair, ordered signing-byte body commitment and a fixture
+variant. Its fixed 136-byte big-endian representation supplies numeric comparison;
+its hash is used only for immutable ancestry. This is not a production wire
+format, and the variant is not a VDF output or an anti-grinding construction. The body
+commitment uses explicit signing bytes, not the native-structure ledger-root helpers.
+
+Among valid children of the common anchor, prefer more distinct included messages,
+then the smaller full numeric header. Different root bodies may contain conflicting
+transactions at the same sender/nonce: each body is validated on its own original
+parent, and the same count/header ranking applies. The winning block can contain
+the larger conflicting transaction data hash. The owner's smaller-data-hash rule
+applies only during transaction assembly/requeue; it cannot change block ranking.
+The model implements requeue filtering, not production assembly.
+
+The supported domain still permits at most one valid child per nonanchor parent.
+Competing valid descendant branches return `K2_MODEL_UNSUPPORTED_BRANCHING`
+atomically. Nodes can remain different after opposite first deliveries outside this
+domain. This model limit does not decide complete-history or validated-work ordering.
+
+**Recovery and publication.** At the model's single-threaded API boundaries, rebuild
+state from the common anchor in scratch space, following only exact original-parent
+links from the selected root. Retain losing candidates and their descendants under their original parents; do not transplant
+their effects. Prepare changes no visible node state. Publish installs the complete
+history/state only for its original node and unchanged local revision. Admission,
+capacity and unsupported-input failures leave visible state unchanged. Nodes
+and workspaces must be disjoint as required by the model header; configuration
+remains immutable throughout a node lifetime.
+
+Collect omissions from candidates valid on their original ancestry, exclude
+selected transaction data hashes, deduplicate, and check each transaction against a
+fresh copy of selected state. For individually valid same-sender/nonce alternatives,
+keep the smaller data hash. This cannot replace a transaction in the selected block:
+a smaller-hash alternative whose nonce is already consumed fails revalidation.
+The resulting queue is individually valid, not guaranteed jointly executable. A
+detached same-body descendant may supply a valid future transaction; an unfunded dependent spend remains invalid. Canonical journal bytes
+record the model inputs and are independently replayed into an initialized node.
+Restore advances the local revision so a preparation made before restore cannot
+replace the restored history. Old/new journal cuts model crash/restart in memory;
+there is no file write, fsync or durable-storage claim.
+
+**Conditional finite-convergence argument.** Assume identical immutable anchor and
+fixture configuration, collision-free commitments for the supplied data, a common
+finite input set fitting the eight-record/four-transaction/four-block limits,
+eventual delivery of every required ancestor and candidate, and at most one valid
+child per nonanchor parent. Original-parent replay then gives each receiver the
+same valid candidate set once delivery completes.
+The count/header order deterministically chooses the same root; exact parent links
+choose the same unique valid suffix. Deterministic ledger replay therefore gives
+equal selected histories and ledger states. Requeue filtering likewise operates on
+the same valid omissions and selected state. Intermediate pending or divergent
+views are allowed. This argument compares selected histories and semantic state,
+not arrival-ordered journals or local revision counters. It does not prove that
+these fixtures are reachable under a production eligibility/cryptographic design,
+or convergence with unbounded growth, unavailable histories or competing descendant
+branches outside the supported domain.
+
+**Gate coverage and bound.** Fixed scenarios witness a local split, healing,
+message-count replacement, same-body numeric-header correction, descendant
+detachment and dependency revalidation. Conflicting-root cases deliver both orders
+and require count and header winners even when they contain the larger conflicting
+transaction data hash; descendant and journal checks preserve original-parent
+recovery. Negative cases cover invalid signatures, one-sided receipt,
+unauthorized/context-mismatched creators, duplicate bodies, impossible ancestry,
+invalid transactions, capacity and ambiguous descendants. The state oracle
+independently calculates balances,
+nonces, fees and conservation from each selected history; it does not call the model
+replayer or `ledger_apply_tx`. Separate assertions check selection, omissions,
+stale preparations, journal tampering and unchanged state on failure. Eight seeds
+shuffle four candidate deliveries to each of two nodes; each delivery is repeated,
+and each seeded schedule runs twice with equal canonical trace digests. This is a
+finite seed bound, not an exhaustive schedule/fault search or a measured timing bound.
+Run the receiver/replayer gate and its isolated mutants through `tools/ci_local.sh`;
+record fresh build success, execution and independent review before crediting results.
+
+The older C++ settled-history monitor remains unchanged. Public verification of
+co-creator DH derivation, VDF proofs, authenticated production eligibility and timing,
+complete-history selection, durable recovery and cross-shard transaction dependencies
+remain separate work. No production security or sharding claim follows from this
+bounded model. See [K2_VDF_Soundness §11](K2_VDF_Soundness.md#11-bounded-recovery-model-contract).

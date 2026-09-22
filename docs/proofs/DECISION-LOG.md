@@ -5774,3 +5774,684 @@ We formally authorize a complete architectural refactor to align with the origin
 ## Consequences & Supersession
 * **Positive:** Network message complexity drops to $O(1)$. MEV front-running is physically eradicated. The node is a mathematically provable, memory-safe, zero-allocation binary.
 * **Superseded Material:** This decision officially supersedes all prior proofs, whitepapers, and decision records relating to ASIO, OpenSSL, and $K$-of-$K$ consensus. The new C99 implementation and `K2_VDF_Soundness.md` proofs are declared canonical.
+
+
+## 2026-09-22 — C99 K=2 correction and temporal-sharding design gate
+
+**Owner request:** fix the reviewed K=2 problems, make docs/tests coherent with the
+changes, then execute the corrected sharding prompt. This entry supersedes the
+C99 claims in the earlier 2026-09-22 entry; that historical record is retained.
+
+**Adjudication.** The C99 daemon is a local pair experiment, not a migrated C++
+consensus engine. Its work-comparison helpers had no production caller; it has no
+authenticated membership/election, block admission, branch adoption or reorganization.
+The previous 1-of-2 liveness, fork-free finality, zero-bias, enforced-blindness and
+MEV-immunity claims are withdrawn. Colluding participants know both inputs before
+the timer; a required silent participant prevents completion; a signer can issue
+conflicting candidates. Sequential work for one candidate does not solve these cases.
+ADR-004's economic claim needs an explicit producer population and an adversarial
+chain-growth bound, neither currently specified. It is not a proved mitigation.
+
+**Repair boundary.** Enforce both payload commitments and matching reveals in the
+local state machine and network driver. Commit deadline T+1000 ms; total reveal
+deadline T+2000 ms. Missing/invalid input returns terminal failure. Explicit caller
+retry resets state without pretending to elect a replacement or guarantee progress.
+A successful evaluation is not ledger finalization and is not written as a naked
+DBK1 block. Remove unused socket-byte evidence/slashing, dummy VDF polling,
+unvalidated fork-choice helpers and the unchecked stream bundler. Correct portable
+QPC conversion and the timestamp-only DDA helper (11 timestamps, 10 intervals,
+predecessor-derived work checked before atomic append); do not describe a helper as
+production difficulty validation. The C++ consensus/evidence/topology rules are not
+changed by these repairs.
+
+**Proof and convergence.** `K2_VDF_Soundness.md` now states local contracts and
+counterexamples, not a production security theorem. README, PROTOCOL, WHITEPAPER,
+SECURITY and the proof index distinguish the implementations. C99 CI must build the
+actual targets offline through `ci_local.sh`; isolated mutants count only after a
+successful fresh compile and execution. Independent review is required regardless
+of gate color. Execution evidence is appended below when complete.
+
+**Sharding disposition.** `docs/decisions/ADR-005-Temporal-Sharding.md` is a future-tier proposal,
+PROPOSED. The corrected prompt's design gate refutes the premise that VDF work makes
+shard security independent of membership/resources/availability or makes beacons and
+EXTENDED obsolete. The named C99 block/VRF/mempool files do not exist; existing C99
+header formats differ and transaction codecs already carry u32 shard IDs. No shard
+field, fake VRF, speculative arena hierarchy or topology deletion lands through this
+gate. Producer eligibility/recovery, validated PoSW, state ownership, data availability
+and reorganization-safe settlement must be specified and independently reviewed first.
+Open choices are stated in ADR-005; no decision is manufactured from passing tests.
+
+
+**Owner clarification (same session):** "One elected pair, with a separately proved
+timeout and replacement rule." ADR-005 now fixes that constraint. A local timeout
+counter is refuted as replacement authorization: validators either trust an unproved
+attempt jump (pair grinding), or make admission depend on their local delivery/timer
+history. The design must specify an objectively verifiable replacement transition
+and its fault/timing assumptions. This entry authorizes neither competing pairs nor
+an invented quorum, clock oracle or unproved delay certificate. Local retry remains
+a library operation with no election authority. The previous global selective-abort
+claims in README/WHITEPAPER and FA3 are also explicitly withdrawn on the last-revealer
+counterexample (S-077 remains open); six erroneous C++-superseded-by-C99 proof banners
+are corrected without claiming those C++ proofs have been revalidated.
+
+**Verification and independent review (same session, Darwin arm64):**
+`bash tools/ci_local.sh --c99 --jobs 4` built all selected targets successfully and
+passed 16/16 (the prior fourteen C99 Makefile targets, QPC and the node CLI gate).
+`bash tools/ci_local.sh --c99-mutants --jobs 4` rejected 18/18 isolated mutants after
+successful fresh builds, including socket reveal binding, failure propagation and
+buffered-result/EOF handling. An initially surviving DDA truncation mutant exposed
+a coincidental expected value; the gate was corrected with noncoincidental overflow
+vectors and rerun. `bash tools/ci_local.sh --docs-only` passed all 16 existing guards.
+Socket tests required execution outside the listener-restricted sandbox; failure to
+bind there was not counted as a product failure or as a mutant rejection. The code,
+CI machinery, doc diff and exclusive-pair design gate received independent adversarial
+review; identified socket/deadline and doc contradictions were corrected before this
+record. No Linux/Windows runtime, full C++ FAST, production PoSW, or sharding-security
+claim follows from these results. The sharding gate remains PROPOSED after the repairs:
+its exclusive-pair replacement and settlement obligations are still unproved.
+
+## 2026-09-22 — Local fork recovery and DSF verification direction
+
+**Owner clarification, continuing the sharding design discussion:** "Temporary fork"
+means a recoverable difference in local histories, not a proof that a transaction's
+signature was forged. The owner confirms: "For the nodes to be able to correct
+themselves locally after hardware or network or any other reason creates a temporary
+fork" and "DSF can be used for that." This clarifies the target of the proposed C99
+design; it does not change the shipped C++ acceptance or settled-history rules.
+
+**Roles and local acceptance.** Exactly two co-creators remain responsible for block
+production. Only messages received by both are eligible for inclusion. Message
+senders participate in the proposed MP-DH/commit-reveal process and verify blocks
+locally. "Senders finalize it for themselves" does NOT require collecting approvals
+from all previous-block senders, a sender quorum, or a collective approval barrier
+waiting for offline senders. Availability requirements for the separate sender
+MP-DH/commit-reveal participation still need specification.
+The assistant's hypothetical unanimity certificate and its blocking-sender objection
+were based on a misinterpretation and are not adopted. Local acceptance is recoverable;
+irreversible network-wide finality is not established or required by that term.
+
+**Selection and retries.** The owner specifies more distinct valid included ledger
+messages for same-height block conflicts, then the smaller header value; the smaller
+message-data hash for conflicting messages; and the smaller produced successor
+header for conflicting successor candidates. Messages carry known-history hashes
+to expose differing views for reconciliation. Omitted transactions are resent to
+later co-creators and revalidated; stale nonces or invalid spends are not revived by
+retry or hash priority. The exact canonical comparison of complete histories and
+its composition with the intended validated-work rule still require specification
+and review. No new wire format or comparator is implemented by this entry.
+
+**Timing clarification.** The intended block-time/total-attempt-timeout ratio is 1:3,
+with configurable block time B and a 3B timeout from round start. The current C99
+prototype's 1000/2000 ms deadlines are unchanged. The VDF's agreed election role is
+to delay knowledge of the next pair; obtaining that knowledge early does not confer
+early production rights. It is not adopted as a "replacement proof". Shared
+round-start, eligibility and recovery semantics remain design obligations.
+
+**DSF disposition.** ADR-005 §3.4-§3.5 records the recovery requirements and the next
+test design. Start with a finite-candidate one-chain model: witness divergence under
+different deliveries, heal and replay missing data, let nodes independently choose
+and recover, then assert agreement of full histories and ledger state. At every
+visible state boundary compare against independent replay of the node's own selected
+valid history; check transaction dependencies, conservation, nonce/replay rules and
+crash recovery. Require fault/split/correction witnesses and falsify-on-mutant checks
+at the receiver/apply layer. Cross-shard dependencies are a subsequent increment.
+
+The existing standalone DSF models, C++ real-engine scheduler and C99 local-attempt
+seams are distinct surfaces. The older C++ settled-prefix monitor is not weakened
+to make the proposed C99 model pass. No existing green DSF result establishes the
+new convergence property. Simulation can find and reproduce counterexamples;
+bounded passing runs do not replace a proof under explicit fault/delivery assumptions.
+This is a documentation/design increment only: no new scenario, consensus rule,
+chain recovery implementation or sharding-security claim has shipped. ADR-005 remains
+PROPOSED. Verification and independent review are recorded below after completion.
+
+**Verification and independent review (same session):**
+`bash tools/ci_local.sh --docs-only` passed all 16 documentation/coherence guards;
+`git diff --check` passed. Independent review corrected three distinctions before
+signoff: a missed model-justified recovery bound is not proof of permanent divergence;
+local finalization does not introduce a collective approval barrier but leaves
+MP-DH participation availability to specify; cross-shard invariants use coherent
+local dependency views and compare nodes after relevant delivery/recovery. Review
+then found no further actionable issues. No binaries or new simulations were built
+or executed for this documentation-only increment.
+
+## 2026-09-22 — Noninteractive senders and public verification of co-creator derivation
+
+**Owner decision, continuing the same design discussion:** the owner accepts removing
+sender participation in MP-DH/commit-reveal and then explicitly says "Yes adopt that"
+to public verification of the co-creators' DH-derived result. This supersedes the
+interactive-sender proposal in the earlier local-recovery entry; the earlier entry
+is retained as history. Exactly two elected co-creators supply fresh ephemeral
+contributions. Senders submit signed transactions and verify locally, with no sender
+shares, sender reveals or collective approval barrier required to produce a block.
+
+**Adopted verification requirement.** An ordinary receiver must be able to verify
+that the published result derives from both co-creators' committed ephemeral
+contributions, binds the exact canonical ordered-body hash and chain/shard, parent,
+height and round context, and is the input used by the VDF. The block must carry the
+necessary public cryptographic evidence. Creator signatures authenticate endorsement
+but do not alone establish correct derivation. The body hash binds the transactions;
+it is not independent secret entropy.
+
+This adopts a requirement, not a completed cryptographic construction. The exact
+proof relation and suite, commitment scheme, publication sequence, canonical bytes
+and receiver checks require design and independent review before implementation.
+No private-key disclosure requirement or specific RFC proof suite is adopted.
+Correct derivation does not by itself prove resistance to candidate grinding or
+convergence. The accepted temporary-fork/local-recovery model, K=2 roles, shared
+message eligibility and 1:3 block-time/total-timeout ratio remain as recorded.
+
+**Scope.** ADR-005 remains future-tier and PROPOSED. This increment updates its role
+and verification requirements only; it ships no source change, public-proof verifier,
+new simulation or production sharding behavior. Verification and independent review
+are recorded below after completion.
+
+**Verification and independent review (same session):**
+`bash tools/ci_local.sh --docs-only` passed all 16 existing guards and
+`git diff --check` passed. Independent review found no actionable issues: the
+record keeps sender verification noninteractive, treats public derivation evidence
+as a requirement awaiting a concrete construction, and introduces neither sender
+voting nor private-key disclosure. No binaries or new simulations were built or run.
+
+## 2026-09-22 — Same-body numeric-header preference and local correction
+
+**Owner decision:** "if the message body is the same then the block with the
+smaller(as big number) header is the preffered one." The owner explicitly adopts
+the clarification: same height and identical message body imply preference for
+the smaller numeric header among valid competing blocks; a node receiving it later
+corrects its local history and revalidates affected descendants. This is the header
+itself represented as a number, not a substitution of its hash. The other recorded
+message-selection rules remain in place.
+
+ADR-005 now states this case explicitly and includes it in the proposed DSF recovery
+scenario. A temporary difference before both candidates have been delivered is
+permitted. The assistant's earlier two-block branch illustration did not establish
+reachability under the intended producer-eligibility rules and is not a counterexample
+to the adopted same-body tie-break. A simulation must validate the eligibility of
+its candidates and descendants rather than assuming either branch can advance.
+
+**Scope.** This decides the preference and recovery requirement for this case. It
+does not claim that a canonical header encoding, complete history comparator,
+production recovery path or new DSF scenario has shipped. ADR-005 remains future-tier
+and PROPOSED. Verification and independent review are recorded below after completion.
+
+**Verification and independent review (same session):**
+`bash tools/ci_local.sh --docs-only` passed all 16 existing guards and
+`git diff --check` passed. Independent review found no actionable issues in the
+recorded preference, later correction requirement or DSF eligibility constraints.
+This documentation-only increment built no binaries and ran no new simulations.
+
+## 2026-09-22 — Modulus routing clarification and existing mapping baseline
+
+**Owner clarification:** "Sharding is based on modulus so every node knows its
+shard." Repository inspection also confirms an existing canonical account-routing
+map in `src/crypto/random.cpp::shard_id_for_address`, `PROTOCOL.md` §7.2 and
+`ShardRoutingSoundness.md`: the first eight bytes of
+`SHA256(salt || "shard-route" || addr)`, interpreted big-endian, modulo S. For
+valid S >= 1 this maps each address to one shard; S = 1 yields zero. The existing
+definition pins salt and shard count at genesis.
+
+The assistant's statement that a new canonical account mapping must be selected
+was incorrect. ADR-005 now identifies the existing mapping as its routing baseline.
+The remaining C99 work is integration with the canonical account representation and
+receiver/apply enforcement, not a request to decide the mapping again. Routing
+alone neither selects the co-creator pair nor implements cross-shard state changes.
+This entry does not infer a new validator-membership or election rule from the
+account-routing function.
+
+**Documentation correction.** The whitepaper's routing formula omitted the literal
+`"shard-route"` tag already present in the implementation and PROTOCOL. It now
+includes that tag. No hash, genesis field, wire byte, transaction or execution rule
+changes. No C99 routing implementation or new test ships in this documentation
+increment. Verification and independent review are recorded below after completion.
+
+**Verification and independent review (same session):**
+`bash tools/ci_local.sh --docs-only` passed all 16 existing guards and
+`git diff --check` passed. Independent review confirmed the formula against the
+implementation, including raw salt/tag/address concatenation and big-endian folding,
+and found no actionable issues. No binaries or new simulations were built or run.
+
+## 2026-09-22 — Large shard populations and shard-local co-creator eligibility
+
+**Owner decision:** "Two rules will fix that. Shards are with big populations and
+Shard-local eligibility." Each shard is provisioned with a large eligible population.
+Exactly two distinct co-creators are elected from that shard's own eligible pool;
+subsequent attempts retain that shard-local eligibility boundary. There is no
+network-wide producer fallback. ADR-005 now records this choice instead of asking
+whether production should draw on participants assigned to other shards.
+
+**Bounded claim.** A numerical population minimum or reserve margin is not chosen
+by the word "big". Those provisioning limits and the availability/fault assumptions
+remain to specify before claiming progress. Under the retained K=2 requirement, an
+attempt with fewer than two eligible local participants completing their cooperation
+cannot produce a valid block. This is a consequence of the production rule, not a
+new timeout algorithm or a guarantee against arbitrary outages. The decision does
+not authorize automatic resharding or replace the agreed 1:3 timing requirement.
+
+**Scope.** This documentation-only increment records the eligibility/provisioning
+decision. It ships no membership validator, election, replacement transition or new
+simulation. ADR-005 remains future-tier and PROPOSED. Verification and independent
+review are recorded below after completion.
+
+**Verification and independent review (same session):**
+`bash tools/ci_local.sh --docs-only` passed all 16 existing guards and
+`git diff --check` passed. Independent review found no actionable issues in the
+shard-local eligibility requirement or the stated population/availability limits.
+No binaries or new simulations were built or run.
+
+## 2026-09-22 — C99 ledger self-transfer correction
+
+**Scope and reason.** The owner authorized continued development toward merging
+the sharding branch. Recovery models require a truthful apply path. In the C99
+standalone ledger, sender and receiver alias for a self-transfer: the old receiver
+write overwrote the debit with `old_balance + amount`, creating value. This is
+independent of production fork choice and is corrected as its own increment.
+
+**Rule and argument.** After normal signature, nonce, fee and gross-balance
+validation, a self-transfer subtracts only its fee, advances its nonce once, and
+adds the fee to the existing accumulator. Assuming that addition is representable,
+balance plus fees is conserved. No second receiver write or gross receiver-overflow
+test applies. Fee-accumulator overflow and nonce exhaustion remain separate next
+increments; this change does not claim those are solved.
+
+**Verification.** The added apply-layer regression first built successfully and
+failed at the expected balance assertion on the old source. With the correction,
+`ci_local --c99 --c99-test test-triple-entry-ledger --jobs 4` passes;
+`ci_local --c99-mutants --jobs 4` rejects all 21 isolated mutants after successful
+fresh builds, including aliasing, self-fee and self-nonce mutations. A restricted
+first mutation run could not start its localhost listener and was treated as an
+infrastructure failure; the recorded run enabled localhost sockets. Independent
+diff review approved the runtime rule and required a byte-copy test snapshot to
+avoid unspecified structure-padding comparisons; that correction is included.
+
+## 2026-09-22 — C99 nonce exhaustion
+
+The standalone transaction verifier now rejects an exhausted sender nonce before
+addition. The final representable increment remains valid; an unsigned wrap to
+zero can no longer restart a sender's nonce sequence. Apply invokes this guard
+before any mutation. This is separate from the preceding self-transfer fix.
+
+**Verification:** independent design and diff reviews found no actionable defect.
+The signed boundary gate covers the final valid increment and rejects zero, one
+and the repeated maximum at verifier and apply, preserving the complete state.
+`ci_local --c99-mutants --jobs 4` passed its fresh baseline and rejected 22/22
+freshly built mutants, including removal of the exhaustion guard. C99 root
+encoding and accumulated-fee overflow are not closed by this increment.
+
+## 2026-09-22 — C99 accumulated-fee overflow preflight
+
+The standalone apply path now checks representability of `total_fees + fee`
+after transaction verification and before receiver registration or any balance
+write. Failed preflight leaves the complete ledger unchanged, including account
+count. Exact fit and zero fee at a maximal accumulator remain valid. The safe
+subtraction comparison makes both self-transfer and distinct-recipient additions
+representable, discharging the earlier self-transfer proof's fee precondition.
+
+Independent design and source reviews found no actionable defect. The regression
+uses otherwise valid signed transactions and checks self, existing-recipient and
+new-recipient paths, exact fit, zero fee and full-state rejection snapshots.
+Verification execution is recorded below when complete. Portable root encoding is
+still outside this correction; no production C99 block-admission claim is made.
+
+**Execution:** `ci_local --c99-mutants --jobs 4` passed its fresh baseline and
+rejected 24/24 freshly built mutants, including removed and overrestrictive fee
+preflights. `ci_local --docs-only` passed all 16 guards. The prior snapshot taken
+while routing tests were being edited failed its baseline and was discarded;
+no mutant verdict was credited from that run.
+
+## 2026-09-22 — C99 canonical account-routing query
+
+**Implemented scope.** A bounded C99 mirror now maps 32-byte anonymous account
+keys through their canonical lowercase `0x` address and the existing salted
+`shard-route` hash/modulus formula. Count is a validated nonzero u32, including
+65536 and UINT32_MAX; no per-shard allocation is inferred from that count.
+`determ-node` exposes `get_shard_for_pubkey` using count/salt fixed at startup.
+The result explicitly identifies local configuration and says consensus is not
+enforced. This implements useful routing, not authenticated genesis, membership,
+transaction admission, sharded execution or settlement. C++ behavior is unchanged.
+
+**Review.** Independent review checked implementation, integration and proof scope,
+and found and resolved request-ID correlation, response truncation and method-key
+selection errors. In particular, an ID string equal to `method` must not be mistaken
+for a JSON object key. Request parsing remains narrow to the new endpoint; there
+is no claim that unrelated legacy RPC methods have a strict JSON grammar. Fixed
+vectors use an independent SHA-256 oracle, and live HTTP tests verify actual node
+startup configuration and rejection of per-request reconfiguration.
+
+**Verification:** the routing-only staged snapshot independently built and passed
+all 18 of its C99 targets, including actual HTTP queries. The whole workspace's
+strict `-std=c99 -Wall -Wextra -Werror -pedantic` Makefile build passed. Ten routing
+mutations were rejected after successful isolated builds, including reversion of
+the actual-object-key method selector; all existing mutation cases also passed.
+The final full-workspace mutation total is recorded with the following recovery
+increment. Documentation guards pass; independent review found no remaining
+routing source, integration or documentation finding.
+
+## 2026-09-22 — Bounded C99 recovery model
+
+**Implemented scope.** `test-dsf-k2-recovery` drives a new test-only receiver and
+replayer from one common anchor. It admits at most eight records, four transactions
+per candidate and four blocks in the selected suffix. Frozen configuration supplies
+pair eligibility and shared-receipt facts; these are explicit model oracles, not
+cryptographic or production membership proofs. Sender signatures and ledger apply
+are real. Canonical model headers bind body/context and are compared as full
+big-endian numbers, not hashes. Hashes identify original parent relationships only.
+
+Within the supported finite domain, valid root siblings rank by distinct included
+message count and then smaller numeric header. Descendants remain attached to their
+original parents. Recovery replays from the anchor into scratch, publishes coherent
+history/state in one model transition, and revalidates/deduplicates omitted messages.
+Individually valid same-sender/nonce queue alternatives keep the smaller data hash;
+the queue is not asserted to be jointly executable. Memory-journal replay models
+old/new crash cuts and invalidates preparations made before restore, without a
+filesystem-durability claim. The model introduces no new dynamic allocation; the
+called Ed25519 implementation's existing allocation behavior is unchanged.
+
+**Domain boundary and proof.** With the same immutable fixtures, a finite fitting
+candidate set, collision-free commitments and eventual delivery of its ancestry,
+each receiver derives the same validity set. The deterministic root order and unique
+valid descendants then yield the same history and deterministic ledger state.
+Conflicting transaction bodies among root siblings and competing descendants below
+that first split remain outside this argument and return UNSUPPORTED atomically.
+This does not decide the production composition of conflict-message preference,
+block ranking and complete-history comparison. No sender quorum, irreversible
+finality, full sharding implementation or production VDF/election proof is inferred.
+The owner has been asked to clarify whether smaller conflicting-message hashes act
+only during assembly/requeue or override block ranking; no answer is assumed.
+
+**Independent review and verification.** Review corrected impossible ancestry being
+left pending, stale prepared publication across restore, and unspecified structure
+padding in snapshots. It also found a masked receipt mutation: another conflict
+rule rejected the same fixture. The fixture now uses an independent funded sender,
+so deleting the shared-receipt check actually admits the forbidden candidate.
+The final `ci_local --c99-mutants --jobs 4` run passes its fresh baseline and rejects
+44/44 freshly built mutants: 24 prior cases, ten routing cases and ten recovery
+cases. The complete final C99 suite passes 19/19 targets, documentation guards
+pass 16/16, and the strict C99 Makefile build passes. All runtime execution here
+is Darwin arm64; no Linux/Windows runtime or C++ FAST result is claimed. Source,
+integration and documentation review found no remaining actionable finding within
+these increments' declared scope. Cross-shard dependency recovery is the next model
+increment, not a property established by this one.
+
+## 2026-09-22 — Transaction-hash preference is assembly/requeue only
+
+**Owner decision:** "Assembly/requeue only; keep block ranking unchanged."
+This resolves the question recorded in the preceding recovery-model increment.
+Among valid competing blocks, distinct included message count and then smaller
+numeric header remain the ranking rules, including when their bodies contain
+conflicting transactions from the same sender at the same nonce. Smaller message
+data hash chooses among valid transaction alternatives during assembly/requeue;
+it neither overrides block ranking nor substitutes a transaction into an already
+selected block. Requeue must still reject a consumed nonce or invalid spend.
+
+**Implemented increment.** The bounded C99 model removes its cross-root conflict
+rejection and unused UNSUPPORTED_CONFLICT status. Each candidate is still validated
+against its original parent history. Losing candidates remain valid on their own
+ancestry; selected state is replayed from the winning history. The finite-convergence
+argument consequently no longer excludes conflicting root bodies. The unique-child
+restriction below the first split remains a model bound; this increment supplies
+no new complete-history/work ordering, production assembly or cryptographic verifier.
+
+**Gate design.** Two signed fixtures deliberately oppose transaction-hash preference
+to block preference. One winner has more messages despite both its larger conflicting
+transaction hash and larger header; the other wins by smaller header at equal count,
+still carrying the larger conflicting transaction hash. Both delivery orders check
+admission, convergence, descendant detachment, original-parent validity, consumed
+nonce rejection and journal replay. The new regression first built successfully and
+failed against the prior conflict guard, then passed after its removal. New mutants
+restore conflict rejection, prioritize transaction hash over block ranking, replay
+siblings against selected state, or revalidate the queue against the anchor.
+Execution and independent review are recorded below after completion.
+
+**Execution and review:** `ci_local --c99 --jobs 4` passes 19/19 targets;
+`ci_local --c99-mutants --jobs 4` rejects 48/48 isolated mutants after successful
+fresh builds, including all four cases above; `ci_local --docs-only` passes 16/16
+guards. The strict C99 `-Wall -Wextra -Werror -pedantic` Makefile build also passes.
+Execution is Darwin arm64; no Linux/Windows runtime or C++ FAST result is claimed.
+Independent adversarial review of the final source, fixtures, mutations, proof
+scope and decision record found no actionable finding. This closes the stated
+message-hash/block-ranking ambiguity without asserting production sharding readiness.
+
+## 2026-09-22 — Bounded Ed25519 storage prerequisite
+
+**Implemented boundary.** The shared Ed25519 signer/verifier now use a fixed
+512-byte automatic buffer for messages up to 448 bytes; larger messages retain
+the existing allocation fallback. The length-overflow check, hash inputs and
+signature-verification predicates are unchanged. Signing still wipes the used
+buffer span; only heap storage is freed. This makes the standalone ledger/model's
+88-byte and canonical anonymous TRANSFER's 195-byte preimages fit without heap
+allocation, without claiming that every node feature or generic message does so.
+The public API comment also corrects an older false signature-uniqueness claim:
+rejecting S+L does not force a signer to use a deterministic nonce.
+
+**Proof and independent review.** `64 + message_length <= 512` bounds the longest
+hash input; both signing hash inputs remain fully initialized and byte-identical.
+The design and final diff received independent adversarial review. The gate
+intercepts allocator calls in the actual primitive translation unit, pins published
+RFC signatures and independent OpenSSL boundary signatures, tests denied allocation,
+fallback success/failure, output neutrality, scalar/key rejection and overflow.
+The pre-change source built and failed the new bounded-allocation assertion.
+
+**Verification.** The focused C99 target passes. All nine new allocator/boundary/
+cleansing mutants reject after successful fresh builds in a crypto-only source
+snapshot. The ordinary `ci_local.sh --jobs 4` freshly builds shared C++ consumers
+and passes 333 FAST wrappers, zero platform skips, and all 16 documentation guards
+on Darwin arm64. No Linux/Windows runtime result is claimed. The crypto prerequisite
+is kept separate from the subsequent signed-pending-inbox increment.
+
+## 2026-09-22 — Signed intra-shard pending inbox
+
+**Implemented increment.** The C99 node has an opt-in bounded pending inbox with
+`submit_pending_transfer` and `get_pending_transfers`. `--pending-genesis` pins an
+exact local chain identity; the existing startup count/salt configure routing.
+The inbox accepts the existing 397-byte canonical anonymous payload/PQ-empty
+TRANSFER subset and verifies the exact 195-byte C++ signing preimage, advertised
+hash, signature, sender non-small-order check, chain identity and source/destination
+routing before any duplicate/conflict/capacity decision. ASCII address-prefix core
+slots are preserved; no incompatible transaction format or extra shard field is
+introduced. Full owned frames occupy at most eight sparse shard buckets, four slots
+each, independently of configured S. No new heap allocation is introduced.
+
+**Meaning and limits.** Successful replies explicitly say `state_validated:false`
+and `config_source:local`. This is local inspection storage, with no balance/nonce
+readiness, combined-spend validation, persistence, gossip or block-assembly consumer.
+Cross-shard transfers are refused. Same-sender/nonce pending alternatives prefer
+the smaller recomputed data hash, but a signed stale or unaffordable alternative
+can displace an incumbent here. The owner's assembly/requeue rule among state-valid
+alternatives therefore still requires a state-validating consumer. Block ranking
+is unchanged. Finite bounds do not prove fair admission or DoS resistance; arbitrary
+signing keys can occupy slots. Neither bucket separation nor this single-threaded
+RPC loop claims parallel shard execution.
+
+**Receiver and proof boundary.** Every retained entry passed complete authentication
+under the copied configuration; induction over insert/replace preserves that
+invariant. No rejection mutates caller storage or output objects. RPC validates its
+closed bounded envelope, obtains metadata from the pool's copied configuration and
+preflights a 512-byte response capacity before mutation (maximum success is 481
+bytes plus NUL). The contract and limits extend `ShardRoutingSoundness.md`, and the
+README, protocol, whitepaper, security ledger and proposed ADR-005 track that scope.
+
+**Review and verification.** Independent adversarial design and final-diff review
+found no remaining actionable finding within this increment. Review strengthened
+two masked test cases: wrong-shard admission is tested against an empty queue, and
+RPC output failure uses a genuinely too-small buffer before first admission.
+Independently signed binary fixtures pin the shipped transaction format.
+`ci_local --c99 --jobs 4` passes all 22 targets; live HTTP submits and retrieves
+exact signed frames under default and non-default configuration. A final focused
+node run also checks that opt-in without an RPC port refuses startup. The complete
+mutation run rejects 71/71 isolated mutants after fresh successful builds, including
+14 pending-library/RPC/node cases. An earlier run stopped at an ambiguous existing
+routing mutation anchor after the parser refactor; that infrastructure stop was not
+counted, the anchor was narrowed, and the full suite was rerun. Documentation guards
+pass 16/16; the strict C99 Makefile build passes. Runtime evidence is Darwin arm64;
+shared C++ validation is recorded in the preceding prerequisite entry. This is a
+mergeable experimental foundation, not completed production sharding or settlement.
+
+
+## 2026-09-22 — Run C99 gates in pull-request CI
+
+Branch integration review found that the existing CI jobs invoked only the C++
+`ci_local` path and UBSan, so the new C99 regressions were not exercised on pull
+requests. A separate pinned Ubuntu 24.04 job now invokes `--c99`, `--c99-mutants`
+and `--docs-only`, with Python 3.12 and a 30-minute timeout. It preserves all
+existing jobs and requires no additional crypto-oracle dependency installation.
+The workflow and exact wrapper commands were independently reviewed and parsed as
+YAML. Local gate results remain those above; no Linux Actions execution is claimed
+by this configuration change. Current remote main was checked through the GitHub
+API and matches the stored `origin/main` ancestor; no merge conflict is present.
+
+## 2026-09-22 — Portable bounded C99 HTTP POST framing
+
+The first hosted C99 run passed 20/22 targets but failed HTTP POST and the node
+smoke test. The parser called GNU `strcasestr` without its declaration under the
+Linux build's POSIX feature macros, truncating the returned pointer. Replace that
+substring search with bounded, case-insensitive matching of complete header names.
+POST now requires one positive decimal Content-Length, rejects duplicates and
+Transfer-Encoding, and bounds every decimal step against the receive capacity
+remaining after the header and reserved NUL byte. Dispatch still waits for all
+declared body bytes. This is a portable bounded POST contract, not general HTTP
+hardening or a change to transaction/consensus validation.
+
+Receiver tests submit an independently signed admissible transaction and assert
+that malformed, oversized or incomplete framing cannot mutate its pending inbox.
+They cover exact header matching, mixed case, duplicate fields, decimal syntax,
+header/body separation, fragmented delivery and the last usable receive byte.
+Independent adversarial review corrected two masked mutation fixtures: an unchecked
+digit must admit a valid body rather than merely change the error status, and a
+duplicate length must reach dispatch if its rejection is removed.
+
+The focused `ci_local --c99` HTTP and node targets pass after fresh builds; the
+strict C99 Makefile build passes. The complete `ci_local --c99-mutants --jobs 4`
+run rejects 79/79 freshly built mutants, including eight new HTTP cases. These
+execution results are Darwin arm64. The first hosted Linux shared and UBSan jobs
+passed; hosted C99 verification of this repair remains to be rerun. The proof
+boundary and security ledger are updated without claiming full HTTP conformance.
+
+## 2026-09-22 — Windows outbox build compatibility
+
+The first hosted Windows build failed at three `std::max(...)` calls in the light
+outbox because the Windows headers define a function-like `max` macro. Parenthesize
+the function name at those three call sites. The overload, arguments and nonce
+calculations are unchanged; no consensus or outbox policy is introduced.
+
+Independent final-diff review found no actionable issue. A fresh shared Darwin
+arm64 `ci_local --jobs 4` build passes all 333 FAST wrappers, zero platform skips,
+and all 16 documentation guards. This verifies unchanged behavior on the available
+local platform; the actual MSVC build remains subject to the hosted Windows rerun.
+This compile-only repair is committed separately from the HTTP framing change.
+
+## 2026-09-22 — Deterministic buffered-result/EOF regression
+
+Hosted Linux passed all 22 ordinary C99 targets and rejected the first 78 isolated
+mutants, but `net-eof-before-buffered-result` survived. The earlier Darwin result
+was genuine but insufficient across platforms: kqueue reports a TCP peer close
+with EOF, whereas epoll can report unread data without HUP at that point. The
+existing TCP lifecycle test therefore did not force the event combination needed
+to falsify the EOF-first receiver mutation on Linux.
+
+Add a test-only local stream socketpair fixture. Both native event watchers are
+registered before the fully closed peer leaves queued frames. A separate observer
+asserts READ and EOF together without consuming the Contributor's readiness. The
+unchanged Contributor poll must then preserve the exact complete result; a sibling
+stream missing its last byte must terminate without a result. The positive case
+runs before the negative control and existing TCP tests. No production event,
+transport or consensus rule changes, and the original mutation remains intact.
+
+Independent adversarial review approved the final test and proof-boundary diff.
+The focused `ci_local --c99 --c99-test test-k2-net-rpc --jobs 4` build and test pass
+on Darwin arm64. The complete `ci_local --c99-mutants --jobs 4` run rejects 79/79
+mutants after fresh successful builds, including the unchanged EOF-first mutation;
+all 16 documentation guards pass. Hosted Linux re-verification is recorded in the
+pull request after execution; no rejected-build result is counted as a mutant.
+
+## 2026-09-22 — Scope secret-input kernel observations to Linux
+
+The hosted MSVC build now succeeds. Its FAST log reached
+`test_light_seed_source.sh` and remained there for more than seven minutes before
+the superseded run was canceled. Static review found that both this wrapper and
+`test_secret_on_argv.sh` treated a readable `/proc/self/cmdline` as sufficient for
+Linux-specific child-name, FIFO and wait-channel observations. An emulated `/proc`
+does not establish those native-process contracts. The watchdog only bounds the
+child; polling and background FIFO helpers can continue after that child exits.
+The captured log does not identify the exact stalled shell statement, so no
+production prompt-reader defect is inferred from the elapsed time.
+
+Restrict only section D and the wait-channel capability probe to Linux with
+readable `/proc`. Non-Linux platforms explicitly report those kernel observations
+as partial skips. Functional source equivalence, piped prompts, refusals, warning
+checks and light blind-seed tests remain active. Existing Linux assertion bodies
+and failure handling are unchanged. No production input or cryptographic code
+changes. The security ledger now states this platform boundary explicitly.
+
+Independent adversarial review approved the final two-script diff, including the
+actual probe-execution guard and accurate skip diagnostics. A fresh shared Darwin
+arm64 `ci_local --jobs 4` build passes all 333 FAST wrappers, zero entire-wrapper
+skips, and all 16 documentation guards. Partial kernel-observation skips remain
+explicit. Hosted verification of the updated guards will be recorded in the pull
+request after execution; this increment makes no Windows kernel-observation claim.
+
+## 2026-09-22 — Preserve node-key encryption coverage on Windows
+
+Hosted Windows completed the FAST suite and exposed six wrapper failures. The
+node-key encryption wrapper rejected the emulated 0644 mode on Git Bash because
+its platform check recognized only `Windows_NT`. Scope the 0600 assertion to
+POSIX and explicitly report its partial skip on Windows-family shells. Encryption
+and wallet interoperability checks remain active; no Windows ACL property is
+claimed. The security ledger states the same boundary.
+
+Convert the temporary directory with `cygpath -m` on Windows before constructing
+`file:` source arguments, which MSYS does not translate for native executables.
+Resolve the wallet through `common.sh`'s `DETERM_WALLET` rather than appending
+`-wallet` after a possible `.exe` suffix; quote executable paths. No production
+key handling or encryption rule changes.
+
+Independent diff review approved the correction. A fresh shared Darwin arm64
+`ci_local --jobs 4` run passes 333 FAST wrappers, zero entire-wrapper skips, and
+all 16 documentation guards. Actual Windows execution remains for the hosted
+rerun; a POSIX pass is not claimed as evidence about native Windows permissions.
+
+## 2026-09-22 — Canonical scanner finding paths across platforms
+
+The Windows D3 gate reported all five existing allowlisted files as both new
+findings and stale entries: `os.path.normpath` emitted backslashes while the exact
+allowlist uses repository slash spelling. Normalize only the emitted path identity
+to slashes. File opening, detection predicates, line numbers and both allowlists
+are unchanged. An added E3 assertion executes the actual generated checker under
+Windows `ntpath` formatting and pins the exact path plus line on every host. The
+security ledger's gate row now describes the current 53 assertions and scope.
+
+A fresh Darwin arm64 `ci_local --jobs 4` baseline passes all 333 wrappers and 16
+documentation guards. Removing only the emitter normalization, then running the
+same entry point after a successful build, yields 332 passing wrappers and one
+failure: E3 reports `sel\test_e3_vacuous.sh:5` instead of the required slash path,
+with 52 assertions passing and one failing. The reviewed script is restored
+byte-for-byte after that run. Independent diff review approved the gate; the
+final documentation guards pass. Native Windows confirmation remains hosted.
+
+## 2026-09-22 — Preserve D.5 oracle fixture checkout bytes
+
+Three hosted Windows D.5 wrappers passed their in-process checks but failed the
+strict oracle drift comparison. Their emitters already write LF; checkout with
+`core.autocrlf=true` changed the three committed text fixtures to CRLF. Read-only
+checkout-filter reproduction measured 55, 1330 and 7 inserted carriage returns
+for `d5_codec.json`, `d5_draw.json` and `d5rp.json`, respectively.
+
+Add exact `text eol=lf` attributes for those three paths only. Under the same
+checkout filter their bytes now equal their committed blobs, including SHA-256;
+no golden, emitter or comparison changes. Independent review approved the diff.
+The shared Darwin `ci_local --jobs 4` baseline passes all 333 wrappers and 16
+documentation guards. Hosted Windows confirmation remains for the rerun.
+
+## 2026-09-22 — Native paths for secret-source fixtures
+
+Hosted Windows rejected `file:` secret sources whose test fixture paths contained
+MSYS `/d/...` spelling; environment and piped-prompt sources passed. Construct the
+fixture root from `common.sh`'s existing platform-aware `PROJECT_ROOT`, rather than
+`PWD`, so native executables receive `D:/...` spelling inside those arguments.
+The fixture contents, functional/refusal assertions and explicit Linux-only
+kernel observations are unchanged; no production source changes.
+
+Independent review approved this one-line correction. The shared Darwin
+`ci_local --jobs 4` baseline passes all 333 wrappers, zero entire-wrapper skips,
+and 16 documentation guards. Native Windows verification remains for the hosted
+rerun; the previous platform failures are not recorded as passes.

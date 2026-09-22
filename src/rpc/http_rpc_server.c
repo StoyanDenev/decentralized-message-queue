@@ -120,6 +120,60 @@ static void send_http_error(http_client_t *c, int status_code, const char *statu
     }
 }
 
+static int http_field_is(const uint8_t *name, size_t len, const char *expected) {
+    if (len != strlen(expected)) return 0;
+    for (size_t i = 0; i < len; ++i) {
+        uint8_t c = name[i];
+        if (c >= 'A' && c <= 'Z') c = (uint8_t)(c + ('a' - 'A'));
+        if (c != (uint8_t)expected[i]) return 0;
+    }
+    return 1;
+}
+
+/* POST framing only. Scan complete CRLF header lines, excluding the request
+ * line and body. The receive buffer reserves one byte for its trailing NUL.
+ * Return the HTTP error status or zero, without publishing a partial length.
+ */
+static int http_content_length(const uint8_t *data, size_t header_len, size_t *out) {
+    size_t pos = 0, value = 0;
+    int seen = 0;
+    if (header_len > HTTP_RPC_BUF_SIZE - 1) return 413;
+    const size_t limit = (HTTP_RPC_BUF_SIZE - 1) - header_len;
+    while (pos + 1 < header_len && !(data[pos] == '\r' && data[pos + 1] == '\n')) ++pos;
+    if (pos + 1 >= header_len) return 400;
+    pos += 2; /* Skip the request line. */
+    while (pos + 1 < header_len) {
+        size_t end = pos, colon;
+        while (end + 1 < header_len && !(data[end] == '\r' && data[end + 1] == '\n')) ++end;
+        if (end + 1 >= header_len) return 400;
+        if (end == pos) {
+            if (end + 2 != header_len || !seen || value == 0) return 400;
+            *out = value;
+            return 0;
+        }
+        colon = pos;
+        while (colon < end && data[colon] != ':') ++colon;
+        if (colon == pos || colon == end) return 400;
+        if (http_field_is(data + pos, colon - pos, "transfer-encoding")) return 400;
+        if (http_field_is(data + pos, colon - pos, "content-length")) {
+            size_t start = colon + 1, stop = end;
+            if (seen) return 400;
+            seen = 1;
+            while (start < stop && (data[start] == ' ' || data[start] == '\t')) ++start;
+            while (stop > start && (data[stop - 1] == ' ' || data[stop - 1] == '\t')) --stop;
+            if (start == stop) return 400;
+            for (size_t i = start; i < stop; ++i) {
+                if (data[i] < '0' || data[i] > '9') return 400;
+                size_t digit = (size_t)(data[i] - '0');
+                if (value > limit / 10 || (value == limit / 10 && digit > limit % 10)) return 413;
+                value = value * 10 + digit;
+            }
+        }
+        pos = end + 2;
+    }
+    return 400;
+}
+
 static void handle_client_request(http_rpc_server_t *server, http_client_t *c) {
     /* Check for end of HTTP headers: "\r\n\r\n" */
     char *hdr_end = strstr((char *)c->rx_buf, "\r\n\r\n");
@@ -182,20 +236,14 @@ static void handle_client_request(http_rpc_server_t *server, http_client_t *c) {
         return;
     }
 
-    /* Parse Content-Length */
-    char *cl_pos = strcasestr((char *)c->rx_buf, "Content-Length:");
     size_t content_len = 0;
-    if (cl_pos && cl_pos < hdr_end) {
-        content_len = (size_t)strtoul(cl_pos + 15, NULL, 10);
-    }
-
-    if (content_len == 0) {
-        send_http_error(c, 400, "Bad Request", "Missing or zero Content-Length");
+    int framing = http_content_length(c->rx_buf, header_len, &content_len);
+    if (framing == 413) {
+        send_http_error(c, 413, "Payload Too Large", "Body exceeds 16KB buffer");
         return;
     }
-
-    if (header_len + content_len > HTTP_RPC_BUF_SIZE) {
-        send_http_error(c, 413, "Payload Too Large", "Body exceeds 16KB buffer");
+    if (framing != 0) {
+        send_http_error(c, 400, "Bad Request", "Invalid Content-Length or unsupported transfer encoding");
         return;
     }
 

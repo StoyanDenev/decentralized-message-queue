@@ -25,7 +25,10 @@ extern "C" {
 #define WIRE_MAX_ADDR_LEN         128U
 #define WIRE_MAX_DOMAIN_LEN       256U
 #define WIRE_MAX_PAYLOAD_LEN      65536U
-#define WIRE_MAX_VDF_BUNDLE_LEN   (WIRE_MAX_PAYLOAD_LEN * 2 + 8)
+#ifndef MAX_BUNDLE_SIZE
+#define MAX_BUNDLE_SIZE           131104
+#endif
+#define WIRE_MAX_VDF_BUNDLE_LEN   MAX_BUNDLE_SIZE
 
 typedef enum {
     WIRE_OK                          =  0,
@@ -76,13 +79,12 @@ wire_status_t wire_parse_transaction(const uint8_t *data, size_t data_len, wire_
  * Safe Concatenation:
  * Aggregator bundles raw reveals into the canonical VDF input payload.
  * Serialization: [BE32(len_a)][reveal_a][BE32(len_b)][reveal_b]
- * Enforces strict boundary checks to eliminate buffer overflow vectors.
+ * Enforces strict boundary checks (offset + parsed_length > MAX_BUNDLE_SIZE) to eliminate buffer overflow vectors.
  */
 wire_status_t wire_bundle_vdf_input(const uint8_t *reveal_a, uint32_t len_a,
                                     const uint8_t *reveal_b, uint32_t len_b,
                                     uint8_t *out_buf, size_t max_out_len,
                                     size_t *out_written_len);
-
 
 /*
  * ── Canonical Block Header Specification ─────────────────────────────────────
