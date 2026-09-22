@@ -5849,3 +5849,68 @@ review; identified socket/deadline and doc contradictions were corrected before 
 record. No Linux/Windows runtime, full C++ FAST, production PoSW, or sharding-security
 claim follows from these results. The sharding gate remains PROPOSED after the repairs:
 its exclusive-pair replacement and settlement obligations are still unproved.
+
+## 2026-09-22 — Local fork recovery and DSF verification direction
+
+**Owner clarification, continuing the sharding design discussion:** "Temporary fork"
+means a recoverable difference in local histories, not a proof that a transaction's
+signature was forged. The owner confirms: "For the nodes to be able to correct
+themselves locally after hardware or network or any other reason creates a temporary
+fork" and "DSF can be used for that." This clarifies the target of the proposed C99
+design; it does not change the shipped C++ acceptance or settled-history rules.
+
+**Roles and local acceptance.** Exactly two co-creators remain responsible for block
+production. Only messages received by both are eligible for inclusion. Message
+senders participate in the proposed MP-DH/commit-reveal process and verify blocks
+locally. "Senders finalize it for themselves" does NOT require collecting approvals
+from all previous-block senders, a sender quorum, or a collective approval barrier
+waiting for offline senders. Availability requirements for the separate sender
+MP-DH/commit-reveal participation still need specification.
+The assistant's hypothetical unanimity certificate and its blocking-sender objection
+were based on a misinterpretation and are not adopted. Local acceptance is recoverable;
+irreversible network-wide finality is not established or required by that term.
+
+**Selection and retries.** The owner specifies more distinct valid included ledger
+messages for same-height block conflicts, then the smaller header value; the smaller
+message-data hash for conflicting messages; and the smaller produced successor
+header for conflicting successor candidates. Messages carry known-history hashes
+to expose differing views for reconciliation. Omitted transactions are resent to
+later co-creators and revalidated; stale nonces or invalid spends are not revived by
+retry or hash priority. The exact canonical comparison of complete histories and
+its composition with the intended validated-work rule still require specification
+and review. No new wire format or comparator is implemented by this entry.
+
+**Timing clarification.** The intended block-time/total-attempt-timeout ratio is 1:3,
+with configurable block time B and a 3B timeout from round start. The current C99
+prototype's 1000/2000 ms deadlines are unchanged. The VDF's agreed election role is
+to delay knowledge of the next pair; obtaining that knowledge early does not confer
+early production rights. It is not adopted as a "replacement proof". Shared
+round-start, eligibility and recovery semantics remain design obligations.
+
+**DSF disposition.** ADR-005 §3.4-§3.5 records the recovery requirements and the next
+test design. Start with a finite-candidate one-chain model: witness divergence under
+different deliveries, heal and replay missing data, let nodes independently choose
+and recover, then assert agreement of full histories and ledger state. At every
+visible state boundary compare against independent replay of the node's own selected
+valid history; check transaction dependencies, conservation, nonce/replay rules and
+crash recovery. Require fault/split/correction witnesses and falsify-on-mutant checks
+at the receiver/apply layer. Cross-shard dependencies are a subsequent increment.
+
+The existing standalone DSF models, C++ real-engine scheduler and C99 local-attempt
+seams are distinct surfaces. The older C++ settled-prefix monitor is not weakened
+to make the proposed C99 model pass. No existing green DSF result establishes the
+new convergence property. Simulation can find and reproduce counterexamples;
+bounded passing runs do not replace a proof under explicit fault/delivery assumptions.
+This is a documentation/design increment only: no new scenario, consensus rule,
+chain recovery implementation or sharding-security claim has shipped. ADR-005 remains
+PROPOSED. Verification and independent review are recorded below after completion.
+
+**Verification and independent review (same session):**
+`bash tools/ci_local.sh --docs-only` passed all 16 documentation/coherence guards;
+`git diff --check` passed. Independent review corrected three distinctions before
+signoff: a missed model-justified recovery bound is not proof of permanent divergence;
+local finalization does not introduce a collective approval barrier but leaves
+MP-DH participation availability to specify; cross-shard invariants use coherent
+local dependency views and compare nodes after relevant delivery/recovery. Review
+then found no further actionable issues. No binaries or new simulations were built
+or executed for this documentation-only increment.

@@ -118,18 +118,136 @@ Specify hard limits, admission/backpressure, per-shard arena ownership and recla
 execution scheduling and all shared-state access. Fixed capacity and no malloc do not
 by themselves make the execution path lock-free or race-free.
 
-Before a cross-shard receipt credits anything, define and verify source-chain identity,
-source/destination shard, canonical transaction/receipt bytes, inclusion, source block
-validity, parent linkage, authenticated cumulative work, and the finality policy.
-Persist replay protection and import state atomically. Prove conservation across
-export/import, retries, crashes and source/destination reorganizations. For example:
-source A exports funds; B credits a receipt; A reorganizes away the export; the funds
-are spent again on A. A Merkle proof of the old export does not prevent this trace.
-Choose an explicit rollback/finality/escrow design and prove its failure bounds.
+For transactions affecting multiple shards, define and verify chain/shard identity,
+canonical signed transaction bytes, inclusion, block validity, parent linkage and the
+history-selection rule. The owner specifies transactions; no separate credit, receipt
+approval or sender-voting mechanism is adopted here. A Merkle inclusion path alone
+does not establish the validity or selected-history status of its containing block.
+
+Prove conservation and replay protection across retries, crashes and local history
+correction. If a transaction on shard B is valid only because of an earlier transaction
+on shard A, learning and applying a correction of A's history must cause B to
+revalidate the dependent transaction and any further dependencies. Specify how these
+corrections are applied consistently and recovered after crashes; local acceptance
+is recoverable under §3.4.
 
 Specify how receiving validators obtain enough data to validate transitions and
 reject unavailable histories. Header work alone is insufficient. Dynamic resharding,
 state migration and topology removal are outside a first fixed-topology increment.
+
+### 3.4 Owner clarification: temporary forks and local recovery
+
+The following are intended design requirements from the continuing 2026-09-22
+discussion, not shipped C99 consensus behavior or a completed convergence proof:
+
+- Exactly two elected co-creators produce a block. Message senders participate in
+  the proposed MP-DH/commit-reveal process without becoming additional co-creators.
+- Only messages received by both co-creators are eligible for inclusion. This is a
+  shared-receipt condition; it does not silently require every eligible message to
+  fit in a block or define the complete canonical selection/ordering algorithm.
+- For competing blocks at the same height, the stated preference is more distinct
+  valid included ledger messages, then the smaller header value. For conflicting
+  messages, the preserved message has the smaller data hash. The owner also selects
+  the smaller produced successor header to resolve conflicting successor candidates.
+  Define precisely how these rules compose with ADR-004's intended validated-work
+  ordering, transaction dependencies and comparison of complete histories before
+  implementing the comparator. A header value is not interchangeable with its hash.
+- Senders attach their known-history hash to messages so differing views can be
+  discovered and reconciled through gossip coordinated by co-creators. A difference
+  may indicate lag as well as competing histories; retrieve and validate the relevant
+  histories. Recovery must remain possible after the original faulty creators stop
+  cooperating.
+- Senders "finalize for themselves": they verify and accept locally. There is no
+  requirement to collect approvals from all previous-block senders, no sender quorum,
+  and no collective finalization/approval barrier waiting for those senders. This
+  does not specify the separate availability requirements of MP-DH/commit-reveal
+  participation. No unanimity safety proof follows from local verification.
+- Temporary forks and correction of divergent local histories are intentional.
+  Local acceptance is not an irreversible network-wide finality certificate. The
+  property to establish is convergence under explicit delivery/fault assumptions and
+  correct state recovery. Identical malformed or conflicting behavior has the same
+  treatment whether caused by hardware, network faults or intentional actions.
+- Omitted transactions are resent to later co-creators and checked against the
+  selected state. A stale/conflicting transaction does not gain validity by being
+  resent or by having a smaller hash; an already consumed nonce or unavailable funds
+  must still fail the applicable transaction checks. A late submission alone does
+  not authorize rewriting an earlier accepted decision; correction follows the
+  separately verified competing-history rule.
+- The intended configurable block time B has a total attempt timeout of 3B, measured
+  from the round start. This is the owner's 1:3 design choice, not a change to the
+  shipped prototype's 1000/2000 ms local-attempt deadlines. The shared round-start
+  and eligibility rules still need specification. The VDF's agreed election role
+  delays knowledge of the next pair; early knowledge alone does not authorize that
+  pair to produce early or supply an independent "replacement proof".
+
+### 3.5 DSF convergence and recovery design gate
+
+The owner selects deterministic simulation to test this recovery model. Extend the
+existing DSF approach in a separate, explicitly scoped increment. Current capabilities
+must not be confused with coverage of the proposed protocol:
+
+- The standalone `determ-dsf` runner uses scripted model nodes under `sim/`.
+- The [C++ deterministic scheduler](../proofs/DeterministicSchedulerDesign.md) drives
+  the existing C++ Node with loss, duplication, partition/heal, delayed delivery and
+  crash/rejoin. Its `FaStepMonitor` asserts immutability below the head and height
+  monotonicity for that older engine. Preserve those existing checks; do not present
+  them as verification of this different recovery model.
+- The [C99 DSF seams](../proofs/DSF-SPEC.md#10-separate-c99-local-attempt-test-harness)
+  and `tests/test_dsf_k2_duel.c` currently exercise bounded local attempts. They have
+  no distributed block admission, branch selection or ledger recovery to drive.
+
+**First increment: one-chain model.** Specify the candidate-admission, whole-history
+comparison and recovery transitions before writing their scenario. Fix a finite set
+of eligible candidate data for this first experiment and state the delivery and
+availability assumptions. Include two conflicting candidates from the same elected
+pair, different local receipt schedules, shared versus one-sided message receipt,
+the stated message/header selection cases, and a transaction whose validity depends
+on the initially selected history. Witness a temporary split and a local correction.
+Then heal the partition, deliver/retransmit the missing eligible data and drive
+recovery to a specified quiescent observation point. The harness controls delivery;
+it must not tell nodes which history wins or copy one node's state into another.
+
+Check all of the following:
+
+1. After healing and delivery/recovery under the scenario's stated assumptions,
+   proper nodes select the same complete history **and** ledger state, including
+   balances and nonces. Temporary differing local histories are allowed before that
+   point. Disagreement at a recovery bound justified by the model falsifies that
+   bound; reaching an arbitrary simulation step/time cap alone is inconclusive about
+   eventual convergence.
+2. At every externally visible state boundary, a node's state equals independent
+   replay of its own selected, validated history from the common anchor. No mixed
+   ancestry, effects from an abandoned history, duplicate application or invalid
+   dependent transaction may survive correction. Recovery publishes a consistent
+   state, including after a crash/restart during correction.
+3. Omitted transactions are requeued without duplication and admitted only if valid
+   against the selected state. Losing same-nonce transactions must not be counted as
+   successful retries. Check conservation against that history's explicit monetary
+   rules, without assuming a subsidy or receipt mechanism from another engine.
+4. Record witnesses that the split, relevant injected faults, correction and healing
+   actually occurred. Replaying the same scenario/seeds produces the same trace.
+5. After a successful fresh build, mutants breaking selection, rollback/replay,
+   dependency revalidation or duplicate rejection must fail the corresponding
+   receiver/apply check. The state oracle must not simply call the same recovery
+   routine being checked.
+
+**Next increment: cross-shard dependencies.** Apply the reviewed one-chain recovery
+model to a transaction dependency crossing two shards, then to a dependent onward
+transaction. Check the same conservation, revalidation, replay and crash properties
+against each node's coherent selected dependency history at its local publication
+boundaries; compare proper nodes after the relevant histories and corrections have
+been delivered and processed under the stated recovery assumptions. Incompatible
+provisional views on opposite sides of a partition are not one globally selected
+state to sum or compare. Full block propagation may supply recovery data; it does
+not substitute for executing those state transitions.
+
+Finite schedules and a frozen candidate set can falsify a design and reproduce a
+defect. Passing them does not prove convergence under indefinitely produced competing
+histories or establish a confirmation depth. Independent design/adversarial review
+and stated fault/network assumptions remain required. Model results are labeled as
+model results; production claims require driving the actual surviving verifier and
+apply path. Run all gates through `tools/ci_local.sh`; no new recovery gate or
+production behavior is claimed by this documentation increment.
 
 ## 4. Corrected execution instructions
 

@@ -402,3 +402,15 @@ strict two-party deadlines, commitment checks and explicit retry; it tests no
 one-party fallback. Native evaluation is checked separately by `test-k2-duel`.
 No simulated block finalization, global-liveness proof or performance guarantee is
 inferred from these tests. See [K2_VDF_Soundness.md](K2_VDF_Soundness.md).
+
+### 10.4 Proposed C99 fork-recovery coverage
+
+The owner's 2026-09-22 clarification permits temporary forks, local acceptance and
+local history correction. Senders verify for themselves; no collective sender
+approval is required before production continues. The proposed DSF gate is recorded
+in [ADR-005 §3.5](../decisions/ADR-005-Temporal-Sharding.md#35-dsf-convergence-and-recovery-design-gate):
+one-chain recovery first, then cross-shard transaction dependencies as a separate
+increment. This is a test-design requirement, not a shipped scenario or a security
+claim. It must check convergence after healing and state equivalence to independent
+history replay, while allowing the temporary divergence the owner explicitly permits.
+The older C++ engine's settled-history monitor remains scoped to that engine.
