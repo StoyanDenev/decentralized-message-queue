@@ -363,3 +363,25 @@ smoke submits and retrieves exact signed frames over HTTP with default/non-defau
 configuration and verifies disabled-by-default behavior. Independent review and the
 fresh-build mutation results are recorded in the decision log; tests establish the
 stated code obligations, not missing ledger or consensus properties.
+
+
+### HTTP framing boundary
+
+The C99 HTTP transport locates framing fields only in complete CRLF-delimited
+header lines. POST requires exactly one case-insensitive `Content-Length` field
+with a positive decimal value and optional surrounding SP/HTAB; duplicate length
+fields, trailing junk and `Transfer-Encoding` are refused before RPC dispatch.
+A similarly named header or text in a header value/body is not a framing field.
+This replaces the nonportable GNU `strcasestr` call, whose declaration is absent
+under the Linux build's POSIX feature macros.
+
+The receive buffer reserves one byte for its terminating NUL. After locating the
+header terminator, the remaining body capacity is
+`HTTP_RPC_BUF_SIZE - 1 - header_length`. Each decimal step is checked against that
+capacity before multiplication/addition. A complete body therefore has a
+representable total length within the actual receive capacity. Dispatch waits
+until all declared bytes have arrived. Invalid/oversized framing returns an HTTP
+error without reaching pending-inbox mutation. This bounds this POST framing
+path; it is not a claim of complete HTTP conformance or production RPC hardening.
+Actual socket tests exercise case variation, fragmented delivery, malformed
+framing with pending-state snapshots and the reserved-byte boundary.

@@ -43,6 +43,14 @@ REJECT_CONFLICTING_ROOTS = """for(size_t i=0;i<n->record_count;i++) if(n->record
             }
     /* This model does not select between competing complete histories. */"""
 MUTANTS = [
+    ('http-body-capacity', 'test-http-rpc', 'src/rpc/http_rpc_server.c', 'if (value > limit / 10 || (value == limit / 10 && digit > limit % 10)) return 413;', '/* mutant: unchecked length accumulation */'),
+    ('http-header-case', 'test-http-rpc', 'src/rpc/http_rpc_server.c', "if (c >= 'A' && c <= 'Z') c = (uint8_t)(c + ('a' - 'A'));", '/* mutant: case-sensitive header comparison */'),
+    ('http-header-name', 'test-http-rpc', 'src/rpc/http_rpc_server.c', 'if (len != strlen(expected)) return 0;', 'if (len < strlen(expected)) return 0; name += len - strlen(expected); len = strlen(expected);'),
+    ('http-duplicate-length', 'test-http-rpc', 'src/rpc/http_rpc_server.c', 'if (seen) return 400;', '/* mutant: accept duplicate length */'),
+    ('http-transfer-encoding', 'test-http-rpc', 'src/rpc/http_rpc_server.c', 'if (http_field_is(data + pos, colon - pos, "transfer-encoding")) return 400;', '/* mutant: accept transfer encoding with content length */'),
+    ('http-decimal-length', 'test-http-rpc', 'src/rpc/http_rpc_server.c', "if (data[i] < '0' || data[i] > '9') return 400;", '/* mutant: accept nondecimal digits */'),
+    ('http-reserved-byte', 'test-http-rpc', 'src/rpc/http_rpc_server.c', 'const size_t limit = (HTTP_RPC_BUF_SIZE - 1) - header_len;', 'const size_t limit = HTTP_RPC_BUF_SIZE - header_len;'),
+    ('http-incomplete-body', 'test-http-rpc', 'src/rpc/http_rpc_server.c', 'if (c->rx_len < header_len + content_len) {', 'if (0) {'),
     ('pending-signature', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'if (determ_ed25519_verify(sender, signing, sizeof(signing), tx.sig) != 0)', 'if (0)'),
     ('pending-small-order', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'if (determ_ed25519_point_has_small_order(sender) != 0)', 'if (0)'),
     ('pending-genesis', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'if (memcmp(tx.genesis_hash, pool->genesis_hash, 32) != 0)', 'if (0)'),
@@ -228,7 +236,7 @@ def main():
     if sys.platform in ("win32", "cygwin", "msys"):
         cases = [case for case in MUTANTS if case[1] not in
                  ("determ-node", "test-k2-net-rpc", "test-rpc-shard-routing",
-                  "test-triple-entry-ledger", "test-rpc-pending-transfer")]
+                  "test-triple-entry-ledger", "test-rpc-pending-transfer", "test-http-rpc")]
         for case in MUTANTS:
             if case not in cases:
                 print("PLATFORM-SKIP(mutant): " + case[0] + " (POSIX prototype)", flush=True)

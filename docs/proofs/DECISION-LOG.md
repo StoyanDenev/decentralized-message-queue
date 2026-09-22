@@ -6299,3 +6299,30 @@ The workflow and exact wrapper commands were independently reviewed and parsed a
 YAML. Local gate results remain those above; no Linux Actions execution is claimed
 by this configuration change. Current remote main was checked through the GitHub
 API and matches the stored `origin/main` ancestor; no merge conflict is present.
+
+## 2026-09-22 — Portable bounded C99 HTTP POST framing
+
+The first hosted C99 run passed 20/22 targets but failed HTTP POST and the node
+smoke test. The parser called GNU `strcasestr` without its declaration under the
+Linux build's POSIX feature macros, truncating the returned pointer. Replace that
+substring search with bounded, case-insensitive matching of complete header names.
+POST now requires one positive decimal Content-Length, rejects duplicates and
+Transfer-Encoding, and bounds every decimal step against the receive capacity
+remaining after the header and reserved NUL byte. Dispatch still waits for all
+declared body bytes. This is a portable bounded POST contract, not general HTTP
+hardening or a change to transaction/consensus validation.
+
+Receiver tests submit an independently signed admissible transaction and assert
+that malformed, oversized or incomplete framing cannot mutate its pending inbox.
+They cover exact header matching, mixed case, duplicate fields, decimal syntax,
+header/body separation, fragmented delivery and the last usable receive byte.
+Independent adversarial review corrected two masked mutation fixtures: an unchecked
+digit must admit a valid body rather than merely change the error status, and a
+duplicate length must reach dispatch if its rejection is removed.
+
+The focused `ci_local --c99` HTTP and node targets pass after fresh builds; the
+strict C99 Makefile build passes. The complete `ci_local --c99-mutants --jobs 4`
+run rejects 79/79 freshly built mutants, including eight new HTTP cases. These
+execution results are Darwin arm64. The first hosted Linux shared and UBSan jobs
+passed; hosted C99 verification of this repair remains to be rerun. The proof
+boundary and security ledger are updated without claiming full HTTP conformance.
