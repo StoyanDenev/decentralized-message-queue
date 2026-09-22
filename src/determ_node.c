@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
- * Determ Full Consensus Node Daemon (Bare-Metal C99).
+ * Determ Experimental Services Daemon (Bare-Metal C99).
  * Strictly zero-dependency: Zero Asio, Zero nlohmann/json, Zero OpenSSL.
  */
 
@@ -17,6 +17,7 @@
 #include <determ/consensus/duel_state.h>
 #include <determ/consensus/dda.h>
 #include <determ/crypto/vdf.h>
+#include <determ/crypto/sha2/sha2.h>
 #include <determ/net/k2_net.h>
 #include <determ/net/peer_mesh.h>
 #include <determ/storage/block_store.h>
@@ -47,11 +48,11 @@ static void sig_handler(int sig) {
 }
 
 static void print_usage(const char *prog) {
-    printf("Determ Zero-Dependency C99 Consensus Node\n");
+    printf("Determ C99 Experimental Services\n");
     printf("Usage: %s [options]\n\n", prog);
     printf("Duel Protocol:\n");
-    printf("  --aggregator              Run as K=2 Aggregator duel server\n");
-    printf("  --contributor             Run as K=2 Contributor duel client\n");
+    printf("  --aggregator              Run one bounded experimental Aggregator attempt\n");
+    printf("  --contributor             Run one bounded experimental Contributor attempt\n");
     printf("  --port <port>             Duel listen/target port (default: 9000)\n");
     printf("  --connect <ip>            Duel Aggregator IP to connect (default: 127.0.0.1)\n\n");
     printf("P2P Gossip Mesh & Storage:\n");
@@ -62,13 +63,13 @@ static void print_usage(const char *prog) {
     printf("HTTP JSON-RPC Server:\n");
     printf("  --rpc-port <port>         Listen port for HTTP JSON-RPC endpoint (e.g. 8545)\n\n");
     printf("Diagnostics & Calibration:\n");
-    printf("  --benchmark               Run ASIC-resistant AES-256 VDF hardware benchmark\n");
+    printf("  --benchmark               Measure this machine's AES evaluation rate\n");
     printf("  --version                 Print version and architectural info\n");
     printf("  --help                    Show this help message\n");
 }
 
 static int run_benchmark(void) {
-    printf("[VDF Benchmark] Running hardware calibration on bare-metal AES-256...\n");
+    printf("[VDF Benchmark] Measuring local AES evaluation rate...\n");
     vdf_context_t ctx;
     const uint8_t seed[] = "determ-vdf-hardware-calibration-seed";
     uint8_t out[VDF_OUTPUT_LEN];
@@ -94,7 +95,7 @@ static int run_benchmark(void) {
 
     printf("[VDF Benchmark] Lower bound (W_reveal + Delta): %llu ms\n",
            (unsigned long long)(lower_bound_ns / 1000000ULL));
-    printf("[VDF Benchmark] Minimum VDF iterations for Enforced Blindness: %llu\n",
+    printf("[VDF Benchmark] Estimated iterations for this local duration (not a security bound): %llu\n",
            (unsigned long long)required_iters);
     return 0;
 }
@@ -148,7 +149,7 @@ int main(int argc, char *argv[]) {
             do_benchmark = true;
         } else if (strcmp(argv[i], "--version") == 0) {
             printf("Determ Node v2.18 (Strict Zero-Dependency C99 Architecture)\n");
-            printf("Consensus: K=2 Fast-Block Monotonic VDF Duel with DDA\n");
+            printf("Experimental two-party computation; PoSW consensus integration is incomplete\n");
             printf("Networking: Native POSIX non-blocking kqueue/epoll (Zero Asio)\n");
             printf("Storage: Canonical DMF1 Manifest & DBK1 Block Records\n");
             printf("RPC: Bare-Metal HTTP/1.1 In-Place JSON-RPC Transport\n");
@@ -163,6 +164,15 @@ int main(int argc, char *argv[]) {
         return run_benchmark();
     }
 
+    if (is_aggregator && is_contributor) {
+        fprintf(stderr, "Choose one experimental duel role\n");
+        return 1;
+    }
+    if ((is_aggregator || is_contributor) && data_dir != NULL) {
+        fprintf(stderr, "Duel output is not a validated block; --data-dir cannot be used with duel modes\n");
+        return 1;
+    }
+    int exit_status = 0;
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
 
@@ -269,24 +279,27 @@ int main(int argc, char *argv[]) {
             http_rpc_server_set_context(&g_rpc, &ctx);
         }
 
-        printf("[Aggregator] Listening for Contributor connection...\n");
+        const uint8_t agg_payload[] = "experimental-aggregator-payload";
+        if (k2_aggregator_start_duel(&g_agg, agg_payload, sizeof(agg_payload) - 1) != 0) {
+            fprintf(stderr, "Failed to start local attempt\n");
+            g_running = 0;
+            exit_status = 1;
+        }
+        printf("[Aggregator] Local attempt started; commitment deadline is one second\n");
         while (g_running && !g_agg.duel_completed) {
-            k2_aggregator_poll(&g_agg, 20);
+            int rc = k2_aggregator_poll(&g_agg, 20);
+            if (rc < 0) {
+                fprintf(stderr, "[Aggregator] Attempt failed (%d); no block produced\n", rc);
+                exit_status = 1;
+                break;
+            }
             if (mesh_active) peer_mesh_poll(&g_mesh, 10);
             if (rpc_active) http_rpc_server_poll(&g_rpc, 10);
         }
 
-        if (g_agg.duel_completed) {
-            printf("[Aggregator] Duel resolved! VDF block computed.\n");
-            if (store_active) {
-                uint64_t cur_height = 0;
-                uint8_t prev_head[32];
-                block_store_get_head(&g_store, &cur_height, prev_head);
-                printf("[Storage] Committing block %llu to disk...\n", (unsigned long long)cur_height);
-                block_store_append_block(&g_store, cur_height, g_agg.latest_vdf_output,
-                                         g_agg.latest_vdf_output, VDF_OUTPUT_LEN);
-            }
-        }
+        if (g_agg.duel_completed)
+            printf("[Aggregator] Local computation completed; output is not consensus settlement\n");
+        else exit_status = 1;
         k2_aggregator_close(&g_agg);
     } else if (is_contributor) {
         printf("[Contributor] Connecting to Aggregator at %s:%u...\n", connect_ip, duel_port);
@@ -307,8 +320,11 @@ int main(int argc, char *argv[]) {
             return 1;
         }
 
+        const uint8_t cont_reveal[] = "experimental-contributor-payload";
+        memcpy(g_cont.reveal_payload, cont_reveal, sizeof(cont_reveal) - 1);
+        g_cont.reveal_payload_len = sizeof(cont_reveal) - 1;
         uint8_t commitment[32];
-        memset(commitment, 0x77, sizeof(commitment));
+        determ_sha256(cont_reveal, sizeof(cont_reveal) - 1, commitment);
         if (k2_contributor_send_commitment(&g_cont, commitment) != 0) {
             fprintf(stderr, "Failed to send commitment\n");
             k2_contributor_close(&g_cont);
@@ -318,20 +334,20 @@ int main(int argc, char *argv[]) {
             return 1;
         }
 
-        const uint8_t cont_reveal[] = "contributor-genesis-payload";
-        memcpy(g_cont.reveal_payload, cont_reveal, sizeof(cont_reveal) - 1);
-        g_cont.reveal_payload_len = sizeof(cont_reveal) - 1;
-
         printf("[Contributor] Commitment sent, awaiting duel resolution...\n");
         while (g_running && !g_cont.result_received) {
-            k2_contributor_poll(&g_cont, 20);
+            if (k2_contributor_poll(&g_cont, 20) < 0) {
+                fprintf(stderr, "[Contributor] Attempt failed or response deadline expired\n");
+                exit_status = 1;
+                break;
+            }
             if (mesh_active) peer_mesh_poll(&g_mesh, 10);
             if (rpc_active) http_rpc_server_poll(&g_rpc, 10);
         }
 
         if (g_cont.result_received) {
-            printf("[Contributor] Received VDF block result from Aggregator!\n");
-        }
+            printf("[Contributor] Received unauthenticated computation output, not a validated block\n");
+        } else exit_status = 1;
         k2_contributor_close(&g_cont);
     } else if (mesh_active || rpc_active) {
         printf("[Node] Running active services (press Ctrl+C to exit)...\n");
@@ -350,5 +366,5 @@ int main(int argc, char *argv[]) {
     if (store_active) block_store_close(&g_store);
 
     printf("[Node] Shutdown complete.\n");
-    return 0;
+    return exit_status;
 }

@@ -28,6 +28,7 @@
 #include "determ/crypto/opaque_dsso.h"
 #include "determ/crypto/ed25519/ed25519.h"
 #include "determ/crypto/secure_zero.h"
+#include <determ/crypto/sha2/sha2.h>
 #include "determ/net/reactor.h"
 #include "determ/consensus/duel_state.h"
 #include "dsf_seams.h"
@@ -307,9 +308,12 @@ static void test_native_dsf_seams(void) {
     duel_state_machine_t sm;
     TEST_ASSERT(duel_state_init(&sm) == DUEL_SUCCESS);
     TEST_ASSERT(duel_state_start_commitment_phase(&sm) == DUEL_SUCCESS);
-    TEST_ASSERT(duel_state_start_reveal_window(&sm) == DUEL_SUCCESS);
-
     const uint8_t agg_data[16] = {0x01, 0x02};
+    uint8_t hash[32];
+    determ_sha256(agg_data, sizeof(agg_data), hash);
+    TEST_ASSERT(duel_submit_aggregator_commit(&sm, hash) == DUEL_SUCCESS);
+    TEST_ASSERT(duel_submit_contributor_commit(&sm, hash) == DUEL_SUCCESS);
+    TEST_ASSERT(duel_state_start_reveal_window(&sm) == DUEL_SUCCESS);
     TEST_ASSERT(duel_submit_aggregator_reveal(&sm, agg_data, sizeof(agg_data)) == DUEL_SUCCESS);
 
     /*
@@ -328,8 +332,7 @@ static void test_native_dsf_seams(void) {
     /* Poll buzzer: state machine locks buffer and enters strict 2-of-2 skipping */
     TEST_ASSERT(duel_state_poll_buzzer(&sm) == ERR_EPOCH_SKIPPED_INCOMPLETE);
     TEST_ASSERT(sm.state == DUEL_STATE_ABORTED);
-    TEST_ASSERT(sm.straggler_fallback_active == false);
-    TEST_ASSERT(sm.vrf_round == 1);
+    TEST_ASSERT(sm.vdf_input_len == 0);
 
     printf("  -> PASS: Virtual clock jumped 2001ms instantly without CPU sleep; buzzer triggered strict 2-of-2 skip.\n");
 }

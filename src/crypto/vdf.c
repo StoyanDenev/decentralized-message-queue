@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
- * Hardware-Resistant Verifiable Delay Function (VDF) Engine (C99 Bare-Metal)
+ * Experimental repeated-work evaluator (C99; verification by reevaluation)
  */
 
 #define _POSIX_C_SOURCE 200809L

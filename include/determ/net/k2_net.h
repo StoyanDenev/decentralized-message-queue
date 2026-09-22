@@ -2,10 +2,10 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
- * K=2 Fast-Block VDF Duel Networking Layer (Pure C99 Bare-Metal).
+ * Experimental unauthenticated two-party computation (POSIX transport).
  *
  * Implements raw non-blocking POSIX socket communication between
- * the Aggregator and Contributor nodes under the Monotonic Time-Lock Model.
+ * the Aggregator and Contributor; no authenticated election or block validation.
  *
  * Strictly zero dynamic memory allocations (no malloc/free).
  */
@@ -25,6 +25,9 @@
 extern "C" {
 #endif
 
+#define K2_EXPERIMENT_ITERATIONS 2000ULL
+/* Local response deadline, not a consensus parameter or physical-time proof. */
+#define K2_RESPONSE_TIMEOUT_NS 10000000000ULL
 #define K2_NET_MAGIC            0x4B324E54U /* "K2NT" */
 #define K2_NET_HEADER_LEN       12U
 #define K2_NET_MAX_FRAME_LEN    (K2_NET_HEADER_LEN + DUEL_MAX_PAYLOAD_SIZE)
@@ -91,7 +94,10 @@ typedef struct {
     uint8_t reveal_payload[DUEL_MAX_PAYLOAD_SIZE];
     uint32_t reveal_payload_len;
     uint8_t block_result[VDF_OUTPUT_LEN];
-    bool result_received;
+    bool result_received; /* Unauthenticated peer output, not a validated block. */
+    uint64_t attempt_start_ns;
+    bool attempt_started;
+    bool reveal_window_seen;
 } k2_contributor_t;
 
 /*
@@ -103,7 +109,9 @@ int k2_net_encode_frame(k2_msg_type_t type, const uint8_t *payload, uint32_t pay
 int k2_net_parse_header(const uint8_t *buf, size_t len, k2_net_header_t *out_hdr);
 
 /*
- * Aggregator Functions
+ * Aggregator Functions: poll returns <0 on terminal failure, 1 on computation completion.
+ * Explicit start_duel after failure/completion closes the old connection and resets state.
+ * Caller must arrange a new connection; no automatic election or retry is implied.
  */
 int k2_aggregator_init(k2_aggregator_t *agg, uint16_t port);
 int k2_aggregator_start_duel(k2_aggregator_t *agg, const uint8_t *agg_reveal, uint32_t agg_len);

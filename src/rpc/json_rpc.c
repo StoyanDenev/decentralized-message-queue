@@ -85,11 +85,12 @@ int rpc_dispatch_context(const char *request_json, size_t req_len,
                 case DUEL_STATE_COMMITMENT_PHASE: state_str = "COMMITMENT_PHASE"; break;
                 case DUEL_STATE_AWAITING_REVEALS: state_str = "AWAITING_REVEALS"; break;
                 case DUEL_STATE_VDF_EVALUATION:   state_str = "VDF_EVALUATION"; break;
-                case DUEL_STATE_FINALIZED:        state_str = "BLOCK_PRODUCED"; break;
+                case DUEL_STATE_ABORTED:          state_str = "ABORTED"; break;
+                case DUEL_STATE_COMPLETED:        state_str = "COMPUTATION_COMPLETED"; break;
                 default:                          state_str = "UNKNOWN"; break;
             }
         }
-        bool fallback = sm ? sm->straggler_fallback_active : false;
+        bool fallback = false; /* Strict 2-of-2 local attempt; no fallback. */
 
         uint64_t height = 0;
         char head_hex[65] = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -179,6 +180,8 @@ int rpc_dispatch_context(const char *request_json, size_t req_len,
         return snprintf(out_resp, max_resp,
                         "{\"jsonrpc\":\"2.0\",\"result\":{"
                         "\"algorithm\":\"AES256-Round-Chained\","
+                        "\"scope\":\"dda-helper-only\","
+                        "\"consensus_enforced\":false,"
                         "\"arena_kb\":64,"
                         "\"target_vdf_ms\":%u,"
                         "\"current_iterations\":%llu,"
@@ -204,15 +207,14 @@ int rpc_dispatch_context(const char *request_json, size_t req_len,
     /* 6. get_duel_state */
     if (strcmp(method, "get_duel_state") == 0) {
         uint64_t elapsed_ms = 0;
-        if (sm && sm->reveal_start_ns > 0) {
-            uint64_t now = duel_clock_monotonic_ns();
-            if (now >= sm->reveal_start_ns) {
-                elapsed_ms = (now - sm->reveal_start_ns) / 1000000ULL;
-            }
+        if (sm && sm->state != DUEL_STATE_IDLE) {
+            elapsed_ms = (duel_clock_monotonic_ns() - sm->epoch_start_time) / 1000000ULL;
         }
         return snprintf(out_resp, max_resp,
                         "{\"jsonrpc\":\"2.0\",\"result\":{"
-                        "\"reveal_window_ms\":2000,"
+                        "\"attempt_deadline_ms\":2000,"
+                        "\"deadline_origin\":\"attempt_start\","
+                        "\"consensus_enforced\":false,"
                         "\"elapsed_ms\":%llu,"
                         "\"aggregator_ready\":%s,"
                         "\"contributor_ready\":%s"

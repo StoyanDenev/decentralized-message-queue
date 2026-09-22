@@ -2,16 +2,10 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
- * Hardware-Resistant Verifiable Delay Function (VDF) Engine (Phase 2)
- *
- * Security Axiom:
- *   Time-Lock Inequality Theorem: T_vdf > W_reveal + Delta
- *
- * Core Guarantees:
- *   1. Memory-hard sequential hashing loop: non-parallelizable, bandwidth-bottlenecked.
- *   2. Dynamic Iteration Tuning (DDA): auto-calibrates vdf_iterations against Moore's Law.
- *   3. Strict aliasing & alignment: zero undefined behavior, compiler memory barriers.
- *   4. Zero dynamic memory allocation: static/arena execution context.
+ * Experimental repeated-work evaluator (AES/SHA-256, fixed 64 KiB arena).
+ * Verification repeats the computation. No succinct proof, sequential-hardness
+ * reduction, ASIC-resistance claim or minimum wall-clock duration is provided.
+ * All evaluation state is caller-provided; the evaluator allocates no heap.
  */
 
 #ifndef DETERMINISTIC_CRYPTO_VDF_H
@@ -35,13 +29,12 @@ extern "C" {
 
 /*
  * BASE_VDF_ITERATIONS:
- * Scaled upwards by 50x (2,500,000 iterations) to guarantee a baseline
- * execution duration >2500ms on modern multicore/superscalar hardware.
+ * Default experiment work parameter, not a hardware-independent time bound.
  */
 #define BASE_VDF_ITERATIONS     2500000ULL
 
 /*
- * Strictly aligned, tightly packed VDF state buffer
+ * Evaluation state; alignment attributes are compiler-specific.
  */
 #if defined(__GNUC__) || defined(__clang__)
 #define VDF_ALIGNED(x) __attribute__((aligned(x)))
@@ -59,7 +52,8 @@ typedef struct VDF_ALIGNED(64) {
 } vdf_context_t;
 
 /*
- * Wire-serializable proof bundle (packed and endian-safe)
+ * In-memory output/work record. Packing does not define wire byte order;
+ * do not serialize this native uint64_t by copying the struct.
  */
 typedef struct VDF_PACKED {
     uint8_t  output[VDF_OUTPUT_LEN];
@@ -67,7 +61,7 @@ typedef struct VDF_PACKED {
 } vdf_proof_t;
 
 /*
- * Memory barrier macro to defeat compiler loop unrolling and dead-code elimination
+ * Compiler memory barriers where supported; not a hardware-security primitive
  */
 #if defined(__GNUC__) || defined(__clang__)
 #define VDF_MEMORY_BARRIER() __asm__ __volatile__("" ::: "memory")
@@ -89,14 +83,15 @@ typedef struct VDF_PACKED {
 int vdf_init(vdf_context_t *ctx, const uint8_t *seed, size_t seed_len, uint64_t iterations);
 
 /*
- * Execute the sequential memory-hard evaluation loop.
- * Guarantees strict non-parallelizable execution for the configured number of iterations.
+ * Execute the experimental evaluation loop for the configured iteration count.
+ * Its source-level dependency does not establish a cryptographic delay bound.
  */
 int vdf_evaluate(vdf_context_t *ctx, uint8_t output[VDF_OUTPUT_LEN]);
 
 /*
  * Verify that a claimed VDF output matches the seed and iteration count.
- * Returns 1 on authentic proof, 0 on forgery or error.
+ * Returns 1 when reevaluation matches, 0 on mismatch or error. This does not
+ * authenticate a peer or establish freshness/context binding.
  */
 int vdf_verify(vdf_context_t *ctx, const uint8_t *seed, size_t seed_len,
                uint64_t iterations, const uint8_t claimed_output[VDF_OUTPUT_LEN]);
