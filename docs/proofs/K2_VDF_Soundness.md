@@ -138,6 +138,15 @@ and run isolated falsification through `--c99-mutants`. Build success must prece
 execution of the selected binary. A failed build does not count as a rejected mutant.
 Unsupported platform cases must be reported distinctly from passes.
 
+The Contributor's buffered-result/EOF gate uses a local stream socketpair with
+queued frames and a fully closed peer. A separate event observer first confirms
+READ and EOF together without consuming the Contributor's readiness; the real
+Contributor poll then accepts an exact complete result and rejects a truncated
+one. The ordinary TCP lifecycle test remains, but cannot alone establish this
+event ordering: epoll and kqueue may report a TCP peer close differently. This
+gate covers transport framing, not the authenticity or consensus validity of a
+peer-supplied result.
+
 These gates assert the local contracts above. They do not prove successful progress
 against a withholding pair, global safety, finality, unbiased randomness, sharding
 security, or production Windows networking. Independent review and recorded execution

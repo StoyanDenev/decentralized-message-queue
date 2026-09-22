@@ -6339,3 +6339,27 @@ arm64 `ci_local --jobs 4` build passes all 333 FAST wrappers, zero platform skip
 and all 16 documentation guards. This verifies unchanged behavior on the available
 local platform; the actual MSVC build remains subject to the hosted Windows rerun.
 This compile-only repair is committed separately from the HTTP framing change.
+
+## 2026-09-22 — Deterministic buffered-result/EOF regression
+
+Hosted Linux passed all 22 ordinary C99 targets and rejected the first 78 isolated
+mutants, but `net-eof-before-buffered-result` survived. The earlier Darwin result
+was genuine but insufficient across platforms: kqueue reports a TCP peer close
+with EOF, whereas epoll can report unread data without HUP at that point. The
+existing TCP lifecycle test therefore did not force the event combination needed
+to falsify the EOF-first receiver mutation on Linux.
+
+Add a test-only local stream socketpair fixture. Both native event watchers are
+registered before the fully closed peer leaves queued frames. A separate observer
+asserts READ and EOF together without consuming the Contributor's readiness. The
+unchanged Contributor poll must then preserve the exact complete result; a sibling
+stream missing its last byte must terminate without a result. The positive case
+runs before the negative control and existing TCP tests. No production event,
+transport or consensus rule changes, and the original mutation remains intact.
+
+Independent adversarial review approved the final test and proof-boundary diff.
+The focused `ci_local --c99 --c99-test test-k2-net-rpc --jobs 4` build and test pass
+on Darwin arm64. The complete `ci_local --c99-mutants --jobs 4` run rejects 79/79
+mutants after fresh successful builds, including the unchanged EOF-first mutation;
+all 16 documentation guards pass. Hosted Linux re-verification is recorded in the
+pull request after execution; no rejected-build result is counted as a mutant.

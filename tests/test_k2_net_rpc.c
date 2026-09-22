@@ -251,6 +251,80 @@ static void test_k2_raw_socket_duel(void) {
     puts("PASS: real socket commitment binding, terminal failures, explicit retry and local completion");
 }
 
+/* TCP FIN need not carry EPOLLHUP while data remains unread. A fully closed
+ * local stream peer gives both native backends queued bytes plus EOF, without
+ * depending on TCP segmentation or FIN/ACK scheduling. Observe that condition
+ * independently, then exercise the ordinary Contributor receive path. */
+static void test_buffered_result_at_eof(void) {
+    static k2_contributor_t receiver;
+    uint8_t expected[VDF_OUTPUT_LEN];
+    uint8_t commitment[32] = {0};
+    uint8_t received_commit[K2_NET_HEADER_LEN + sizeof(commitment)];
+    uint8_t frames[2 * K2_NET_HEADER_LEN + VDF_OUTPUT_LEN];
+    size_t window_len = 0, result_len = 0;
+    memset(expected, 0xa7, sizeof(expected));
+    TEST_ASSERT(k2_net_encode_frame(K2_MSG_REVEAL_WINDOW, NULL, 0,
+                                   frames, sizeof(frames), &window_len) == 0);
+    TEST_ASSERT(k2_net_encode_frame(K2_MSG_BLOCK_RESULT, expected, sizeof(expected),
+                                   frames + window_len, sizeof(frames) - window_len,
+                                   &result_len) == 0);
+
+    /* The complete frame succeeds; the same stream missing its final byte fails. */
+    for (size_t missing = 0; missing < 2; ++missing) {
+        int pair[2];
+        net_event_loop_t observer;
+        net_event_t events[2];
+        TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0);
+        TEST_ASSERT(net_socket_set_nonblocking(pair[0]) == 0);
+        TEST_ASSERT(net_socket_set_nonblocking(pair[1]) == 0);
+        TEST_ASSERT(k2_contributor_init(&receiver) == 0);
+        receiver.conn.fd = pair[0];
+        receiver.conn.connected = true;
+        TEST_ASSERT(net_event_loop_add(&receiver.loop, pair[0], NET_EV_READ,
+                                       (void *)(intptr_t)1) == 0);
+        TEST_ASSERT(net_event_loop_init(&observer) == 0);
+        TEST_ASSERT(net_event_loop_add(&observer, pair[0], NET_EV_READ,
+                                       (void *)(intptr_t)2) == 0);
+
+        TEST_ASSERT(k2_contributor_send_commitment(&receiver, commitment) == 0);
+        size_t drained = 0;
+        while (drained < sizeof(received_commit)) {
+            ssize_t count = recv(pair[1], received_commit + drained,
+                                 sizeof(received_commit) - drained, 0);
+            TEST_ASSERT(count > 0);
+            drained += (size_t)count;
+        }
+        size_t sent = 0;
+        size_t length = window_len + result_len - missing;
+        while (sent < length) {
+            ssize_t count = send(pair[1], frames + sent, length - sent, 0);
+            TEST_ASSERT(count > 0);
+            sent += (size_t)count;
+        }
+        TEST_ASSERT(close(pair[1]) == 0);
+
+        /* Polling this separate watcher consumes neither bytes nor the
+         * Contributor event loop's readiness notification. */
+        TEST_ASSERT(net_event_loop_poll(&observer, 0, events, 2) == 1);
+        TEST_ASSERT(events[0].user_data == (void *)(intptr_t)2);
+        TEST_ASSERT((events[0].flags & (NET_EV_READ | NET_EV_EOF)) ==
+                    (NET_EV_READ | NET_EV_EOF));
+        net_event_loop_close(&observer);
+        TEST_ASSERT(!receiver.result_received && !receiver.reveal_window_seen);
+        if (missing == 0) {
+            TEST_ASSERT(k2_contributor_poll(&receiver, 0) == 1);
+            TEST_ASSERT(receiver.result_received && receiver.reveal_window_seen);
+            TEST_ASSERT(memcmp(receiver.block_result, expected, sizeof(expected)) == 0);
+        } else {
+            TEST_ASSERT(k2_contributor_poll(&receiver, 0) == -1);
+            TEST_ASSERT(!receiver.result_received && receiver.reveal_window_seen);
+            TEST_ASSERT(!receiver.conn.connected && receiver.conn.fd == -1);
+        }
+        k2_contributor_close(&receiver);
+    }
+    puts("PASS: READ|EOF preserves a complete buffered result and rejects a truncated result");
+}
+
 /* A commitment plus a maximum reveal is larger than the receive arena.
  * No additional network input is required to drain and assemble both frames. */
 static void test_coalesced_maximum_reveal(void) {
@@ -290,6 +364,7 @@ int main(void) {
     test_zero_alloc_json_parser();
     test_rpc_dispatch();
     test_k2_wire_framing();
+    test_buffered_result_at_eof();
     test_k2_raw_socket_duel();
     test_coalesced_maximum_reveal();
 
