@@ -1,54 +1,77 @@
-/*
- * SPDX-License-Identifier: Apache-2.0
- * Copyright 2026 Determ Contributors
- *
- * Windows QPC Nanoseconds Scaled Arithmetic Overflow Test.
- * Asserts that deterministically passing ticks = 1844674407300ULL
- * into the QPC conversion routine uses split division to return
- * accurate nanoseconds without overflowing uint64_t to 29.
+/* SPDX-License-Identifier: Apache-2.0
+ * Portable QPC arithmetic regression; no simulated clock or transport.
  */
-
-#include "test_harness.h"
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include <determ/time/clock.h>
+#include <stdio.h>
+#include <stdlib.h>
 
-static void test_qpc_clock_overflow_prevention(void) {
-    printf("[TEST] Windows QPC Scaled Arithmetic Overflow Prevention...\n");
+#define CHECK(cond) do { \
+    if (!(cond)) { \
+        fprintf(stderr, "FAIL: %s at line %d\n", #cond, __LINE__); \
+        exit(1); \
+    } \
+} while (0)
 
-    /*
-     * Auditor Test Vector:
-     * ticks = 1844674407300ULL
-     * freq  = 636094620784634138ULL
-     *
-     * Unsafe:
-     * (ticks * 1000000000ULL) % 2^64 = 18446744002754390016ULL
-     * 18446744002754390016ULL / 636094620784634138ULL == 29ULL (Catastrophic overflow truncation)
-     *
-     * Safe Split Division:
-     * (ticks / freq) * 1B + ((ticks % freq) * 1B) / freq == 2900ULL (Mathematically exact)
+static void test_reference_vectors(void) {
+    /* Expected values were calculated with arbitrary-precision integer
+     * arithmetic: min(UINT64_MAX, floor(ticks * 1000000000 / frequency)).
+     * Includes overflow in the fractional product and in both parts of
+     * the final result, rounding, zero, and UINT64_MAX frequencies.
      */
-    uint64_t ticks = 1844674407300ULL;
-    uint64_t freq = 636094620784634138ULL;
+    static const struct { uint64_t ticks, frequency, expected; } cases[] = {
+        { 0ULL, 0ULL, 0ULL },
+        { 1ULL, 0ULL, 0ULL },
+        { UINT64_MAX, 0ULL, 0ULL },
+        { 0ULL, UINT64_MAX, 0ULL },
+        { 1ULL, 3ULL, 333333333ULL },
+        { 2ULL, 3ULL, 666666666ULL },
+        { 3ULL, 3ULL, 1000000000ULL },
+        { 1ULL, UINT64_MAX, 0ULL },
+        { UINT64_MAX - 1, UINT64_MAX, 999999999ULL },
+        { UINT64_MAX, UINT64_MAX, 1000000000ULL },
+        { UINT64_MAX, 1ULL, UINT64_MAX },
+        { 18446744073ULL, 1ULL, 18446744073000000000ULL },
+        { 18446744074ULL, 1ULL, UINT64_MAX },
+        { UINT64_MAX, 1000000000ULL, UINT64_MAX },
+        { UINT64_MAX - 1, 1000000000ULL, UINT64_MAX - 1 },
+        { UINT64_MAX, 1000000001ULL, 18446744055262807559ULL },
+        { 18446744055553255925ULL, 999999999ULL, UINT64_MAX },
+        { 1844674407300ULL, 636094620784634138ULL, 2900ULL },
+        { 1844674407300ULL, 10000000ULL, 184467440730000ULL },
+        { UINT64_MAX, 9223372036854775808ULL, 1999999999ULL },
+        { 9223372036854775809ULL, UINT64_MAX, 500000000ULL },
+        { UINT64_MAX - 1, 9223372036854775809ULL, 1999999999ULL }
+    };
+    size_t i;
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        CHECK(determ_qpc_to_ns(cases[i].ticks, cases[i].frequency) == cases[i].expected);
+    }
+}
 
-    uint64_t ns = determ_qpc_to_ns(ticks, freq);
-
-    printf("  Input ticks: %llu, freq: %llu\n", (unsigned long long)ticks, (unsigned long long)freq);
-    printf("  Result ns:   %llu\n", (unsigned long long)ns);
-
-    /* HARD ASSERTION: Must NOT overflow to 29 */
-    TEST_ASSERT(ns != 29ULL);
-    TEST_ASSERT(ns == 2900ULL);
-
-    /* Test Standard 10MHz QPC Frequency on Windows */
-    uint64_t qpc_10mhz = 10000000ULL;
-    uint64_t ns_10mhz = determ_qpc_to_ns(ticks, qpc_10mhz);
-    TEST_ASSERT(ns_10mhz == 184467440730000ULL);
-
-    printf("  -> PASS: Windows QPC conversion verified safe against uint64_t overflow.\n");
+static void test_bounded_product_oracle(void) {
+    uint64_t ticks, frequency;
+    /* Independent direct-product oracle in the range where it cannot
+     * overflow. Exercises fractional rounding without copying the helper.
+     */
+    for (ticks = 0; ticks <= 128; ++ticks) {
+        for (frequency = 1; frequency <= 128; ++frequency) {
+            CHECK(determ_qpc_to_ns(ticks, frequency) == ticks * 1000000000ULL / frequency);
+        }
+    }
+    for (ticks = UINT64_MAX / 1000000000ULL - 32;
+         ticks <= UINT64_MAX / 1000000000ULL; ++ticks) {
+        for (frequency = 1; frequency <= 128; ++frequency) {
+            CHECK(determ_qpc_to_ns(ticks, frequency) == ticks * 1000000000ULL / frequency);
+        }
+    }
 }
 
 int main(void) {
-    test_harness_init("test_qpc_clock_overflow");
-    test_qpc_clock_overflow_prevention();
-    test_harness_finish("test_qpc_clock_overflow");
+    test_reference_vectors();
+    test_bounded_product_oracle();
+    puts("PASS: portable QPC scaled conversion");
     return 0;
 }
