@@ -140,8 +140,21 @@ state migration and topology removal are outside a first fixed-topology incremen
 The following are intended design requirements from the continuing 2026-09-22
 discussion, not shipped C99 consensus behavior or a completed convergence proof:
 
-- Exactly two elected co-creators produce a block. Message senders participate in
-  the proposed MP-DH/commit-reveal process without becoming additional co-creators.
+- Exactly two elected co-creators produce a block and supply the fresh ephemeral
+  cryptographic contributions. Message senders submit signed transactions and verify
+  blocks locally; they supply no MP-DH shares and perform no consensus commit/reveal.
+  This supersedes the earlier proposal for interactive sender participation.
+- The owner adopts a public-verification requirement for the DH-derived result.
+  A block must carry cryptographic evidence sufficient for an ordinary receiving
+  node to verify derivation from the two co-creators' committed ephemeral
+  contributions, binding the canonical ordered-body hash, chain/shard identity,
+  parent, height and round. The receiver must also verify that the VDF uses that
+  verified input. Creator signatures authenticate endorsement; they do not alone
+  prove this derivation. A body hash supplies binding, not independent secret entropy.
+  The exact proof relation, commitment scheme, publication sequence, canonical
+  encoding and verifier remain to be designed and reviewed. This requirement does
+  not select an off-the-shelf proof suite, require disclosure of private keys or
+  establish resistance to candidate grinding. No such verifier has shipped.
 - Only messages received by both co-creators are eligible for inclusion. This is a
   shared-receipt condition; it does not silently require every eligible message to
   fit in a block or define the complete canonical selection/ordering algorithm.
@@ -159,9 +172,10 @@ discussion, not shipped C99 consensus behavior or a completed convergence proof:
   cooperating.
 - Senders "finalize for themselves": they verify and accept locally. There is no
   requirement to collect approvals from all previous-block senders, no sender quorum,
-  and no collective finalization/approval barrier waiting for those senders. This
-  does not specify the separate availability requirements of MP-DH/commit-reveal
-  participation. No unanimity safety proof follows from local verification.
+  and no collective finalization/approval barrier waiting for those senders. Sender
+  shares or reveals are not a block-production dependency. Incomplete cooperation
+  by the co-creators still requires the separately specified attempt/recovery rules.
+  No unanimity safety proof follows from local verification.
 - Temporary forks and correction of divergent local histories are intentional.
   Local acceptance is not an irreversible network-wide finality certificate. The
   property to establish is convergence under explicit delivery/fault assumptions and

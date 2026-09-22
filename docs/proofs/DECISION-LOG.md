@@ -5914,3 +5914,41 @@ MP-DH participation availability to specify; cross-shard invariants use coherent
 local dependency views and compare nodes after relevant delivery/recovery. Review
 then found no further actionable issues. No binaries or new simulations were built
 or executed for this documentation-only increment.
+
+## 2026-09-22 — Noninteractive senders and public verification of co-creator derivation
+
+**Owner decision, continuing the same design discussion:** the owner accepts removing
+sender participation in MP-DH/commit-reveal and then explicitly says "Yes adopt that"
+to public verification of the co-creators' DH-derived result. This supersedes the
+interactive-sender proposal in the earlier local-recovery entry; the earlier entry
+is retained as history. Exactly two elected co-creators supply fresh ephemeral
+contributions. Senders submit signed transactions and verify locally, with no sender
+shares, sender reveals or collective approval barrier required to produce a block.
+
+**Adopted verification requirement.** An ordinary receiver must be able to verify
+that the published result derives from both co-creators' committed ephemeral
+contributions, binds the exact canonical ordered-body hash and chain/shard, parent,
+height and round context, and is the input used by the VDF. The block must carry the
+necessary public cryptographic evidence. Creator signatures authenticate endorsement
+but do not alone establish correct derivation. The body hash binds the transactions;
+it is not independent secret entropy.
+
+This adopts a requirement, not a completed cryptographic construction. The exact
+proof relation and suite, commitment scheme, publication sequence, canonical bytes
+and receiver checks require design and independent review before implementation.
+No private-key disclosure requirement or specific RFC proof suite is adopted.
+Correct derivation does not by itself prove resistance to candidate grinding or
+convergence. The accepted temporary-fork/local-recovery model, K=2 roles, shared
+message eligibility and 1:3 block-time/total-timeout ratio remain as recorded.
+
+**Scope.** ADR-005 remains future-tier and PROPOSED. This increment updates its role
+and verification requirements only; it ships no source change, public-proof verifier,
+new simulation or production sharding behavior. Verification and independent review
+are recorded below after completion.
+
+**Verification and independent review (same session):**
+`bash tools/ci_local.sh --docs-only` passed all 16 existing guards and
+`git diff --check` passed. Independent review found no actionable issues: the
+record keeps sender verification noninteractive, treats public derivation evidence
+as a requirement awaiting a concrete construction, and introduces neither sender
+voting nor private-key disclosure. No binaries or new simulations were built or run.
