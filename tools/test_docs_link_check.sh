@@ -109,7 +109,7 @@ should_check() {
   [ -z "$path" ] && return 1
   # Must end in a recognised real source-file extension.
   case "$path" in
-    *.md|*.tla|*.sh|*.cpp|*.hpp|*.json) ;;
+    *.md|*.tla|*.sh|*.c|*.h|*.json) ;;
     *) return 1 ;;
   esac
   RESOLVED_TARGET="$path"

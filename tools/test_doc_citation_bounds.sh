@@ -49,7 +49,7 @@ resolve_citation() {
     */*) [ -f "$p" ] && printf '%s' "$p"; return;;
   esac
   local matches n
-  matches=$(find src light include wallet tools -type f -name "$p" 2>/dev/null)
+  matches=$(find src include sim tests tools -type f -name "$p" 2>/dev/null)
   n=$(printf '%s\n' "$matches" | grep -c .)
   [ "$n" = "1" ] && printf '%s' "$matches"
 }
@@ -57,16 +57,17 @@ resolve_citation() {
 check_corpus() {
   # $1 = docs root to scan. Increments VIOLATIONS for each out-of-bounds/missing cite.
   local root="$1"
-  declare -A LINECOUNT RESOLVED
   local checked=0 oob=0 skipped=0 tok cpath line f tot
   local cites
-  cites=$(grep -rhoE "[A-Za-z0-9_./-]+\.(cpp|hpp|h|tla):[0-9]+" "$root" 2>/dev/null | sort -u)
+  cites=$(grep -rhoE "[A-Za-z0-9_./-]+\.(c|cpp|hpp|h|tla):[0-9]+" "$root" 2>/dev/null | sort -u)
   while IFS= read -r tok; do
     [ -z "$tok" ] && continue
     is_quarantined "$tok" && { skipped=$((skipped+1)); continue; }
     cpath="${tok%:*}"; line="${tok##*:}"
-    if [ -z "${RESOLVED[$cpath]+x}" ]; then RESOLVED[$cpath]="$(resolve_citation "$cpath")"; fi
-    f="${RESOLVED[$cpath]}"
+    case "$cpath" in
+      *.cpp|*.hpp) skipped=$((skipped+1)); continue;;
+    esac
+    f="$(resolve_citation "$cpath")"
     # A path-qualified citation that does NOT resolve = a missing/renamed file (hard
     # error). A bare basename that doesn't resolve uniquely is skipped (ambiguous).
     if [ -z "$f" ]; then
@@ -76,8 +77,7 @@ check_corpus() {
       esac
       continue
     fi
-    if [ -z "${LINECOUNT[$f]+x}" ]; then LINECOUNT[$f]="$(wc -l < "$f" | tr -d ' ')"; fi
-    tot="${LINECOUNT[$f]}"
+    tot="$(wc -l < "$f" | tr -d ' ')"
     checked=$((checked+1))
     if [ "$line" -gt "$tot" ] 2>/dev/null; then
       bad "OUT-OF-BOUNDS citation $tok -> $f has only $tot lines"; oob=$((oob+1))

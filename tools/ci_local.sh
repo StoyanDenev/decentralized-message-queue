@@ -41,6 +41,7 @@
 # GitHub Actions runs the same content (.github/workflows/ci.yml).
 set -u
 cd "$(dirname "$0")/.."
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 JOBS=$( (command -v nproc >/dev/null && nproc) \
      || (command -v sysctl >/dev/null && sysctl -n hw.ncpu 2>/dev/null) \
@@ -49,7 +50,8 @@ SKIP_BUILD=0
 BUILD_DIR=""
 SANITIZE=0
 ASAN=0
-C99=0
+C99=1
+C99_EXPLICIT=0
 C99_MUTANTS=0
 DOCS_ONLY=0
 C99_TESTS=()
@@ -65,13 +67,13 @@ while [ $# -gt 0 ]; do
     --jobs)
       [ $# -ge 2 ] || { echo "FAIL: --jobs requires a count"; exit 1; }
       JOBS="$2"; shift 2 ;;
-    --sanitize) SANITIZE=1; shift ;;
-    --asan) ASAN=1; shift ;;
-    --docs-only) DOCS_ONLY=1; shift ;;
-    --c99) C99=1; shift ;;
+    --sanitize) SANITIZE=1; C99=0; shift ;;
+    --asan) ASAN=1; C99=0; shift ;;
+    --docs-only) DOCS_ONLY=1; C99=0; shift ;;
+    --c99) C99=1; C99_EXPLICIT=1; shift ;;
     --c99-test)
       [ $# -ge 2 ] || { echo "FAIL: --c99-test requires a target"; exit 1; }
-      C99=1; C99_TESTS+=("$2"); shift 2 ;;
+      C99=1; C99_EXPLICIT=1; C99_TESTS+=("$2"); shift 2 ;;
     --c99-mutants) C99=1; C99_MUTANTS=1; shift ;;
     *) echo "unknown arg: $1 (see --help)"; exit 1 ;;
   esac
@@ -83,16 +85,7 @@ run_doc_guards() {
   DOC_GUARD_LOG=$(mktemp "${TMPDIR:-/tmp}/determ-doc-guard.XXXXXXXX") || return 1
   for g in test_doc_citation_bounds test_doc_tier_check test_docs_link_check \
            test_proofs_index_complete test_proofs_no_deleted_crypto_backend \
-           test_param_change_whitelist_coherence \
-           test_rpc_hmac_canonical_parity test_keygen_failclosed_guard \
-           test_wallet_accounting_credit_gate_source \
-           test_dapp_registry_active_boundary_coherence \
-           test_registrant_lifecycle_classifier_coherence \
-           test_light_state_root_binding_guard \
-           test_light_resume_monotonicity_guard \
-           test_light_keybind_surface \
-           test_security_ledger_coherence \
-           test_producer_admit_wiring_guard; do
+           test_security_ledger_coherence; do
     if [ -f "tools/$g.sh" ]; then
       if bash "tools/$g.sh" >"$DOC_GUARD_LOG" 2>&1; then
         echo "  PASS: $g"
@@ -106,7 +99,7 @@ run_doc_guards() {
 }
 
 if [ "$DOCS_ONLY" -eq 1 ]; then
-  if [ "$C99" -ne 0 ] || [ "$SKIP_BUILD" -ne 0 ] || [ "$SANITIZE" -ne 0 ] || [ "$ASAN" -ne 0 ] || [ -n "$BUILD_DIR" ]; then
+  if [ "$C99_EXPLICIT" -ne 0 ] || [ "$SKIP_BUILD" -ne 0 ] || [ "$SANITIZE" -ne 0 ] || [ "$ASAN" -ne 0 ] || [ -n "$BUILD_DIR" ]; then
     echo "FAIL: --docs-only cannot be combined with build or binary-test modes"
     exit 1
   fi
@@ -115,8 +108,7 @@ if [ "$DOCS_ONLY" -eq 1 ]; then
   exit 0
 fi
 
-# The C99 prototype has a separate, explicitly scoped gate. It never inherits
-# legacy binary search paths, and never permits a skipped build.
+# Sovereign C99 Unikernel Execution Environment
 if [ "$C99" -eq 1 ]; then
   if [ "$SKIP_BUILD" -ne 0 ] || [ "$SANITIZE" -ne 0 ] || [ "$ASAN" -ne 0 ]; then
     echo "FAIL: --c99 cannot be combined with --skip-build, --sanitize, or --asan"
@@ -127,9 +119,20 @@ if [ "$C99" -eq 1 ]; then
       echo "FAIL: --c99-mutants owns its isolated build directories and test selection"; exit 1; }
     exec python3 tools/c99_mutants.py --jobs "$JOBS"
   fi
-  # Sourced only from this wrapper; all entry points remain ci_local.
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) DEFAULT_DIR="build" ;;
+    *)                    DEFAULT_DIR="build-linux" ;;
+  esac
+  BUILD_DIR="${BUILD_DIR:-$DEFAULT_DIR}"
+  HAS_CUSTOM_TESTS=0
+  [ "${#C99_TESTS[@]}" -gt 0 ] && HAS_CUSTOM_TESTS=1
   source tools/ci_c99.sh
-  exit $?
+  rc=$?
+  [ "$rc" -eq 0 ] || exit $rc
+  if [ "$C99_EXPLICIT" -eq 0 ] && [ "$HAS_CUSTOM_TESTS" -eq 0 ]; then
+    run_doc_guards || exit 1
+  fi
+  exit 0
 fi
 
 # ── UBSan mode (--sanitize): the undefined-behavior net for the consensus

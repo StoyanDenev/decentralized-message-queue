@@ -12,7 +12,7 @@ ulimit -c 0 || { echo "FAIL: cannot disable core dumps for C99 tests"; return 1;
 C99_PORTABLE=(test-k2-duel test-k2-duel-fallback test-dda test-qpc-clock-overflow
               test-binary-codec fuzzer-parser test-dsf-k2-recovery test-shard-routing
               test-ed25519-bounded test-pending-transfer)
-C99_UNIX=(test-dsf-k2-duel test-k2-net-rpc test-peer-mesh test-block-store
+C99_UNIX=(test-execution-env test-k2-posw test-dsf-k2-duel test-k2-net-rpc test-peer-mesh test-block-store
           test-http-rpc test-ledger-dsso fuzz-ledger test-opaque-dsso
           test-triple-entry-ledger test-rpc-shard-routing test-rpc-pending-transfer determ-node)
 C99_IS_UNIX=1
@@ -31,7 +31,7 @@ fi
 for target in "${C99_TESTS[@]}"; do
   case "$target" in
     test-k2-duel|test-k2-duel-fallback|test-dda|test-qpc-clock-overflow|test-binary-codec|fuzzer-parser|test-dsf-k2-recovery|test-shard-routing|test-ed25519-bounded|test-pending-transfer) ;;
-    test-dsf-k2-duel|test-k2-net-rpc|test-peer-mesh|test-block-store|test-http-rpc|test-ledger-dsso|fuzz-ledger|test-opaque-dsso|test-triple-entry-ledger|test-rpc-shard-routing|test-rpc-pending-transfer|determ-node)
+    test-execution-env|test-k2-posw|test-dsf-k2-duel|test-k2-net-rpc|test-peer-mesh|test-block-store|test-http-rpc|test-ledger-dsso|fuzz-ledger|test-opaque-dsso|test-triple-entry-ledger|test-rpc-shard-routing|test-rpc-pending-transfer|determ-node)
       [ "$C99_IS_UNIX" -eq 1 ] || {
         echo "FAIL: requested target $target requires POSIX transport"; return 1; } ;;
     *) echo "FAIL: unsupported C99 target: $target"; return 1 ;;
