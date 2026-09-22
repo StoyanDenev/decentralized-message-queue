@@ -1,133 +1,147 @@
-# K2_VDF_Soundness — Mathematical Proof of the $K=2$ VDF Duel Consensus Architecture
+# K2_VDF_Soundness — C99 experiment contracts and consensus blockers
 
-**Status:** ACTIVE / CANONICAL CONSENSUS SPECIFICATION  
-**Supersedes:** Legacy $K$-of-$K$ consensus (`Safety.md`, `ConsensusPhaseStructureSoundness.md`, `BFTSafety.md`, `BFTLiveness.md`).  
-**Companion Documents:** `Preliminaries.md` (F0), `audit_crypto_primitives_encoding.md`, `CanonicalSigningBytesParity.md`, `include/determ/consensus/duel_state.h`.
+**Status:** Current implementation contract; no production-consensus security proof.
+**Correction date:** 2026-09-22. The former zero-bias, absolute-liveness and unique-block
+theorems in this file are withdrawn for the counterexamples below. Their presence in
+an earlier revision was not evidence that the C99 node implemented those properties.
+The append-only [Decision Log](DECISION-LOG.md) records the correction and its scope.
 
----
+## 1. Implementation boundary
 
-## 1. Executive Summary & Architectural Axiom
+There are two implementations in this repository. The `determ` CMake target still
+builds the C++ chain/node. The C99 `determ-node` executable is an experimental pair
+computation and networking harness. It does not implement authenticated membership,
+producer election, validated block admission, transaction execution on accepted
+blocks, branch adoption, or durable reorganization. Its output is not a finalized
+ledger block. The C++ consensus proofs do not establish properties of the C99 path.
 
-The Determ decentralized message queue and state replication engine operates on a bare-metal C99 $K=2$ Verifiable Delay Function (VDF) Duel consensus protocol. The consensus committee at each height $h$ consists of exactly two elected nodes:
-1. **Aggregator ($\mathcal{A}$):** Proposes primary transaction bundle $Payload_A$ and commitment $C_A = H(Payload_A)$.
-2. **Contributor ($\mathcal{B}$):** Proposes secondary transaction bundle $Payload_B$ and commitment $C_B = H(Payload_B)$.
+The C99 evaluator in `src/crypto/vdf.c` is a custom AES/SHA-256 computation with a
+64 KiB arena. `vdf_verify` repeats evaluation. It is not a Wesolowski/Pietrzak
+construction or a succinct proof verifier. No reduction establishes sequential
+hardness, ASIC resistance, or a hardware-independent minimum duration. Iteration
+counts and local benchmarks cannot supply such a proof.
 
-Finalization of height $h$ requires evaluating a sequential, non-parallelizable Verifiable Delay Function (Wesolowski / Pietrzak modular squaring over an unknown order group) over the canonical payload commitment.
+## 2. Refuted claims
 
-### Axiom 1 (The Time-Lock Inequality Axiom)
-Let $W_{reveal}$ denote the strictly enforced monotonic wall-clock window during which Contributor $\mathcal{B}$ may reveal $Payload_B$. Let $\Delta_{max}$ denote the maximum network message propagation delay under partial synchrony. Let $T_{vdf}$ denote the minimum physical execution time required by any polynomial-time adversary possessing maximum hardware acceleration (ASIC/FPGA) to compute $T_{iter}$ sequential steps of the VDF:
+**R1 — enforced blindness against a colluding pair.** Both participants know both
+payloads before starting the local timer. They can evaluate candidates before
+publishing commitments and choose one. A deadline measured after that work does not
+erase knowledge. Independent candidates may also be evaluated concurrently. Hash
+commitment binding is not a proof of output unpredictability or unbiasedness.
 
-$$T_{vdf} > W_{reveal} + \Delta_{max}$$
+**R2 — absolute liveness.** A strict two-reveal rule cannot produce a successful
+result when either required participant remains silent. A timeout can terminate a
+local attempt with failure. It cannot make the missing reveal exist. Explicit retry
+does not guarantee a successful retry or elect a replacement participant.
 
----
+**R3 — unique canonical block.** A signer can authenticate two different messages
+without breaking signature unforgeability. A unique output for one input does not
+imply unique inputs or agreement between nodes seeing different histories. Comparing
+supplied integers is not authenticated branch validation, adoption, or convergence.
 
-## 2. Formal Protocol State Transitions
+**R4 — economic exclusion of grinding.** ADR-004's argument needs a proved bound on
+honest chain growth relative to adversarial growth. No such bound follows from an
+exclusive pair, undefined eligibility, or unvalidated iteration totals. This remains
+an open proof obligation, not a replacement proof for R1 or R3.
 
-The per-height consensus execution is modeled as a deterministic state machine:
+## 3. Retained local-attempt contract
 
-$$\Sigma = \{\text{INIT}, \text{COMMIT}, \text{AWAIT\_REVEALS}, \text{VDF\_EVALUATE}, \text{FINAL}\}$$
+The supported unit is one caller-started local attempt with an Aggregator and a
+Contributor. Role names identify slots, not authenticated identities.
 
-1. **Commit Phase:**
-   - Aggregator samples $Payload_A$, signs and broadcasts commitment $C_A = H(Payload_A \parallel h)$.
-   - Contributor samples $Payload_B$, signs and submits commitment $C_B = H(Payload_B \parallel h)$.
-   - Both nodes must publish $C_A, C_B$ before entering `AWAIT_REVEALS`.
+1. Starting an attempt clears commitments, reveals and result state. Commitments
+   are SHA-256 of exact payload bytes. Each role commits at most once.
+2. Both commitments are required before entering the reveal phase. Either role
+   commitment is accepted only before 1,000 ms from the attempt start.
+3. Reveals must be nonempty, within the 65,536-byte role limit, hash to the stored
+   role commitment, and arrive before 2,000 ms from the same attempt start. A
+   caller-supplied validity flag cannot authorize a mismatched opening.
+4. Two valid reveals produce `BE32(len_A) || A || BE32(len_B) || B`. One reveal
+   never produces a successful two-party evaluation. Polling after the applicable
+   deadline returns terminal failure for missing input.
+5. Networking and the CLI propagate terminal failure. A library caller may start
+   another local attempt explicitly; this is not committee rotation, global liveness,
+   consensus recovery or an authenticated global round-number protocol.
+6. The Aggregator evaluates the assembled input at the fixed prototype work count
+   and sends a 32-byte output. The Contributor reports receipt of unauthenticated
+   bytes after the reveal-window message; it does not receive the Aggregator reveal
+   or independently recompute that output. Receipt is not proof of successful remote
+   evaluation. Neither endpoint credits a ledger, finalizes a height, or persists
+   that output as a validated block.
 
-2. **Await Reveals Phase:**
-   - Aggregator enters `AWAIT_REVEALS` at local timestamp $t_0$, initializing a monotonic hardware timer $\tau = 0$.
-   - **Branch 1 (Dual Collaboration):** If Contributor transmits valid $Payload_B$ such that $H(Payload_B \parallel h) = C_B$ at timestamp $\tau \le W_{reveal}$, the composite seed is formed:
-     $$Seed_{A+B} = \text{SHA-256}(C_A \parallel C_B \parallel Payload_A \parallel Payload_B)$$
-     The state transitions immediately to $\text{VDF\_EVALUATE}(Seed_{A+B})$.
-   - **Branch 2 (1-of-2 Straggler Fallback):** If monotonic timer $\tau > W_{reveal}$ expires without a valid reveal from Contributor (due to network partition, Byzantine crash, or strategic withholding), the 1-of-2 fallback executes unconditionally:
-     $$Seed_{A} = \text{SHA-256}(C_A \parallel Payload_A)$$
-     The state transitions unconditionally to $\text{VDF\_EVALUATE}(Seed_{A})$.
+Deadlines are checked when the caller polls or submits input, under a monotonic
+clock and a regularly serviced event loop. They are not authenticated time facts
+about a remote peer. Commitments do not bind an authenticated session, chain, parent,
+height, shard or membership snapshot. This transport is unsuitable for adversarial
+production deployment until those rules are designed and verified.
 
-3. **VDF Evaluation Phase:**
-   - The node evaluates $Y = VDF(Seed, T_{iter})$ sequentially.
-   - Computes succinct proof $\pi$.
-   - Assembles canonical `wire_block_header_t` (212 bytes) and enters $\text{FINAL}$.
+**Binding argument (local state-machine ingress).** A different accepted opening to one commitment must have the
+same SHA-256 digest, requiring a collision/second preimage. This is a payload-binding
+claim only: it proves neither peer identity nor low-entropy payload secrecy, and a
+malicious committer can still abort.
 
----
+**Assembly bound.** Each accepted payload is at most 65,536 bytes, so the framed
+input is at most 131,080 bytes. The surviving bundler checks role limits, pointer/length
+consistency and output capacity before writes. Establishing the bound before adding
+framing overhead prevents 32-bit `size_t` overflow.
 
-## 3. Theorem 1 (Zero-Bit Bias & Anti-Collusion via Enforced Blindness)
+## 4. Deterministic difficulty helper
 
-**Theorem Statement.**  
-Let $\mathcal{A}^*$ be an adversary controlling both the Aggregator $\mathcal{A}$ and Contributor $\mathcal{B}$ ($K=2$ total collusion). Let $u: \{0, 1\}^* \to \mathbb{R}$ be an arbitrary non-trivial utility function over finalized block states. The adversary $\mathcal{A}^*$ cannot selectively withhold $Payload_B$ to maximize $u$. Specifically, the advantage of $\mathcal{A}^*$ in predicting or biasing any outcome bit before $W_{reveal}$ expires is negligible:
+The DDA helper is a function of supplied predecessor history, not a C99 network
+block-acceptance rule. Its caller must supply contiguous, independently validated
+same-branch millisecond timestamps and work, and restore the tracker on reorganization.
 
-$$\left| \Pr\left[\mathcal{A}^*(1^\lambda, C_A, C_B) = \mathrm{LSB}(Outcome) \right] - \frac{1}{2} \right| \le \mathrm{negl}(\lambda)$$
+It holds eleven timestamps for ten intervals. Zero is a valid first anchor. With
+fewer than two timestamps the average is the 3,000 ms target; otherwise it is
+`(newest - oldest) / (timestamp_count - 1)`, saturated to the return type. Calibration
+increases work by 50% below target and decreases it by at most 5% above target,
+within the existing iteration bounds.
 
-### Proof (Mathematical Reduction to VDF Sequentiality)
-1. At state `COMMIT`, $\mathcal{A}^*$ commits to $C_A$ and $C_B$. By SHA-256 preimage resistance (Assumption A3), $Payload_A$ and $Payload_B$ are uniquely bound.
-2. Two mutually exclusive finalization seeds exist:
-   $$S_1 = Seed_A = H(C_A \parallel Payload_A)$$
-   $$S_2 = Seed_{A+B} = H(C_A \parallel C_B \parallel Payload_A \parallel Payload_B)$$
-   These lead to two candidate block states $Outcome_A = \text{VDF}(S_1)$ and $Outcome_{A+B} = \text{VDF}(S_2)$.
-3. To execute a selective abort, $\mathcal{A}^*$ must decide whether to transmit $Payload_B$ before the deadline $t_0 + W_{reveal}$.
-4. A rational adversary chooses to transmit $Payload_B$ if and only if:
-   $$u(Outcome_{A+B}) > u(Outcome_A)$$
-   Computing this predicate requires computing both $Outcome_{A+B}$ and $Outcome_A$.
-5. By the definition of a Verifiable Delay Function with sequential parameter $T_{iter}$, computing $\text{VDF}(S)$ requires minimum wall-clock duration:
-   $$t_{eval} \ge T_{vdf}$$
-   even on massively parallel hardware.
-6. By Axiom 1 (Time-Lock Inequality):
-   $$T_{vdf} > W_{reveal} + \Delta_{max}$$
-7. Therefore, at all timestamps $t \le W_{reveal}$:
-   $$t < T_{vdf}$$
-8. Consequently, at the decision boundary $t = W_{reveal}$, neither $Outcome_A$ nor $Outcome_{A+B}$ has been computed by $\mathcal{A}^*$.
-9. Under the random oracle model (ROM) for the VDF output mapping, both $Outcome_A$ and $Outcome_{A+B}$ are independent, uniformly distributed random variables over $\{0, 1\}^{256}$.
-10. Therefore, the adversary possesses zero bits of information regarding which outcome yields higher utility. The decision to reveal or withhold $Payload_B$ is uncorrelated with the resulting block state:
-    $$\Pr[\text{Select } S_2 \mid u(Outcome_{A+B}) > u(Outcome_A)] = \frac{1}{2}$$
-We conclude that the colluding adversary is mathematically forced to commit blindly. $\blacksquare$
+Recording a header checks its work against the expectation derived from unchanged
+predecessor state and requires a strictly increasing timestamp. Failure changes no
+state. Success appends the timestamp and accepted work. Identical supplied histories
+therefore produce identical expectations. This does not prove timestamp honesty:
+monotonically inflated producer timestamps can drive difficulty down. Timestamp-validity
+rules, proof validation and chain ingestion are prerequisites for production use.
 
----
+## 5. Portable clock arithmetic
 
-## 4. Theorem 2 (Absolute Liveness under Asynchronous Networks)
+QPC conversion computes `floor(ticks * 1,000,000,000 / frequency)`, saturated at
+`UINT64_MAX`; zero frequency returns zero. The portable implementation avoids
+intermediate overflow; the Windows clock calls the same tested helper. Saturation
+prevents wraparound, but does not extend the representable lifetime of a nanosecond
+counter or establish global synchronization.
 
-**Theorem Statement.**  
-Let the network undergo arbitrary asynchronous delays, network partitions, or silent dropping of messages between Contributor $\mathcal{B}$ and Aggregator $\mathcal{A}$. The state machine $\Sigma$ is guaranteed to terminate in $\text{FINAL}$ at height $h$ without deadlocking and without requiring a Byzantine voting quorum.
+## 6. Removed surfaces and remaining blockers
 
-### Proof (Exhaustive Branch Progress)
-1. Suppose Aggregator $\mathcal{A}$ is honest and broadcasts $C_A$ at height $h$.
-2. Aggregator transitions to `AWAIT_REVEALS` at local time $t_0$.
-3. The monotonic clock $\tau$ advances locally via monotonic hardware registers:
-   $$\frac{d\tau}{dt} \ge 1$$
-4. Consider the two cases for Contributor's reveal:
-   - **Case 1 (Timely Reveal):** Contributor $\mathcal{B}$ sends valid $Payload_B$ arriving at $\tau \le W_{reveal}$. The transition rule for Dual Collaboration fires. State transitions to `VDF_EVALUATE`, which runs for finite steps $T_{iter}$ and finalizes.
-   - **Case 2 (Straggler / Dropped Payload):** Due to network partition or adversarial crash, no valid payload arrives before $\tau = W_{reveal}$.
-5. Because the local timer $\tau$ is strictly monotonic, there exists a finite wall-clock timestamp $t_{exp} = t_0 + W_{reveal}$ at which $\tau > W_{reveal}$.
-6. The predicate for 1-of-2 Straggler Fallback evaluates to TRUE at $t_{exp}$.
-7. The Aggregator transitions unconditionally to $\text{VDF\_EVALUATE}(Seed_A)$.
-8. VDF evaluation is purely local and deterministic, requiring zero inbound network messages.
-9. Upon completion of $T_{iter}$ sequential squarings, the Aggregator produces block $B_h$ and transitions to $\text{FINAL}$.
-10. Deadlock requires a state with no enabled outgoing transitions. Because $\tau > W_{reveal}$ is an absorbing event that unconditionally enables the 1-of-2 transition, no deadlocks exist.
-We conclude that the system achieves absolute liveness under arbitrary network asynchrony. $\blacksquare$
+The unused stream bundler is removed; the bounded bundler remains. The socket-byte
+evidence predicate, empty polling loop, slashing flag and unvalidated fork-choice
+helpers are removed. None had a production consensus caller. No evidence verification,
+slashing, authenticated broadcast or secure fork choice is claimed as a replacement.
+The existing C++ evidence path is unaffected.
 
----
+Production PoSW requires decisions and proofs for authenticated membership and Sybil
+resistance; exclusive-pair eligibility, timeout authorization, replacement and recovery; canonical challenge/context
+binding; a delay construction and explicit hardness assumptions; timestamp validity;
+validated cumulative work; transaction/state validity; data availability; synchronization;
+atomic branch adoption, persistence and recovery. The
+[sharding design gate](../decisions/ADR-005-Temporal-Sharding.md) depends on these
+obligations and cannot remove them by adding shard identifiers.
 
-## 5. Theorem 3 (Unique Canonical Block Safety)
+## 7. Verification boundary
 
-**Theorem Statement.**  
-For any given height $h$, honest verifiers accept at most one canonical block:
-$$|\text{CanonicalBlocks}(h)| \le 1$$
+Run C99 checks through `tools/ci_local.sh --c99`, select targets with `--c99-test`,
+and run isolated falsification through `--c99-mutants`. Build success must precede
+execution of the selected binary. A failed build does not count as a rejected mutant.
+Unsupported platform cases must be reported distinctly from passes.
 
-### Proof
-1. Block validity requires an Ed25519 signature from the elected Aggregator $\mathcal{A}_h$ over the canonical 212-byte header (`wire_block_header_t`).
-2. By Assumption A1 (EUF-CMA), an adversary cannot forge the Aggregator's signature.
-3. If the Aggregator attempts equivocation by signing two distinct block headers $B_h \ne B'_h$, both carry valid cryptographic proofs of equivocation.
-4. Furthermore, because the VDF function $VDF(Seed, T_{iter})$ is a deterministic bijection:
-   $$\forall Seed, \quad \exists! Y \text{ such that } VerifyVDF(Seed, Y, \pi) = 1$$
-5. Honest verifiers apply the deterministic fork-choice rule (lowest VDF output lexicographically or highest VRF priority), selecting a unique canonical block.
-Therefore, safety holds unconditionally. $\blacksquare$
+These gates assert the local contracts above. They do not prove successful progress
+against a withholding pair, global safety, finality, unbiased randomness, sharding
+security, or production Windows networking. Independent review and recorded execution
+results remain necessary; green tests cannot certify an unspecified protocol.
 
----
-
-## 6. Deprecation of Legacy Proofs
-
-The following proofs analyzed the pre-migration $K$-of-$K$ unanimous agreement model and BFT escalation committees, which are obsolete:
-- `docs/proofs/Safety.md`
-- `docs/proofs/Liveness.md`
-- `docs/proofs/BFTSafety.md`
-- `docs/proofs/ConsensusPhaseStructureSoundness.md`
-- `docs/proofs/SelectiveAbort.md`
-- `docs/proofs/S025BFTEscalationSoundness.md`
-
-All consensus invariants and model checking are now formally anchored in `K2_VDF_Soundness.md`.
+**Recorded execution (2026-09-22, Darwin arm64):** `ci_local --c99 --jobs 4` passed
+16 targets after a successful build; `--c99-mutants --jobs 4` rejected 18/18 isolated
+mutants after successful fresh builds; `--docs-only` passed 16 guards. Source and
+design review were independent of test color. These results establish only the
+stated checks; Linux/Windows runtime and the C++ FAST suite were not run in this pass.

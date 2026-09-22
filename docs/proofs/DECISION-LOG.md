@@ -5774,3 +5774,78 @@ We formally authorize a complete architectural refactor to align with the origin
 ## Consequences & Supersession
 * **Positive:** Network message complexity drops to $O(1)$. MEV front-running is physically eradicated. The node is a mathematically provable, memory-safe, zero-allocation binary.
 * **Superseded Material:** This decision officially supersedes all prior proofs, whitepapers, and decision records relating to ASIO, OpenSSL, and $K$-of-$K$ consensus. The new C99 implementation and `K2_VDF_Soundness.md` proofs are declared canonical.
+
+
+## 2026-09-22 — C99 K=2 correction and temporal-sharding design gate
+
+**Owner request:** fix the reviewed K=2 problems, make docs/tests coherent with the
+changes, then execute the corrected sharding prompt. This entry supersedes the
+C99 claims in the earlier 2026-09-22 entry; that historical record is retained.
+
+**Adjudication.** The C99 daemon is a local pair experiment, not a migrated C++
+consensus engine. Its work-comparison helpers had no production caller; it has no
+authenticated membership/election, block admission, branch adoption or reorganization.
+The previous 1-of-2 liveness, fork-free finality, zero-bias, enforced-blindness and
+MEV-immunity claims are withdrawn. Colluding participants know both inputs before
+the timer; a required silent participant prevents completion; a signer can issue
+conflicting candidates. Sequential work for one candidate does not solve these cases.
+ADR-004's economic claim needs an explicit producer population and an adversarial
+chain-growth bound, neither currently specified. It is not a proved mitigation.
+
+**Repair boundary.** Enforce both payload commitments and matching reveals in the
+local state machine and network driver. Commit deadline T+1000 ms; total reveal
+deadline T+2000 ms. Missing/invalid input returns terminal failure. Explicit caller
+retry resets state without pretending to elect a replacement or guarantee progress.
+A successful evaluation is not ledger finalization and is not written as a naked
+DBK1 block. Remove unused socket-byte evidence/slashing, dummy VDF polling,
+unvalidated fork-choice helpers and the unchecked stream bundler. Correct portable
+QPC conversion and the timestamp-only DDA helper (11 timestamps, 10 intervals,
+predecessor-derived work checked before atomic append); do not describe a helper as
+production difficulty validation. The C++ consensus/evidence/topology rules are not
+changed by these repairs.
+
+**Proof and convergence.** `K2_VDF_Soundness.md` now states local contracts and
+counterexamples, not a production security theorem. README, PROTOCOL, WHITEPAPER,
+SECURITY and the proof index distinguish the implementations. C99 CI must build the
+actual targets offline through `ci_local.sh`; isolated mutants count only after a
+successful fresh compile and execution. Independent review is required regardless
+of gate color. Execution evidence is appended below when complete.
+
+**Sharding disposition.** `docs/decisions/ADR-005-Temporal-Sharding.md` is a future-tier proposal,
+PROPOSED. The corrected prompt's design gate refutes the premise that VDF work makes
+shard security independent of membership/resources/availability or makes beacons and
+EXTENDED obsolete. The named C99 block/VRF/mempool files do not exist; existing C99
+header formats differ and transaction codecs already carry u32 shard IDs. No shard
+field, fake VRF, speculative arena hierarchy or topology deletion lands through this
+gate. Producer eligibility/recovery, validated PoSW, state ownership, data availability
+and reorganization-safe settlement must be specified and independently reviewed first.
+Open choices are stated in ADR-005; no decision is manufactured from passing tests.
+
+
+**Owner clarification (same session):** "One elected pair, with a separately proved
+timeout and replacement rule." ADR-005 now fixes that constraint. A local timeout
+counter is refuted as replacement authorization: validators either trust an unproved
+attempt jump (pair grinding), or make admission depend on their local delivery/timer
+history. The design must specify an objectively verifiable replacement transition
+and its fault/timing assumptions. This entry authorizes neither competing pairs nor
+an invented quorum, clock oracle or unproved delay certificate. Local retry remains
+a library operation with no election authority. The previous global selective-abort
+claims in README/WHITEPAPER and FA3 are also explicitly withdrawn on the last-revealer
+counterexample (S-077 remains open); six erroneous C++-superseded-by-C99 proof banners
+are corrected without claiming those C++ proofs have been revalidated.
+
+**Verification and independent review (same session, Darwin arm64):**
+`bash tools/ci_local.sh --c99 --jobs 4` built all selected targets successfully and
+passed 16/16 (the prior fourteen C99 Makefile targets, QPC and the node CLI gate).
+`bash tools/ci_local.sh --c99-mutants --jobs 4` rejected 18/18 isolated mutants after
+successful fresh builds, including socket reveal binding, failure propagation and
+buffered-result/EOF handling. An initially surviving DDA truncation mutant exposed
+a coincidental expected value; the gate was corrected with noncoincidental overflow
+vectors and rerun. `bash tools/ci_local.sh --docs-only` passed all 16 existing guards.
+Socket tests required execution outside the listener-restricted sandbox; failure to
+bind there was not counted as a product failure or as a mutant rejection. The code,
+CI machinery, doc diff and exclusive-pair design gate received independent adversarial
+review; identified socket/deadline and doc contradictions were corrected before this
+record. No Linux/Windows runtime, full C++ FAST, production PoSW, or sharding-security
+claim follows from these results. The sharding gate remains PROPOSED after the repairs:
+its exclusive-pair replacement and settlement obligations are still unproved.

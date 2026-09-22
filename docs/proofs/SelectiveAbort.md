@@ -1,6 +1,16 @@
-> **DEPRECATED**: This proof analyzes the legacy $K$-of-$K$ consensus model, which was superseded by the $K=2$ VDF Duel architecture. See [K2_VDF_Soundness.md](file:///Users/stoyandenev/Desktop/sauromatae/docs/proofs/K2_VDF_Soundness.md).
+> **Implementation scope (2026-09-22):** This document concerns the existing C++ protocol, which the C99 experiment has not replaced. Its individual assumptions and open findings remain controlling. It supplies no proof of the C99 PoSW direction; see [K2_VDF_Soundness.md](K2_VDF_Soundness.md).
 
-# FA3 — Selective-abort defense (commit-reveal hybrid)
+# FA3 — Selective-abort argument: withdrawn claim
+
+**Correction 2026-09-22:** The argument retained below does not prove unbiasedness
+of completed rounds. A last revealer knows its own secret; after observing the
+other K−1 openings it can compute R before revealing. Selecting only favorable
+completions biases the observed output without finding a hash preimage or collision.
+The phase-1-only view in the old theorem excludes this phase-2 adversary and cannot
+establish the headline selective-abort claim. S-077 remains open. Commitment binding
+survives under its hash assumption; the old zero-bias and information-theoretic
+claims do not. The following is a withdrawn proof record, not a current theorem.
+
 
 This document proves the security property that defines Determ's randomness contribution: **no single committee member can predictively bias the block randomness `R` by selectively aborting their Phase-1 contribution or by choosing a non-uniform Phase-1 secret.**
 

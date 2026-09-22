@@ -1,5 +1,12 @@
 # Determ v1 Protocol Specification
 
+> **Scope (2026-09-22):** This is the C++ `determ` protocol reference. The separate
+> C99 `determ-node` experiment has different headers and no production block
+> validator, reorganization or settlement path. Its local contract and open
+> obligations are in [K2_VDF_Soundness.md](proofs/K2_VDF_Soundness.md).
+> [ADR-004](decisions/ADR-004-Fault-Model.md) does not replace the C++ accept rules;
+> [ADR-005](decisions/ADR-005-Temporal-Sharding.md) is an unaccepted design gate.
+
 This document specifies wire formats, hash inputs, and the consensus state machine at a level sufficient for an external implementer to build a compatible client. The reference implementation is in this repository; where implementation behavior diverges from this document, treat the implementation as authoritative and file an issue to reconcile.
 
 **Status:** v1 (rev. 8 + sharding through B6.basic) plus shipped v2 foundation. Frozen for the v1 series.
@@ -194,29 +201,17 @@ canonical. Full contract: `docs/proofs/DurableOutboxSoundness.md`.
 
 ## 4. Block format
 
-### 4.0 Canonical Block Header Specification (Strict Big-Endian Binary)
+### 4.0 C++ block and separate experimental codecs
 
-The canonical block header is serialized as a strict Big-Endian binary format containing exactly:
-
-| Field | Type | Size | Endianness | Description |
-|---|---|---|---|---|
-| `vrf_aggregator_proof` | `uint8_t[32]` | 32 bytes | Big-Endian | VRF proof evaluated by the Designated Aggregator |
-| `vrf_contributor_proof` | `uint8_t[32]` | 32 bytes | Big-Endian | VRF proof evaluated by the Contributor |
-| `vdf_iterations` | `uint32_t` | 4 bytes | Big-Endian | Iteration count for Dynamic Difficulty Adjustment (DDA) |
-| `vdf_proof` | `uint8_t[32]` | 32 bytes | Big-Endian | Evaluated VDF proof over the duel challenge |
-
-All legacy $K$-of-$K$ arrays, multi-signatures, and BFT voting quorums have been excised from the header layout.
+The struct below describes the C++ block. Its committee arrays and signatures
+remain present. The separate C99 parser defines a 212-byte experimental header,
+while the DDA helper defines a 120-byte header; neither is this C++ block or a
+production C99 admission rule. The parser's fields named `vrf_*_proof` are byte
+slots without an integrated VRF verifier. See ADR-005 for the required format
+reconciliation before any sharding extension.
 
 ```cpp
 struct Block {
-    uint64                index;
-    Hash                  prev_hash;
-    int64                 timestamp;
-    // Canonical K=2 VDF Duel Header Fields (Strict Big-Endian):
-    uint8                 vrf_aggregator_proof[32];
-    uint8                 vrf_contributor_proof[32];
-    uint32                vdf_iterations;
-    uint8                 vdf_proof[32];
     uint64                index;
     Hash                  prev_hash;
     int64                 timestamp;             // Unix seconds, ±30s window (S-003)
