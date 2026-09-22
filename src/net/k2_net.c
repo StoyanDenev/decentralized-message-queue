@@ -1,4 +1,3 @@
-#include "determ/net/virtual_transport.h"
 /*
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
@@ -11,6 +10,9 @@
  * Strictly zero dynamic memory allocations (no malloc/free).
  */
 
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -18,12 +20,14 @@
 #define _DARWIN_C_SOURCE
 #endif
 
+#include "determ/net/virtual_transport.h"
 #include <determ/net/k2_net.h>
 #include <determ/crypto/secure_zero.h>
 #include <determ/crypto/sha2/sha2.h>
 #include <determ/time/clock.h>
 
 #include <unistd.h>
+#include <time.h>
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
@@ -109,7 +113,10 @@ static int send_all(int fd, const uint8_t *data, size_t len) {
         ssize_t n = determ_net_send(fd, data + sent, len - sent, flags);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                usleep(100);
+                struct timespec ts;
+                ts.tv_sec = 0;
+                ts.tv_nsec = 100000L; /* 100 microseconds */
+                nanosleep(&ts, NULL);
                 continue;
             }
             if (errno == EINTR) continue;

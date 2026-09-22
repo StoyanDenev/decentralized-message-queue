@@ -17,7 +17,7 @@ if(MSVC)
     add_definitions(-D_CRT_SECURE_NO_WARNINGS -DWIN32_LEAN_AND_MEAN)
 else()
     add_compile_options(-Wall -Wextra -Werror -pedantic -Wshadow -Wstrict-prototypes)
-    add_definitions(-D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE)
+    add_definitions(-D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE -D_DEFAULT_SOURCE)
 endif()
 
 option(DETERM_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)

@@ -5,7 +5,7 @@
 # Strict C99 compilation with zero third-party dynamic libraries.
 
 CC ?= cc
-CFLAGS ?= -std=c99 -Wall -Wextra -Werror -pedantic -O3 -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE -DNDEBUG
+CFLAGS ?= -std=c99 -Wall -Wextra -Werror -pedantic -O3 -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE -D_DEFAULT_SOURCE -DNDEBUG
 INCLUDES = -Iinclude -Isrc -Itests
 
 # Operating System specific libraries (Windows: -lws2_32, Linux: -lrt -lpthread)

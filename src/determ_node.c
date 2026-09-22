@@ -6,6 +6,10 @@
  * Strictly zero-dependency: Zero Asio, Zero nlohmann/json, Zero OpenSSL.
  */
 
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -30,6 +34,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 #include <signal.h>
 
 /* BSS-allocated node contexts to prevent stack exhaustion */
@@ -433,7 +438,12 @@ int main(int argc, char *argv[]) {
         while (g_running) {
             if (mesh_active) peer_mesh_poll(&g_mesh, 20);
             if (rpc_active) http_rpc_server_poll(&g_rpc, 20);
-            if (!mesh_active && !rpc_active) usleep(20000);
+            if (!mesh_active && !rpc_active) {
+                struct timespec ts;
+                ts.tv_sec = 0;
+                ts.tv_nsec = 20000000L;
+                nanosleep(&ts, NULL);
+            }
         }
     } else {
         printf("Determ Node: No mode specified. Running verification benchmark by default.\n");
