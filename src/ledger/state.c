@@ -175,6 +175,13 @@ ledger_status_t ledger_apply_tx(ledger_state_t *state,
         return (ledger_status_t)rc;
     }
 
+    /* Preflight fees before receiver registration or any balance write. */
+    uint64_t tx_fee;
+    memcpy(&tx_fee, &tx->fee, sizeof(uint64_t));
+    if (UINT64_MAX - state->total_fees < tx_fee) {
+        return LEDGER_ERR_OVERFLOW;
+    }
+
     /* Find or register receiver */
     account_t *receiver = ledger_find_account(state, tx->to);
     if (!receiver) {
@@ -184,9 +191,8 @@ ledger_status_t ledger_apply_tx(ledger_state_t *state,
         }
     }
 
-    uint64_t tx_amount, tx_fee, tx_nonce, sender_nonce, sender_balance, receiver_balance;
+    uint64_t tx_amount, tx_nonce, sender_nonce, sender_balance, receiver_balance;
     memcpy(&tx_amount, &tx->amount, sizeof(uint64_t));
-    memcpy(&tx_fee, &tx->fee, sizeof(uint64_t));
     memcpy(&tx_nonce, &tx->nonce, sizeof(uint64_t));
     memcpy(&sender_balance, &sender->balance, sizeof(uint64_t));
     memcpy(&receiver_balance, &receiver->balance, sizeof(uint64_t));

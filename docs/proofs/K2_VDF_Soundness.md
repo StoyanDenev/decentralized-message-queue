@@ -161,8 +161,8 @@ failure. A repeated nonce or insufficient gross balance rejects without mutation
 `test-triple-entry-ledger` checks these outcomes at `ledger_apply_tx`, including
 full-state equality after rejection. Isolated mutations restore the aliasing bug,
 charge the gross debit, or omit the nonce update. This closes the self-transfer
-defect only; the fee-accumulator overflow and portable state/transaction root
-encoding require separate corrections before broader ledger claims.
+defect only; accumulated-fee overflow is addressed separately in §10. Portable
+state/transaction root encoding still requires correction before broader claims.
 
 ## 9. C99 ledger nonce exhaustion
 
@@ -173,3 +173,16 @@ therefore remains valid, while wrapping to zero cannot reopen the nonce sequence
 Apply calls this verifier before any write. The signed boundary regression checks
 both layers and bytewise unchanged state after rejected wrapped, repeated and stale
 nonces. Its isolated mutant removes the exhaustion guard.
+
+## 10. C99 accumulated-fee preflight
+
+After transaction verification and before receiver registration or balance writes,
+apply requires `fee <= UINT64_MAX - total_fees`. The subtraction is representable
+for every accumulator value; the check ensures the subsequent addition cannot
+wrap. This discharges §8's representability precondition for accepted transactions.
+On failure no account is created and no state is changed. Exact fit and a zero fee
+at an already maximal accumulator remain accepted if the transaction is otherwise
+valid. The gate checks self, existing-recipient and new-recipient paths, including
+full-state rejection snapshots and mutations removing or overrestricting the guard.
+The standalone transaction verifier checks sender-local conditions; accumulated
+fees are an apply-level condition, not a claim of complete block admission.

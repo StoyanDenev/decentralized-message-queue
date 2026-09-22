@@ -89,6 +89,43 @@ static void test_nonce_exhaustion(void) {
     }
 }
 
+static void test_fee_accumulator(void) {
+    uint8_t seed[32] = {9}, key[32], recipient[32] = {42};
+    determ_ed25519_pubkey_from_seed(seed, key);
+    for (unsigned mode = 0; mode < 3; ++mode) {
+        ledger_state_t state, before;
+        triple_entry_tx_t tx;
+        ledger_state_init(&state);
+        TEST_ASSERT(ledger_register_account(&state, key, 100) != NULL);
+        if (mode == 1) TEST_ASSERT(ledger_register_account(&state, recipient, 5) != NULL);
+        state.total_fees = UINT64_MAX - 2;
+        memset(&tx, 0, sizeof(tx));
+        memcpy(tx.from, key, 32);
+        memcpy(tx.to, mode == 0 ? key : recipient, 32);
+        tx.amount = 40; tx.fee = 3; tx.nonce = 1;
+        sign_tx(&tx, seed);
+        TEST_ASSERT(verify_triple_entry_tx_state(&tx, &state, 0) == LEDGER_OK);
+        memcpy(&before, &state, sizeof(before));
+        TEST_ASSERT(ledger_apply_tx(&state, &tx, 0) == LEDGER_ERR_OVERFLOW);
+        TEST_ASSERT(memcmp(&before, &state, sizeof(state)) == 0);
+
+        state.total_fees = UINT64_MAX - 3;
+        TEST_ASSERT(ledger_apply_tx(&state, &tx, 0) == LEDGER_OK);
+        TEST_ASSERT(state.total_fees == UINT64_MAX);
+        TEST_ASSERT(state.accounts[0].nonce == 1);
+        TEST_ASSERT(state.accounts[0].balance == (mode == 0 ? 97 : 57));
+        TEST_ASSERT(state.account_count == (mode == 0 ? 1U : 2U));
+        if (mode != 0) TEST_ASSERT(state.accounts[1].balance == (mode == 1 ? 45U : 40U));
+
+        tx.amount = 0; tx.fee = 0; tx.nonce = 2;
+        sign_tx(&tx, seed);
+        TEST_ASSERT(ledger_apply_tx(&state, &tx, 0) == LEDGER_OK);
+        TEST_ASSERT(state.total_fees == UINT64_MAX);
+        TEST_ASSERT(state.accounts[0].nonce == 2);
+        TEST_ASSERT(state.accounts[0].balance == (mode == 0 ? 97 : 57));
+    }
+}
+
 static void test_triple_entry_ledger_overflow_immunity(void) {
     printf("[TEST] Triple-Entry Ledger UINT64_MAX Overflow Rejection...\n");
 
@@ -157,6 +194,7 @@ int main(void) {
     test_triple_entry_ledger_overflow_immunity();
     test_self_transfer();
     test_nonce_exhaustion();
+    test_fee_accumulator();
     test_harness_finish("test_triple_entry_ledger");
     return 0;
 }

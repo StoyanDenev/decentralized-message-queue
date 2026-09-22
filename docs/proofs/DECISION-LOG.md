@@ -6077,3 +6077,24 @@ and the repeated maximum at verifier and apply, preserving the complete state.
 `ci_local --c99-mutants --jobs 4` passed its fresh baseline and rejected 22/22
 freshly built mutants, including removal of the exhaustion guard. C99 root
 encoding and accumulated-fee overflow are not closed by this increment.
+
+## 2026-09-22 — C99 accumulated-fee overflow preflight
+
+The standalone apply path now checks representability of `total_fees + fee`
+after transaction verification and before receiver registration or any balance
+write. Failed preflight leaves the complete ledger unchanged, including account
+count. Exact fit and zero fee at a maximal accumulator remain valid. The safe
+subtraction comparison makes both self-transfer and distinct-recipient additions
+representable, discharging the earlier self-transfer proof's fee precondition.
+
+Independent design and source reviews found no actionable defect. The regression
+uses otherwise valid signed transactions and checks self, existing-recipient and
+new-recipient paths, exact fit, zero fee and full-state rejection snapshots.
+Verification execution is recorded below when complete. Portable root encoding is
+still outside this correction; no production C99 block-admission claim is made.
+
+**Execution:** `ci_local --c99-mutants --jobs 4` passed its fresh baseline and
+rejected 24/24 freshly built mutants, including removed and overrestrictive fee
+preflights. `ci_local --docs-only` passed all 16 guards. The prior snapshot taken
+while routing tests were being edited failed its baseline and was discarded;
+no mutant verdict was credited from that run.
