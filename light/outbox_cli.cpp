@@ -367,7 +367,7 @@ int cmd_enqueue(int argc, char** argv) {
             if (!have_hint && ob.slots().empty() && ob.quarantined_nonces().empty()
                 && (!ob.has_meta() || ob.meta().nonce_floor == 0))
                 return fail("enqueue", "cannot reserve a nonce offline: no local history and no daemon hint — pass --nonce or --rpc-port");
-            nonce = std::max(local, have_hint ? hint : 0);
+            nonce = (std::max)(local, have_hint ? hint : 0);
         }
         if (ob.slots().count(nonce))
             return fail("enqueue", "nonce " + std::to_string(nonce) + " is already reserved in this outbox");

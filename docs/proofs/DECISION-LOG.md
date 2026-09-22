@@ -6326,3 +6326,16 @@ run rejects 79/79 freshly built mutants, including eight new HTTP cases. These
 execution results are Darwin arm64. The first hosted Linux shared and UBSan jobs
 passed; hosted C99 verification of this repair remains to be rerun. The proof
 boundary and security ledger are updated without claiming full HTTP conformance.
+
+## 2026-09-22 — Windows outbox build compatibility
+
+The first hosted Windows build failed at three `std::max(...)` calls in the light
+outbox because the Windows headers define a function-like `max` macro. Parenthesize
+the function name at those three call sites. The overload, arguments and nonce
+calculations are unchanged; no consensus or outbox policy is introduced.
+
+Independent final-diff review found no actionable issue. A fresh shared Darwin
+arm64 `ci_local --jobs 4` build passes all 333 FAST wrappers, zero platform skips,
+and all 16 documentation guards. This verifies unchanged behavior on the available
+local platform; the actual MSVC build remains subject to the hosted Windows rerun.
+This compile-only repair is committed separately from the HTTP framing change.
