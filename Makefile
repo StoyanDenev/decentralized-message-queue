@@ -38,6 +38,7 @@ TEST_BINARY_CODEC_BIN = $(BIN_DIR)/test-binary-codec
 TEST_PEER_MESH_BIN = $(BIN_DIR)/test-peer-mesh
 TEST_BLOCK_STORE_BIN = $(BIN_DIR)/test-block-store
 TEST_DDA_BIN = $(BIN_DIR)/test-dda
+TEST_QPC_BIN = $(BIN_DIR)/test-qpc-clock-overflow
 TEST_HTTP_RPC_BIN = $(BIN_DIR)/test-http-rpc
 TEST_LEDGER_DSSO_BIN = $(BIN_DIR)/test-ledger-dsso
 TEST_FUZZ_LEDGER_BIN = $(BIN_DIR)/fuzz-ledger
@@ -53,7 +54,7 @@ TEST_DSF_K2_DUEL_BIN = $(BIN_DIR)/test-dsf-k2-duel
 
 .PHONY: all clean test check
 
-all: $(NODE_BIN) $(TEST_DUEL_BIN) $(TEST_DSF_K2_DUEL_BIN) $(TEST_NET_RPC_BIN) $(TEST_BINARY_CODEC_BIN) $(TEST_PEER_MESH_BIN) $(TEST_BLOCK_STORE_BIN) $(TEST_DDA_BIN) $(TEST_HTTP_RPC_BIN) $(TEST_LEDGER_DSSO_BIN) $(TEST_FUZZ_LEDGER_BIN) $(TEST_K2_DUEL_FALLBACK_BIN) $(TEST_OPAQUE_DSSO_BIN) $(TEST_TRIPLE_ENTRY_LEDGER_BIN) $(TEST_FUZZER_PARSER_BIN)
+all: $(NODE_BIN) $(TEST_DUEL_BIN) $(TEST_DSF_K2_DUEL_BIN) $(TEST_NET_RPC_BIN) $(TEST_BINARY_CODEC_BIN) $(TEST_PEER_MESH_BIN) $(TEST_BLOCK_STORE_BIN) $(TEST_DDA_BIN) $(TEST_QPC_BIN) $(TEST_HTTP_RPC_BIN) $(TEST_LEDGER_DSSO_BIN) $(TEST_FUZZ_LEDGER_BIN) $(TEST_K2_DUEL_FALLBACK_BIN) $(TEST_OPAQUE_DSSO_BIN) $(TEST_TRIPLE_ENTRY_LEDGER_BIN) $(TEST_FUZZER_PARSER_BIN)
 
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -84,6 +85,10 @@ $(TEST_BLOCK_STORE_BIN): $(ALL_CORE_OBJS) $(BUILD_DIR)/tests/test_block_store.o
 	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
 
 $(TEST_DDA_BIN): $(ALL_CORE_OBJS) $(BUILD_DIR)/tests/test_dda.o
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
+
+$(TEST_QPC_BIN): $(BUILD_DIR)/tests/test_qpc_clock_overflow.o
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
 
@@ -127,35 +132,10 @@ fuzzer-parser-llvm: $(ALL_CORE_SRCS) tests/fuzzer_parser.c
 	@mkdir -p $(BIN_DIR)
 	clang -std=c99 -Wall -Wextra -fsanitize=address,fuzzer -fno-omit-frame-pointer -DLIBFUZZER_ENABLED=1 $(INCLUDES) $^ -o $(BIN_DIR)/fuzzer-parser-llvm $(LDLIBS)
 
-test: all
-	@echo "Running test-k2-duel..."
-	@./$(TEST_DUEL_BIN)
-	@echo "Running test-k2-net-rpc..."
-	@./$(TEST_NET_RPC_BIN)
-	@echo "Running test-binary-codec..."
-	@./$(TEST_BINARY_CODEC_BIN)
-	@echo "Running test-peer-mesh..."
-	@./$(TEST_PEER_MESH_BIN)
-	@echo "Running test-block-store..."
-	@./$(TEST_BLOCK_STORE_BIN)
-	@echo "Running test-dda..."
-	@./$(TEST_DDA_BIN)
-	@echo "Running test-http-rpc..."
-	@./$(TEST_HTTP_RPC_BIN)
-	@echo "Running test-ledger-dsso..."
-	@./$(TEST_LEDGER_DSSO_BIN)
-	@echo "Running fuzz-ledger..."
-	@./$(TEST_FUZZ_LEDGER_BIN)
-	@echo "Running test-dsf-k2-duel..."
-	@./$(TEST_DSF_K2_DUEL_BIN)
-	@echo "Running test-k2-duel-fallback..."
-	@./$(TEST_K2_DUEL_FALLBACK_BIN)
-	@echo "Running test-opaque-dsso..."
-	@./$(TEST_OPAQUE_DSSO_BIN)
-	@echo "Running test-triple-entry-ledger..."
-	@./$(TEST_TRIPLE_ENTRY_LEDGER_BIN)
-	@echo "Running fuzzer-parser..."
-	@./$(TEST_FUZZER_PARSER_BIN)
+# Verification uses the fresh-binary C99 gate; `all` remains build-only.
+# The gate preserves this Makefile's previous test set and adds QPC + node smoke.
+test:
+	@bash tools/ci_local.sh --c99
 
 check: test
 

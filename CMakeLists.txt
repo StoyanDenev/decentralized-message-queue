@@ -524,7 +524,7 @@ target_compile_features(d5rp PRIVATE c_std_99)
 target_include_directories(d5rp PRIVATE include)
 target_link_libraries(d5rp PRIVATE determ-crypto-c99)
 
-# ── test-k2-duel: K=2 Fast-Block VDF Duel Verification Suite & LibFuzzer ──────
+# ── test-k2-duel: local commit/reveal and VDF primitive checks ──────────────
 option(ENABLE_LIBFUZZER "Build K=2 Duel target with LLVM LibFuzzer (-fsanitize=address,fuzzer)" OFF)
 
 add_executable(test-k2-duel
@@ -534,7 +534,6 @@ add_executable(test-k2-duel
   src/crypto/vdf.c
   src/wire/parser.c
   src/time/clock.c
-  src/net/virtual_transport.c
 )
 target_compile_features(test-k2-duel PRIVATE c_std_99)
 target_include_directories(test-k2-duel PRIVATE include src)
@@ -549,7 +548,8 @@ elseif(DETERM_ASAN)
   target_link_options(test-k2-duel PRIVATE -fsanitize=address,undefined)
 endif()
 
-# ── test-dsf-k2-duel: DSF Simulation Benchmark (<50ms Wall-Clock) ───────────
+# ── test-dsf-k2-duel: deterministic local clock/transport simulation ────────
+if(UNIX)
 add_executable(test-dsf-k2-duel
   tests/test_dsf_k2_duel.c
   src/consensus/duel_state.c
@@ -583,8 +583,9 @@ target_compile_features(fuzz-ledger PRIVATE c_std_99)
 target_compile_definitions(fuzz-ledger PRIVATE DETERM_DSF_ENABLED=1)
 target_include_directories(fuzz-ledger PRIVATE include src tests)
 target_link_libraries(fuzz-ledger PRIVATE determ-crypto-c99)
+endif()
 
-# ── test-k2-duel-fallback: Liveness Proof under DSF ───────────────────────────
+# ── test-k2-duel-fallback: local deadlines and explicit retry under DSF ─────
 add_executable(test-k2-duel-fallback
   tests/test_k2_duel_fallback.c
   src/consensus/duel_state.c
@@ -592,7 +593,6 @@ add_executable(test-k2-duel-fallback
   src/crypto/vdf.c
   src/wire/parser.c
   src/time/clock.c
-  src/net/virtual_transport.c
 )
 target_compile_features(test-k2-duel-fallback PRIVATE c_std_99)
 target_compile_definitions(test-k2-duel-fallback PRIVATE DETERM_DSF_ENABLED=1)
@@ -602,11 +602,8 @@ target_link_libraries(test-k2-duel-fallback PRIVATE determ-crypto-c99)
 # ── test-qpc-clock-overflow: Windows QPC Scaled Arithmetic Overflow Test ────────
 add_executable(test-qpc-clock-overflow
   tests/test_qpc_clock_overflow.c
-  src/time/clock.c
-  src/net/virtual_transport.c
 )
 target_compile_features(test-qpc-clock-overflow PRIVATE c_std_99)
-target_compile_definitions(test-qpc-clock-overflow PRIVATE DETERM_DSF_ENABLED=1)
 target_include_directories(test-qpc-clock-overflow PRIVATE include src tests)
 
 # ── test-dda: Dynamic Difficulty Adjustment Suite ────────────────────────────
@@ -620,6 +617,7 @@ target_include_directories(test-dda PRIVATE include src tests)
 
 
 # ── test-opaque-dsso: Identity Proof (OPRF Handshake) ─────────────────────────
+if(UNIX)
 add_executable(test-opaque-dsso
   tests/test_opaque_dsso.c
   src/crypto/opaque_dsso.c
@@ -642,6 +640,7 @@ target_compile_features(test-triple-entry-ledger PRIVATE c_std_99)
 target_compile_definitions(test-triple-entry-ledger PRIVATE DETERM_DSF_ENABLED=1)
 target_include_directories(test-triple-entry-ledger PRIVATE include src tests)
 target_link_libraries(test-triple-entry-ledger PRIVATE determ-crypto-c99)
+endif()
 
 # ── fuzzer-parser: LLVM libFuzzer Target for Wire Deserializer ───────────────
 option(ENABLE_PARSER_LIBFUZZER "Build fuzzer-parser with LLVM LibFuzzer (-fsanitize=address,fuzzer)" OFF)
@@ -658,4 +657,44 @@ if(ENABLE_PARSER_LIBFUZZER)
   target_compile_definitions(fuzzer-parser PRIVATE LIBFUZZER_ENABLED=1)
   target_compile_options(fuzzer-parser PRIVATE -fsanitize=address,fuzzer -fno-omit-frame-pointer)
   target_link_options(fuzzer-parser PRIVATE -fsanitize=address,fuzzer)
+endif()
+
+# The canonical envelope codec is independent of the POSIX node transport.
+add_executable(test-binary-codec tests/test_binary_codec.c src/wire/binary_codec.c)
+target_compile_features(test-binary-codec PRIVATE c_std_99)
+target_include_directories(test-binary-codec PRIVATE include src)
+
+# The C99 socket prototype currently has a POSIX transport. Keep its integration
+# gate explicit instead of presenting an uncompiled Windows path as supported.
+if(UNIX)
+  add_library(determ-c99-node-core STATIC
+    src/consensus/duel_state.c
+    src/consensus/dda.c
+    src/crypto/vdf.c
+    src/crypto/opaque_dsso.c
+    src/time/clock.c
+    src/net/virtual_transport.c
+    src/net/event_loop.c
+    src/net/k2_net.c
+    src/net/peer_mesh.c
+    src/net/reactor.c
+    src/wire/parser.c
+    src/wire/json_token.c
+    src/wire/binary_codec.c
+    src/rpc/json_rpc.c
+    src/rpc/http_rpc_server.c
+    src/storage/block_store.c
+    src/ledger/state.c
+  )
+  target_compile_features(determ-c99-node-core PUBLIC c_std_99)
+  target_compile_definitions(determ-c99-node-core PRIVATE _POSIX_C_SOURCE=200809L _DARWIN_C_SOURCE)
+  target_include_directories(determ-c99-node-core PUBLIC include src)
+  target_link_libraries(determ-c99-node-core PUBLIC determ-crypto-c99)
+  foreach(c99_test k2-net-rpc peer-mesh block-store http-rpc ledger-dsso)
+    string(REPLACE "-" "_" c99_test_source "${c99_test}")
+    add_executable(test-${c99_test} tests/test_${c99_test_source}.c)
+    target_link_libraries(test-${c99_test} PRIVATE determ-c99-node-core)
+  endforeach()
+  add_executable(determ-node src/determ_node.c)
+  target_link_libraries(determ-node PRIVATE determ-c99-node-core)
 endif()
