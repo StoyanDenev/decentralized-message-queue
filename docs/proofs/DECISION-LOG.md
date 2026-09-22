@@ -6010,3 +6010,31 @@ increment. Verification and independent review are recorded below after completi
 `git diff --check` passed. Independent review confirmed the formula against the
 implementation, including raw salt/tag/address concatenation and big-endian folding,
 and found no actionable issues. No binaries or new simulations were built or run.
+
+## 2026-09-22 — Large shard populations and shard-local co-creator eligibility
+
+**Owner decision:** "Two rules will fix that. Shards are with big populations and
+Shard-local eligibility." Each shard is provisioned with a large eligible population.
+Exactly two distinct co-creators are elected from that shard's own eligible pool;
+subsequent attempts retain that shard-local eligibility boundary. There is no
+network-wide producer fallback. ADR-005 now records this choice instead of asking
+whether production should draw on participants assigned to other shards.
+
+**Bounded claim.** A numerical population minimum or reserve margin is not chosen
+by the word "big". Those provisioning limits and the availability/fault assumptions
+remain to specify before claiming progress. Under the retained K=2 requirement, an
+attempt with fewer than two eligible local participants completing their cooperation
+cannot produce a valid block. This is a consequence of the production rule, not a
+new timeout algorithm or a guarantee against arbitrary outages. The decision does
+not authorize automatic resharding or replace the agreed 1:3 timing requirement.
+
+**Scope.** This documentation-only increment records the eligibility/provisioning
+decision. It ships no membership validator, election, replacement transition or new
+simulation. ADR-005 remains future-tier and PROPOSED. Verification and independent
+review are recorded below after completion.
+
+**Verification and independent review (same session):**
+`bash tools/ci_local.sh --docs-only` passed all 16 existing guards and
+`git diff --check` passed. Independent review found no actionable issues in the
+shard-local eligibility requirement or the stated population/availability limits.
+No binaries or new simulations were built or run.

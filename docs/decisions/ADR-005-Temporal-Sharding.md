@@ -6,6 +6,8 @@
 **Status:** PROPOSED; implementation blocked on the consensus and settlement design.
 **Owner constraint (2026-09-22):** One elected pair per shard, with a separately
 proved timeout and replacement rule. Competing pairs are not the selected path.
+Each shard is provisioned with a large eligible population; initial and subsequent
+pairs are selected only from that shard's eligible participants.
 
 **Decision authority:** [Decision Log](../proofs/DECISION-LOG.md).
 
@@ -94,11 +96,20 @@ otherwise name the mechanism deterministic sampling. Define seed provenance and
 withholding/grinding behavior, domain separation, canonical input encoding, distinct
 roles, tie handling, eligibility, retries and verification at the receiving node.
 
-Decide whether participants may serve multiple shards. Disjoint pairs need at least
-2S eligible participants for S shards, plus a spare/replacement policy. Overlapping
-pairs need an explicit concurrency and resource bound. Two roles per shard do not
-establish O(1) total network overhead: validation, dissemination, availability and
-cross-shard traffic must also be counted.
+**Owner decision: large populations and shard-local eligibility.** Each shard is
+provisioned with a large population of eligible participants. Exactly two distinct
+co-creators are elected from that shard's own eligible pool, and subsequent attempts
+use the same shard-local boundary. No network-wide producer fallback is adopted.
+The existing K=2 requirement means an attempt cannot produce a valid block without
+two eligible local participants completing their required cooperation.
+
+"Large" is a qualitative requirement; a numerical minimum and reserve margin have
+not been selected. Specify those provisioning limits and the availability/fault
+assumptions before claiming progress. A global participant count does not establish
+the population of each individual shard. This decision does not authorize automatic
+resharding or define the outstanding timeout/replacement transitions. Two roles per
+shard do not establish O(1) total network overhead: validation, dissemination,
+availability and cross-shard traffic must also be counted.
 
 If u16 IDs are selected, they represent values 0..65535; a shard **count** that can
 reach 65536 requires u32 or a comparably explicit larger type. Count zero is invalid;
