@@ -29,8 +29,9 @@
 #      /proc/<pid>/cmdline, while with the raw flag it is PRESENT there. Both
 #      children are held in a deterministic window by a FIFO (a `file:` source
 #      that is a FIFO blocks in open(2); an `--out` that is a FIFO blocks in
-#      open(2) after signing), so there is no race. On a platform with no
-#      /proc/self/cmdline this section prints SKIP: and asserts nothing.
+#      open(2) after signing), so there is no race. This section requires the
+#      Linux kernel's /proc and FIFO behavior; elsewhere it prints SKIP: and
+#      asserts nothing. MSYS /proc does not provide this native-process contract.
 #   E. BLIND SEEDS — build-shield / build-unshield --blind-seed-from round-trips
 #      to a byte-identical tx and warns on the raw form.
 #
@@ -206,8 +207,8 @@ cmdline_of_blocked_child(){
   return 0
 }
 
-if [ ! -r /proc/self/cmdline ]; then
-  skip "D /proc/<pid>/cmdline unavailable on this platform — the process-table assertions did not run"
+if [ "$(uname -s)" != Linux ] || [ ! -r /proc/self/cmdline ]; then
+  skip "D requires Linux kernel /proc and FIFO observation — the process-table assertions did not run; functional seed-source checks remain active"
 else
   # D1: the -from form, sampled AFTER the seed has been read and used. The seed
   # comes from an ordinary file; the FIFO is `--out`, which pq-sign-tx opens

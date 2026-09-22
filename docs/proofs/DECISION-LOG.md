@@ -6363,3 +6363,29 @@ on Darwin arm64. The complete `ci_local --c99-mutants --jobs 4` run rejects 79/7
 mutants after fresh successful builds, including the unchanged EOF-first mutation;
 all 16 documentation guards pass. Hosted Linux re-verification is recorded in the
 pull request after execution; no rejected-build result is counted as a mutant.
+
+## 2026-09-22 — Scope secret-input kernel observations to Linux
+
+The hosted MSVC build now succeeds. Its FAST log reached
+`test_light_seed_source.sh` and remained there for more than seven minutes before
+the superseded run was canceled. Static review found that both this wrapper and
+`test_secret_on_argv.sh` treated a readable `/proc/self/cmdline` as sufficient for
+Linux-specific child-name, FIFO and wait-channel observations. An emulated `/proc`
+does not establish those native-process contracts. The watchdog only bounds the
+child; polling and background FIFO helpers can continue after that child exits.
+The captured log does not identify the exact stalled shell statement, so no
+production prompt-reader defect is inferred from the elapsed time.
+
+Restrict only section D and the wait-channel capability probe to Linux with
+readable `/proc`. Non-Linux platforms explicitly report those kernel observations
+as partial skips. Functional source equivalence, piped prompts, refusals, warning
+checks and light blind-seed tests remain active. Existing Linux assertion bodies
+and failure handling are unchanged. No production input or cryptographic code
+changes. The security ledger now states this platform boundary explicitly.
+
+Independent adversarial review approved the final two-script diff, including the
+actual probe-execution guard and accurate skip diagnostics. A fresh shared Darwin
+arm64 `ci_local --jobs 4` build passes all 333 FAST wrappers, zero entire-wrapper
+skips, and all 16 documentation guards. Partial kernel-observation skips remain
+explicit. Hosted verification of the updated guards will be recorded in the pull
+request after execution; this increment makes no Windows kernel-observation claim.
