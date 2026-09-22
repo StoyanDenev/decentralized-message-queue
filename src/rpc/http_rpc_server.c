@@ -139,6 +139,7 @@ static int http_content_length(const uint8_t *data, size_t header_len, size_t *o
     int seen = 0;
     if (header_len > HTTP_RPC_BUF_SIZE - 1) return 413;
     const size_t limit = (HTTP_RPC_BUF_SIZE - 1) - header_len;
+    (void)limit;
     while (pos + 1 < header_len && !(data[pos] == '\r' && data[pos + 1] == '\n')) ++pos;
     if (pos + 1 >= header_len) return 400;
     pos += 2; /* Skip the request line. */
@@ -340,7 +341,8 @@ int http_rpc_server_poll(http_rpc_server_t *server, int timeout_ms) {
                 /* Server saturated: 503 Service Unavailable */
                 static const char sat_resp[] =
                     "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                (void)write(c_fd, sat_resp, sizeof(sat_resp) - 1);
+                ssize_t w = write(c_fd, sat_resp, sizeof(sat_resp) - 1);
+                (void)w;
                 close(c_fd);
             }
         }

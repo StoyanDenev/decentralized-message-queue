@@ -249,8 +249,10 @@ def main():
         # stale binaries, dependencies, or .git metadata enter this snapshot.
         for name in ("include", "src", "tests", "tools", "third_party",
                      "wallet", "light", "sim", "dapps"):
-            shutil.copytree(root / name, baseline / name,
-                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            src_dir = root / name
+            if src_dir.is_dir():
+                shutil.copytree(src_dir, baseline / name,
+                                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         shutil.copy2(root / "CMakeLists.txt", baseline / "CMakeLists.txt")
         targets = list(dict.fromkeys(case[1] for case in cases))
         print("=== ci_local --c99-mutants: fresh baseline ===", flush=True)

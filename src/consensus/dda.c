@@ -116,6 +116,7 @@ bool dda_commit_block(dda_tracker_t *tracker, uint64_t timestamp_ms,
     }
     if (tracker->count > 0) {
         size_t newest_idx = (tracker->head + DDA_TIMESTAMP_CAPACITY - 1) % DDA_TIMESTAMP_CAPACITY;
+        (void)newest_idx;
         if (timestamp_ms <= tracker->block_timestamps[newest_idx]) {
             return false;
         }

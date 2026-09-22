@@ -357,6 +357,9 @@ static int pending_dispatch(const char *request, size_t len, const char *method,
  * is not a method key. This selects the handler only; routing_request still
  * validates every separator, field and byte before returning a routing result.
  */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((unused))
+#endif
 static const determ_json_tok_t *rpc_method_token(const char *json,
                                                 const determ_json_tok_t *tokens,
                                                 size_t count) {

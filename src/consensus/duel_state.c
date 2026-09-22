@@ -86,6 +86,7 @@ static duel_status_t submit_reveal(duel_state_machine_t *sm, duel_reveal_entry_t
                                     const duel_commit_entry_t *commit,
                                     const uint8_t *payload, uint32_t len, bool is_valid) {
     uint8_t digest[32];
+    (void)digest;
     if (!payload || len == 0) return DUEL_ERR_INVALID_ARGUMENT;
     if (len > DUEL_MAX_PAYLOAD_SIZE) return DUEL_ERR_PAYLOAD_TOO_LARGE;
     if (sm->state != DUEL_STATE_AWAITING_REVEALS) return DUEL_ERR_INVALID_STATE;

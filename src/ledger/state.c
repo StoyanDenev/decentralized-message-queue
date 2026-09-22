@@ -100,15 +100,15 @@ int verify_triple_entry_tx_payload(const uint8_t *tx_payload) {
         return LEDGER_ERR_ACCOUNT_NOT_FOUND;
     }
 
-    uint64_t tx_amount, tx_fee, tx_nonce, sender_nonce, sender_balance;
+    uint64_t tx_amount, tx_fee, tx_nonce, account_nonce, sender_balance;
     memcpy(&tx_amount, &tx->amount, sizeof(uint64_t));
     memcpy(&tx_fee, &tx->fee, sizeof(uint64_t));
     memcpy(&tx_nonce, &tx->nonce, sizeof(uint64_t));
-    memcpy(&sender_nonce, &account->nonce, sizeof(uint64_t));
+    memcpy(&account_nonce, &account->nonce, sizeof(uint64_t));
     memcpy(&sender_balance, &account->balance, sizeof(uint64_t));
 
     /* Check tx_nonce == account.nonce + 1 */
-    if (sender_nonce == UINT64_MAX || tx_nonce != sender_nonce + 1) {
+    if (account_nonce == UINT64_MAX || tx_nonce != account_nonce + 1) {
         return ERR_INVALID_NONCE;
     }
 
