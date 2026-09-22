@@ -68,6 +68,7 @@ ALL_CORE_SRCS = $(CRYPTO_SRCS) $(CONSENSUS_SRCS)
 ALL_CORE_OBJS = $(ALL_CORE_SRCS:%.c=$(BUILD_DIR)/%.o)
 
 NODE_BIN = $(BIN_DIR)/determ-node
+TEST_EXECUTION_ENV_BIN = $(BIN_DIR)/test-execution-env
 TEST_K2_POSW_BIN = $(BIN_DIR)/test-k2-posw
 TEST_DUEL_BIN = $(BIN_DIR)/test-k2-duel
 TEST_NET_RPC_BIN = $(BIN_DIR)/test-k2-net-rpc
@@ -96,6 +97,7 @@ ALL_CORE_DSF_OBJS = $(ALL_CORE_SRCS:%.c=$(BUILD_DIR_DSF)/%.o)
 TEST_DSF_K2_DUEL_BIN = $(BIN_DIR)/test-dsf-k2-duel
 
 TEST_ALL_BINS = \
+	$(TEST_EXECUTION_ENV_BIN) \
 	$(TEST_ED25519_BOUNDED_BIN) \
 	$(TEST_K2_POSW_BIN) \
 	$(TEST_DUEL_BIN) \
@@ -134,6 +136,10 @@ $(BUILD_DIR_DSF)/%.o: %.c
 $(NODE_BIN): $(ALL_CORE_OBJS) $(BUILD_DIR)/src/determ_node.o
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDLIBS)
+
+$(TEST_EXECUTION_ENV_BIN): $(ALL_CORE_DSF_OBJS) $(BUILD_DIR_DSF)/tests/test_execution_env.o
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CFLAGS_DSF) $^ -o $@ $(LDLIBS)
 
 $(TEST_K2_POSW_BIN): $(ALL_CORE_DSF_OBJS) $(BUILD_DIR_DSF)/tests/test_k2_posw.o
 	@mkdir -p $(BIN_DIR)

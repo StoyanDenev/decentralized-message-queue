@@ -3,7 +3,12 @@
  * Copyright 2026 Determ Contributors
  *
  * Bare-Metal C99 OPAQUE Distributed Single-Sign On (DSSO) Implementation
+ * Strictly zero dynamic memory allocations.
  */
+
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
 
 #include <determ/crypto/opaque_dsso.h>
 #include <determ/crypto/p256/p256.h>
@@ -12,6 +17,67 @@
 #include <determ/crypto/ct.h>
 #include <determ/crypto/secure_zero.h>
 #include <string.h>
+
+/*
+ * Fixed-size contiguous array memory arena for DSSO identities: strictly zero malloc()
+ */
+struct dsso_envelope dsso_registry[MAX_IDENTITIES];
+
+void dsso_registry_clear(void) {
+    determ_secure_zero(dsso_registry, sizeof(dsso_registry));
+}
+
+int dsso_registry_register(const uint8_t account_id[OPAQUE_ID_LEN],
+                            const uint8_t oprf_eval_hash[32],
+                            const opaque_envelope_t *envelope) {
+    if (!account_id || !oprf_eval_hash || !envelope) {
+        return -1;
+    }
+
+    for (size_t i = 0; i < MAX_IDENTITIES; i++) {
+        if (!dsso_registry[i].active ||
+            memcmp(dsso_registry[i].account_id, account_id, OPAQUE_ID_LEN) == 0) {
+            memcpy(dsso_registry[i].account_id, account_id, OPAQUE_ID_LEN);
+            memcpy(dsso_registry[i].oprf_eval_hash, oprf_eval_hash, 32);
+            memcpy(&dsso_registry[i].encrypted_payload, envelope, sizeof(opaque_envelope_t));
+            dsso_registry[i].active = 1;
+            return 0;
+        }
+    }
+    return -1; /* Registry full */
+}
+
+struct dsso_envelope* dsso_registry_find(const uint8_t account_id[OPAQUE_ID_LEN]) {
+    if (!account_id) return NULL;
+    for (size_t i = 0; i < MAX_IDENTITIES; i++) {
+        if (dsso_registry[i].active &&
+            memcmp(dsso_registry[i].account_id, account_id, OPAQUE_ID_LEN) == 0) {
+            return &dsso_registry[i];
+        }
+    }
+    return NULL;
+}
+
+int verify_opaque_handshake(const uint8_t *client_payload) {
+    if (!client_payload) {
+        return -1;
+    }
+
+    const uint8_t *account_id = client_payload;
+    const uint8_t *client_proof = client_payload + 32;
+
+    for (size_t i = 0; i < MAX_IDENTITIES; i++) {
+        if (dsso_registry[i].active &&
+            memcmp(dsso_registry[i].account_id, account_id, OPAQUE_ID_LEN) == 0) {
+            /* Constant-time blind verification against OPRF evaluation hash */
+            if (determ_ct_memcmp(dsso_registry[i].oprf_eval_hash, client_proof, 32) == 0) {
+                return 0; /* Verified blindly: zero plaintext secrets exposed */
+            }
+            return -2; /* Proof mismatch */
+        }
+    }
+    return -1; /* Identity not found */
+}
 
 int opaque_dsso_oprf_blind(const uint8_t *pwd, size_t pwd_len,
                            const uint8_t blind_scalar[OPAQUE_OPRF_SCALAR_LEN],

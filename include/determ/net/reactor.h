@@ -6,9 +6,10 @@
  * Single-threaded I/O multiplexer using native OS interfaces (kqueue / epoll / select).
  *
  * Guarantees:
- *   - Strictly zero dynamic memory allocation (all sockets statically allocated).
- *   - Non-blocking I/O handling with graceful EWOULDBLOCK/EAGAIN quiescence (no CPU spinning).
- *   - Fully reentrant static socket slot management.
+ *   - Strictly zero dynamic memory allocation (connections[MAX_CONNECTIONS]).
+ *   - Non-blocking I/O handling with graceful EWOULDBLOCK/EAGAIN quiescence.
+ *   - Monotonic timer integration: 2000ms epoch buzzer halting network ingestion
+ *     and transitioning consensus state machine to VDF_EVALUATION.
  */
 
 #ifndef DETERMINISTIC_NET_REACTOR_H
@@ -18,12 +19,14 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "determ/net/event_loop.h"
+#include "determ/consensus/duel_state.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define REACTOR_MAX_SOCKETS     128U
+#define MAX_CONNECTIONS         128U
+#define REACTOR_MAX_SOCKETS     MAX_CONNECTIONS
 #define REACTOR_BUFFER_CAPACITY 4096U
 
 typedef enum {
@@ -39,7 +42,7 @@ typedef void (*reactor_accept_fn)(int listener_fd, int client_fd, void *user_dat
 typedef void (*reactor_close_fn)(int fd, void *user_data);
 typedef void (*reactor_error_fn)(int fd, int err, void *user_data);
 
-typedef struct {
+struct connection_state {
     int                  fd;
     reactor_slot_state_t state;
     uint32_t             registered_events; /* NET_EV_READ | NET_EV_WRITE */
@@ -56,17 +59,24 @@ typedef struct {
     reactor_close_fn     on_close;
     reactor_error_fn     on_error;
     void                *user_data;
-} reactor_socket_t;
+};
+
+typedef struct connection_state reactor_socket_t;
+typedef struct connection_state connection_state_t;
 
 typedef struct {
-    net_event_loop_t  loop;
-    reactor_socket_t  slots[REACTOR_MAX_SOCKETS];
-    size_t            active_count;
-    bool              running;
+    net_event_loop_t         loop;
+    struct connection_state *slots;
+    size_t                   active_count;
+    bool                     running;
+    bool                     ingestion_halted;
+    duel_state_machine_t    *consensus_sm;
+    uint64_t                 epoch_start_ns;
 } reactor_t;
 
 /*
- * Initialize the reactor and its underlying OS multiplexer (kqueue / epoll).
+ * Initialize the reactor and its underlying OS multiplexer (kqueue / epoll / select).
+ * Allocates zero dynamic memory; uses static connections arena.
  * Returns 0 on success, negative error code on failure.
  */
 int reactor_init(reactor_t *reactor);
@@ -93,15 +103,13 @@ int reactor_register_client(reactor_t *reactor,
 
 /*
  * Send data over a registered socket.
- * If socket would block (EAGAIN/EWOULDBLOCK), remaining bytes are queued
- * in the static tx_buf and write readiness is monitored.
  * Returns bytes accepted/sent, or -1 on error.
  */
 int reactor_send(reactor_t *reactor, int fd, const void *data, size_t len);
 
 /*
  * Execute a single iteration of the event multiplexer.
- * timeout_ms: milliseconds to block (0 = immediate non-blocking poll, -1 = block).
+ * timeout_ms: milliseconds to block (0 = non-blocking poll, -1 = block indefinitely).
  * Returns number of handled events, 0 on timeout, negative on error.
  */
 int reactor_step(reactor_t *reactor, int timeout_ms);
@@ -115,6 +123,20 @@ void reactor_run(reactor_t *reactor);
  * Signal the event loop to stop.
  */
 void reactor_stop(reactor_t *reactor);
+
+/*
+ * Bind consensus state machine and epoch start time to reactor.
+ */
+void reactor_bind_consensus(reactor_t *reactor, duel_state_machine_t *sm, uint64_t epoch_start_ns);
+
+/*
+ * Run a single consensus epoch event loop.
+ * Integrates determ_clock_now() monotonic timer. When clock hits exactly 2000ms
+ * from epoch start, instantly halts network ingestion, triggers REVEAL_WINDOW buzzer,
+ * and transitions state machine to VDF_EVALUATION.
+ * Returns 0 on success, negative on error.
+ */
+int reactor_run_epoch(reactor_t *reactor, duel_state_machine_t *sm, uint64_t epoch_start_ns);
 
 /*
  * Close a registered socket and free its static slot.

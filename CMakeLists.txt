@@ -1,20 +1,28 @@
-cmake_minimum_required(VERSION 3.20)
-project(determ C)
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Determ Contributors
+#
+# Sovereign C99 Unikernel Execution Environment
+# Monolithic Pure C99 Toolchain Configuration
+
+cmake_minimum_required(VERSION 3.16)
+project(determ_c99_node C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
 
-add_compile_options(-Wall -Wextra -Werror -pedantic)
-
-if(WIN32)
-  link_libraries(ws2_32)
-elseif(UNIX AND NOT APPLE)
-  link_libraries(rt pthread)
+# Enforce strict bare-metal C99 warning compliance
+if(MSVC)
+    add_compile_options(/W4 /WX /TC)
+    add_definitions(-D_CRT_SECURE_NO_WARNINGS -DWIN32_LEAN_AND_MEAN)
+else()
+    add_compile_options(-Wall -Wextra -Werror -pedantic -Wshadow -Wstrict-prototypes)
+    add_definitions(-D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE)
 endif()
 
 include_directories(include src tests)
 
-# Core C99 Cryptography Sources
+# Core Cryptography C99 Library Sources
 set(CRYPTO_SRCS
     src/crypto/secure_zero.c
     src/crypto/ct.c
@@ -60,93 +68,69 @@ set(CONSENSUS_SRCS
 
 add_library(determ_core STATIC ${CRYPTO_SRCS} ${CONSENSUS_SRCS})
 
-# DSF variant for deterministic simulation tests
-add_library(determ_core_dsf STATIC ${CRYPTO_SRCS} ${CONSENSUS_SRCS})
-target_compile_definitions(determ_core_dsf PUBLIC DETERM_DSF_ENABLED)
+# Target Platform Link Libraries
+set(EXTRA_LIBS "")
+if(WIN32)
+    list(APPEND EXTRA_LIBS ws2_32)
+elseif(UNIX AND NOT APPLE)
+    list(APPEND EXTRA_LIBS rt pthread)
+endif()
 
-# Node Executable
+# Determ Node Executable
 add_executable(determ-node src/determ_node.c)
-target_link_libraries(determ-node PRIVATE determ_core)
+target_link_libraries(determ-node PRIVATE determ_core ${EXTRA_LIBS})
 
-# C99 Tests
+# C99 Test Suites
 enable_testing()
 
-add_executable(test-k2-posw tests/test_k2_posw.c)
-target_link_libraries(test-k2-posw PRIVATE determ_core_dsf)
-add_test(NAME test-k2-posw COMMAND test-k2-posw)
+macro(determ_add_test test_name source_file)
+    add_executable(${test_name} ${source_file})
+    target_link_libraries(${test_name} PRIVATE determ_core ${EXTRA_LIBS})
+    add_test(NAME ${test_name} COMMAND ${test_name})
+endmacro()
 
-add_executable(test-k2-duel tests/test_k2_duel.c)
-target_link_libraries(test-k2-duel PRIVATE determ_core)
-add_test(NAME test-k2-duel COMMAND test-k2-duel)
+determ_add_test(test-execution-env tests/test_execution_env.c)
+target_compile_definitions(test-execution-env PRIVATE DETERM_DSF_ENABLED)
+determ_add_test(test-k2-posw tests/test_k2_posw.c)
+target_compile_definitions(test-k2-posw PRIVATE DETERM_DSF_ENABLED)
+determ_add_test(test-k2-duel tests/test_k2_duel.c)
+determ_add_test(test-k2-net-rpc tests/test_k2_net_rpc.c)
+determ_add_test(test-binary-codec tests/test_binary_codec.c)
+determ_add_test(test-peer-mesh tests/test_peer_mesh.c)
+determ_add_test(test-block-store tests/test_block_store.c)
+determ_add_test(test-dda tests/test_dda.c)
+determ_add_test(test-qpc-clock-overflow tests/test_qpc_clock_overflow.c)
+determ_add_test(test-http-rpc tests/test_http_rpc.c)
+determ_add_test(test-ledger-dsso tests/test_ledger_dsso.c)
+determ_add_test(test-k2-duel-fallback tests/test_k2_duel_fallback.c)
+target_compile_definitions(test-k2-duel-fallback PRIVATE DETERM_DSF_ENABLED)
+determ_add_test(test-opaque-dsso tests/test_opaque_dsso.c)
+target_compile_definitions(test-opaque-dsso PRIVATE DETERM_DSF_ENABLED)
+determ_add_test(test-triple-entry-ledger tests/test_triple_entry_ledger.c)
+target_compile_definitions(test-triple-entry-ledger PRIVATE DETERM_DSF_ENABLED)
+determ_add_test(fuzzer-parser tests/fuzzer_parser.c)
+determ_add_test(test-shard-routing tests/test_shard_routing.c)
+determ_add_test(test-rpc-shard-routing tests/test_rpc_shard_routing.c)
+determ_add_test(test-pending-transfer tests/test_pending_transfer.c)
+determ_add_test(test-rpc-pending-transfer tests/test_rpc_pending_transfer.c)
+
+# Specialized Test Targets
+add_executable(test-ed25519-bounded tests/test_ed25519_bounded.c src/crypto/ed25519/ed25519.c src/crypto/sha2/sha512.c src/crypto/secure_zero.c src/crypto/ct.c)
+target_compile_definitions(test-ed25519-bounded PRIVATE ED25519_BOUNDED_IMPL=1)
+target_link_libraries(test-ed25519-bounded PRIVATE ${EXTRA_LIBS})
+add_test(NAME test-ed25519-bounded COMMAND test-ed25519-bounded)
 
 add_executable(test-dsf-k2-duel tests/test_dsf_k2_duel.c)
-target_link_libraries(test-dsf-k2-duel PRIVATE determ_core_dsf)
+target_compile_definitions(test-dsf-k2-duel PRIVATE DETERM_DSF_ENABLED)
+target_link_libraries(test-dsf-k2-duel PRIVATE determ_core ${EXTRA_LIBS})
 add_test(NAME test-dsf-k2-duel COMMAND test-dsf-k2-duel)
 
-add_executable(test-k2-net-rpc tests/test_k2_net_rpc.c)
-target_link_libraries(test-k2-net-rpc PRIVATE determ_core)
-add_test(NAME test-k2-net-rpc COMMAND test-k2-net-rpc)
+add_executable(fuzz-ledger tests/fuzz_ledger.c)
+target_compile_definitions(fuzz-ledger PRIVATE DETERM_DSF_ENABLED)
+target_link_libraries(fuzz-ledger PRIVATE determ_core ${EXTRA_LIBS})
+add_test(NAME fuzz-ledger COMMAND fuzz-ledger)
 
-add_executable(test-binary-codec tests/test_binary_codec.c)
-target_link_libraries(test-binary-codec PRIVATE determ_core)
-add_test(NAME test-binary-codec COMMAND test-binary-codec)
-
-add_executable(test-peer-mesh tests/test_peer_mesh.c)
-target_link_libraries(test-peer-mesh PRIVATE determ_core)
-add_test(NAME test-peer-mesh COMMAND test-peer-mesh)
-
-add_executable(test-block-store tests/test_block_store.c)
-target_link_libraries(test-block-store PRIVATE determ_core)
-add_test(NAME test-block-store COMMAND test-block-store)
-
-add_executable(test-dda tests/test_dda.c)
-target_link_libraries(test-dda PRIVATE determ_core)
-add_test(NAME test-dda COMMAND test-dda)
-
-add_executable(test-qpc-clock-overflow tests/test_qpc_clock_overflow.c)
-target_link_libraries(test-qpc-clock-overflow PRIVATE determ_core)
-add_test(NAME test-qpc-clock-overflow COMMAND test-qpc-clock-overflow)
-
-add_executable(test-http-rpc tests/test_http_rpc.c)
-target_link_libraries(test-http-rpc PRIVATE determ_core)
-add_test(NAME test-http-rpc COMMAND test-http-rpc)
-
-add_executable(test-ledger-dsso tests/test_ledger_dsso.c)
-target_link_libraries(test-ledger-dsso PRIVATE determ_core)
-add_test(NAME test-ledger-dsso COMMAND test-ledger-dsso)
-
-add_executable(test-fuzz-ledger tests/fuzz_ledger.c)
-target_link_libraries(test-fuzz-ledger PRIVATE determ_core_dsf)
-add_test(NAME test-fuzz-ledger COMMAND test-fuzz-ledger)
-
-add_executable(test-k2-duel-fallback tests/test_k2_duel_fallback.c)
-target_link_libraries(test-k2-duel-fallback PRIVATE determ_core_dsf)
-add_test(NAME test-k2-duel-fallback COMMAND test-k2-duel-fallback)
-
-add_executable(test-opaque-dsso tests/test_opaque_dsso.c)
-target_link_libraries(test-opaque-dsso PRIVATE determ_core_dsf)
-add_test(NAME test-opaque-dsso COMMAND test-opaque-dsso)
-
-add_executable(test-triple-entry-ledger tests/test_triple_entry_ledger.c)
-target_link_libraries(test-triple-entry-ledger PRIVATE determ_core_dsf)
-add_test(NAME test-triple-entry-ledger COMMAND test-triple-entry-ledger)
-
-add_executable(test-fuzzer-parser tests/fuzzer_parser.c)
-target_link_libraries(test-fuzzer-parser PRIVATE determ_core)
-add_test(NAME test-fuzzer-parser COMMAND test-fuzzer-parser)
-
-add_executable(test-pending-transfer tests/test_pending_transfer.c)
-target_link_libraries(test-pending-transfer PRIVATE determ_core)
-add_test(NAME test-pending-transfer COMMAND test-pending-transfer)
-
-add_executable(test-rpc-pending-transfer tests/test_rpc_pending_transfer.c)
-target_link_libraries(test-rpc-pending-transfer PRIVATE determ_core)
-add_test(NAME test-rpc-pending-transfer COMMAND test-rpc-pending-transfer)
-
-add_executable(test-shard-routing tests/test_shard_routing.c)
-target_link_libraries(test-shard-routing PRIVATE determ_core)
-add_test(NAME test-shard-routing COMMAND test-shard-routing)
-
-add_executable(test-rpc-shard-routing tests/test_rpc_shard_routing.c)
-target_link_libraries(test-rpc-shard-routing PRIVATE determ_core)
-add_test(NAME test-rpc-shard-routing COMMAND test-rpc-shard-routing)
+add_executable(test-dsf-k2-recovery sim/k2_recovery_model.c tests/test_dsf_k2_recovery.c)
+target_include_directories(test-dsf-k2-recovery PRIVATE sim)
+target_link_libraries(test-dsf-k2-recovery PRIVATE determ_core ${EXTRA_LIBS})
+add_test(NAME test-dsf-k2-recovery COMMAND test-dsf-k2-recovery)

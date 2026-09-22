@@ -6,7 +6,7 @@
  *
  * Guarantees:
  *   - Zero dynamic heap memory allocation (no malloc/free).
- *   - Strictly flat, cache-conscious array structures.
+ *   - Flat, zero-allocation memory structure (determ_account_t global_ledger[MAX_ACCOUNTS]).
  *   - Cryptographically enforced balance invariants: no integer overflow or underflow.
  *   - Ed25519 signature authentication on all state transitions.
  */
@@ -22,7 +22,8 @@
 extern "C" {
 #endif
 
-#define LEDGER_MAX_ACCOUNTS     1024U
+#define MAX_ACCOUNTS            1024U
+#define LEDGER_MAX_ACCOUNTS     MAX_ACCOUNTS
 #define LEDGER_PUBKEY_LEN       32U
 #define LEDGER_SIG_LEN          64U
 #define LEDGER_TX_SIGNING_BYTES (32U + 32U + 8U + 8U + 8U) /* 88 bytes */
@@ -44,7 +45,9 @@ typedef struct LEDGER_PACKED {
     uint8_t  pubkey[LEDGER_PUBKEY_LEN];
     uint64_t balance;
     uint64_t nonce;
-} account_t;
+} determ_account_t;
+
+typedef determ_account_t account_t;
 
 /*
  * Packed C99 Triple-Entry Transaction structure:
@@ -76,6 +79,11 @@ typedef enum {
     LEDGER_ERR_PUBKEY_MISMATCH       = -9
 } ledger_status_t;
 
+#define ERR_OVERFLOW        LEDGER_ERR_OVERFLOW
+#define ERR_OVERSPEND       LEDGER_ERR_OVERSPEND
+#define ERR_INVALID_NONCE   LEDGER_ERR_INVALID_NONCE
+#define ERR_INVALID_SIG     LEDGER_ERR_INVALID_SIG
+
 /*
  * Flat In-Memory Ledger State
  * Statically sized arena of accounts with zero heap allocation.
@@ -87,6 +95,19 @@ typedef struct {
 } ledger_state_t;
 
 /*
+ * Statically allocated global ledger memory arena
+ */
+extern determ_account_t global_ledger[MAX_ACCOUNTS];
+
+/*
+ * Global ledger memory arena administration
+ */
+void global_ledger_init(void);
+void global_ledger_clear(void);
+int  global_ledger_register(const uint8_t pubkey[LEDGER_PUBKEY_LEN], uint64_t balance, uint64_t nonce);
+determ_account_t* global_ledger_find(const uint8_t pubkey[LEDGER_PUBKEY_LEN]);
+
+/*
  * Serialize the 88 canonical signing bytes for a Triple-Entry Transaction:
  * [from(32)] || [to(32)] || [BE64(amount)] || [BE64(fee)] || [BE64(nonce)]
  */
@@ -94,14 +115,20 @@ void triple_entry_tx_signing_bytes(const triple_entry_tx_t *tx,
                                    uint8_t out_signing_bytes[LEDGER_TX_SIGNING_BYTES]);
 
 /*
- * Verify a Triple-Entry Transaction against the sender's account.
+ * Cryptographically verify a raw transaction payload against the global_ledger arena.
+ * Checks tx_nonce == account.nonce + 1, guards against integer overflow and overspends.
+ */
+int verify_triple_entry_tx_payload(const uint8_t *tx_payload);
+
+/*
+ * Verify a Triple-Entry Transaction against a specific sender account.
  */
 int verify_triple_entry_tx(const account_t *sender,
                            const triple_entry_tx_t *tx,
                            uint64_t min_fee);
 
 /*
- * Verify a Triple-Entry Transaction directly against the ledger state.
+ * Verify a Triple-Entry Transaction directly against an isolated ledger state.
  */
 int verify_triple_entry_tx_state(const triple_entry_tx_t *tx,
                                  const ledger_state_t *state,

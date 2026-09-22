@@ -12,7 +12,7 @@
  *   - Zero-Knowledge identity authentication without a central identity authority.
  *   - Blind evaluation: the K=2 Aggregator never unblinds or learns user passwords.
  *   - Constant-time verification to prevent timing side channels.
- *   - Zero dynamic memory allocations (pure stack/arena).
+ *   - Zero dynamic memory allocations (struct dsso_envelope dsso_registry[MAX_IDENTITIES]).
  */
 
 #ifndef DETERMINISTIC_CRYPTO_OPAQUE_DSSO_H
@@ -26,6 +26,7 @@
 extern "C" {
 #endif
 
+#define MAX_IDENTITIES              256U
 #define OPAQUE_OPRF_ELEMENT_LEN     33U /* SEC1 compressed P-256 point */
 #define OPAQUE_OPRF_SCALAR_LEN      32U /* P-256 scalar */
 #define OPAQUE_OPRF_OUTPUT_LEN      32U /* SHA-256 output length */
@@ -79,10 +80,46 @@ typedef struct OPAQUE_PACKED {
     uint8_t client_identity_proof[32]; /* Client AKE MAC proof */
 } opaque_auth_request_t;
 
+/*
+ * ── 4. The DSSO Envelope Registry Structure ─────────────────────────────────
+ * Fixed-size contiguous memory arena storing OPAQUE OPRF evaluation hash
+ * and the encrypted client payload.
+ */
+struct OPAQUE_PACKED dsso_envelope {
+    uint8_t           oprf_eval_hash[32];        /* OPRF evaluation hash */
+    uint8_t           account_id[OPAQUE_ID_LEN]; /* Account identity identifier */
+    opaque_envelope_t encrypted_payload;         /* Encrypted client credentials */
+    uint8_t           active;                    /* Slot status flag */
+};
+typedef struct dsso_envelope dsso_envelope_t;
+
 #pragma pack(pop)
 
 /*
- * ── 4. OPRF Handshake API ───────────────────────────────────────────────────
+ * Fixed-size contiguous memory arena for DSSO identities
+ */
+extern struct dsso_envelope dsso_registry[MAX_IDENTITIES];
+
+/*
+ * DSSO Registry Arena Administration
+ */
+void dsso_registry_clear(void);
+int  dsso_registry_register(const uint8_t account_id[OPAQUE_ID_LEN],
+                            const uint8_t oprf_eval_hash[32],
+                            const opaque_envelope_t *envelope);
+struct dsso_envelope* dsso_registry_find(const uint8_t account_id[OPAQUE_ID_LEN]);
+
+/*
+ * Blindly verify client's OPRF proof against the dsso_registry without
+ * ever exposing the plaintext secret in memory.
+ *
+ * client_payload: 64 bytes ([account_id(32)] || [client_identity_proof(32)])
+ * Returns 0 on successful blind verification, negative on mismatch/error.
+ */
+int verify_opaque_handshake(const uint8_t *client_payload);
+
+/*
+ * ── 5. OPRF Handshake API ───────────────────────────────────────────────────
  */
 
 /*
@@ -116,7 +153,7 @@ int opaque_dsso_oprf_finalize(const uint8_t *pwd, size_t pwd_len,
                               uint8_t out_oprf_output[OPAQUE_OPRF_OUTPUT_LEN]);
 
 /*
- * ── 5. Key Derivation & Credential Envelope API ─────────────────────────────
+ * ── 6. Key Derivation & Credential Envelope API ─────────────────────────────
  */
 
 /*
@@ -148,7 +185,7 @@ int opaque_dsso_unseal_envelope(const uint8_t envelope_key[32],
                                 size_t *out_payload_len);
 
 /*
- * ── 6. Zero-Knowledge Authorization ─────────────────────────────────────────
+ * ── 7. Zero-Knowledge Authorization ─────────────────────────────────────────
  */
 
 /*
