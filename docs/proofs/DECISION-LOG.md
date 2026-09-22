@@ -6427,3 +6427,17 @@ failure: E3 reports `sel\test_e3_vacuous.sh:5` instead of the required slash pat
 with 52 assertions passing and one failing. The reviewed script is restored
 byte-for-byte after that run. Independent diff review approved the gate; the
 final documentation guards pass. Native Windows confirmation remains hosted.
+
+## 2026-09-22 — Preserve D.5 oracle fixture checkout bytes
+
+Three hosted Windows D.5 wrappers passed their in-process checks but failed the
+strict oracle drift comparison. Their emitters already write LF; checkout with
+`core.autocrlf=true` changed the three committed text fixtures to CRLF. Read-only
+checkout-filter reproduction measured 55, 1330 and 7 inserted carriage returns
+for `d5_codec.json`, `d5_draw.json` and `d5rp.json`, respectively.
+
+Add exact `text eol=lf` attributes for those three paths only. Under the same
+checkout filter their bytes now equal their committed blobs, including SHA-256;
+no golden, emitter or comparison changes. Independent review approved the diff.
+The shared Darwin `ci_local --jobs 4` baseline passes all 333 wrappers and 16
+documentation guards. Hosted Windows confirmation remains for the rerun.

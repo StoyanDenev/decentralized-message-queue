@@ -20,3 +20,9 @@ CMakeLists.txt text eol=lf
 *.cmake text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+
+# D.5 oracle drift gates compare these frozen text fixtures byte-for-byte.
+# Their emitters write LF explicitly; keep the checkout identical on Windows.
+tools/vectors/d5_codec.json text eol=lf
+tools/vectors/d5_draw.json text eol=lf
+tools/vectors/d5rp.json text eol=lf
