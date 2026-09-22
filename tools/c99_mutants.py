@@ -19,6 +19,13 @@ from pathlib import Path
 # name, target, repository-relative source, literal old text, literal new text.
 # Each replacement must match exactly once in the unmutated source snapshot.
 MUTANTS = [
+    ("ledger-self-alias", "test-triple-entry-ledger", "src/ledger/state.c",
+     "if (sender == receiver)", "if (0)"),
+    ("ledger-self-fee", "test-triple-entry-ledger", "src/ledger/state.c",
+     "sender_balance -= tx_fee;", "sender_balance -= tx_amount + tx_fee;"),
+    ("ledger-self-nonce", "test-triple-entry-ledger", "src/ledger/state.c",
+     "memcpy(&sender->nonce, &tx_nonce, sizeof(uint64_t));",
+     "/* mutant: leave the self-transfer nonce unchanged */"),
     ("qpc-remainder-overflow", "test-qpc-clock-overflow", "include/determ/time/clock.h",
      "return ns + quotient;", "return ns + (fraction_ticks * scale) / freq;"),
     ("qpc-whole-saturation", "test-qpc-clock-overflow", "include/determ/time/clock.h",

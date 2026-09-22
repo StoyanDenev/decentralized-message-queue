@@ -191,6 +191,15 @@ ledger_status_t ledger_apply_tx(ledger_state_t *state,
     memcpy(&sender_balance, &sender->balance, sizeof(uint64_t));
     memcpy(&receiver_balance, &receiver->balance, sizeof(uint64_t));
 
+    /* A self-transfer moves only its fee; sender and receiver alias. */
+    if (sender == receiver) {
+        sender_balance -= tx_fee;
+        memcpy(&sender->balance, &sender_balance, sizeof(uint64_t));
+        memcpy(&sender->nonce, &tx_nonce, sizeof(uint64_t));
+        state->total_fees += tx_fee;
+        return LEDGER_OK;
+    }
+
     /* Guard receiver balance overflow */
     if (UINT64_MAX - receiver_balance < tx_amount) {
         return LEDGER_ERR_OVERFLOW;

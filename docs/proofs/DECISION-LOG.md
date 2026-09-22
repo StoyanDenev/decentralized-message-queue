@@ -6038,3 +6038,28 @@ review are recorded below after completion.
 `git diff --check` passed. Independent review found no actionable issues in the
 shard-local eligibility requirement or the stated population/availability limits.
 No binaries or new simulations were built or run.
+
+## 2026-09-22 — C99 ledger self-transfer correction
+
+**Scope and reason.** The owner authorized continued development toward merging
+the sharding branch. Recovery models require a truthful apply path. In the C99
+standalone ledger, sender and receiver alias for a self-transfer: the old receiver
+write overwrote the debit with `old_balance + amount`, creating value. This is
+independent of production fork choice and is corrected as its own increment.
+
+**Rule and argument.** After normal signature, nonce, fee and gross-balance
+validation, a self-transfer subtracts only its fee, advances its nonce once, and
+adds the fee to the existing accumulator. Assuming that addition is representable,
+balance plus fees is conserved. No second receiver write or gross receiver-overflow
+test applies. Fee-accumulator overflow and nonce exhaustion remain separate next
+increments; this change does not claim those are solved.
+
+**Verification.** The added apply-layer regression first built successfully and
+failed at the expected balance assertion on the old source. With the correction,
+`ci_local --c99 --c99-test test-triple-entry-ledger --jobs 4` passes;
+`ci_local --c99-mutants --jobs 4` rejects all 21 isolated mutants after successful
+fresh builds, including aliasing, self-fee and self-nonce mutations. A restricted
+first mutation run could not start its localhost listener and was treated as an
+infrastructure failure; the recorded run enabled localhost sockets. Independent
+diff review approved the runtime rule and required a byte-copy test snapshot to
+avoid unspecified structure-padding comparisons; that correction is included.

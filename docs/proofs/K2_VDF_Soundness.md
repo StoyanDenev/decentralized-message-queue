@@ -145,3 +145,21 @@ results remain necessary; green tests cannot certify an unspecified protocol.
 mutants after successful fresh builds; `--docs-only` passed 16 guards. Source and
 design review were independent of test color. These results establish only the
 stated checks; Linux/Windows runtime and the C++ FAST suite were not run in this pass.
+
+## 8. C99 ledger self-transfer contract
+
+The standalone ledger is not connected to C99 network block acceptance. For a
+validated self-transfer with amount `a`, fee `f`, starting balance `b` and fee
+accumulator `F`, provided `F + f` is representable, apply writes `b - f`, the
+transaction nonce, and `F + f`. The existing validation still requires the
+representable gross debit `a + f <= b`. Conservation follows directly:
+`(b - f) + (F + f) = b + F`. The receiver is the same account, so applying a
+second receiver write would overwrite the debit and is forbidden. A maximum
+balance self-transfer with zero fee succeeds without a spurious receiver-overflow
+failure. A repeated nonce or insufficient gross balance rejects without mutation.
+
+`test-triple-entry-ledger` checks these outcomes at `ledger_apply_tx`, including
+full-state equality after rejection. Isolated mutations restore the aliasing bug,
+charge the gross debit, or omit the nonce update. This closes the self-transfer
+defect only; nonce exhaustion, fee-accumulator overflow and portable state/transaction
+root encoding require separate corrections before broader ledger claims.
