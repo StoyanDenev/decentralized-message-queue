@@ -67,8 +67,8 @@ while [ $# -gt 0 ]; do
     --jobs)
       [ $# -ge 2 ] || { echo "FAIL: --jobs requires a count"; exit 1; }
       JOBS="$2"; shift 2 ;;
-    --sanitize) SANITIZE=1; C99=0; shift ;;
-    --asan) ASAN=1; C99=0; shift ;;
+    --sanitize) SANITIZE=1; shift ;;
+    --asan) ASAN=1; shift ;;
     --docs-only) DOCS_ONLY=1; C99=0; shift ;;
     --c99) C99=1; C99_EXPLICIT=1; shift ;;
     --c99-test)
@@ -110,8 +110,8 @@ fi
 
 # Sovereign C99 Unikernel Execution Environment
 if [ "$C99" -eq 1 ]; then
-  if [ "$SKIP_BUILD" -ne 0 ] || [ "$SANITIZE" -ne 0 ] || [ "$ASAN" -ne 0 ]; then
-    echo "FAIL: --c99 cannot be combined with --skip-build, --sanitize, or --asan"
+  if [ "$SKIP_BUILD" -ne 0 ]; then
+    echo "FAIL: --c99 cannot be combined with --skip-build"
     exit 1
   fi
   if [ "$C99_MUTANTS" -eq 1 ]; then
@@ -129,7 +129,7 @@ if [ "$C99" -eq 1 ]; then
   source tools/ci_c99.sh
   rc=$?
   [ "$rc" -eq 0 ] || exit $rc
-  if [ "$C99_EXPLICIT" -eq 0 ] && [ "$HAS_CUSTOM_TESTS" -eq 0 ]; then
+  if [ "$C99_EXPLICIT" -eq 0 ] && [ "$HAS_CUSTOM_TESTS" -eq 0 ] && [ "$SANITIZE" -eq 0 ] && [ "$ASAN" -eq 0 ]; then
     run_doc_guards || exit 1
   fi
   exit 0

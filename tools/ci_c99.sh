@@ -45,10 +45,15 @@ fi
 mkdir -p "$BUILD_DIR" || return 1
 BUILD_DIR=$(cd "$BUILD_DIR" && pwd) || return 1
 echo "=== ci_local --c99: $(uname -sm), build $BUILD_DIR ==="
+ASAN_FLAG="OFF"
+[ "${ASAN:-0}" -eq 1 ] && ASAN_FLAG="ON"
+UBSAN_FLAG="OFF"
+[ "${SANITIZE:-0}" -eq 1 ] && UBSAN_FLAG="ON"
+
 if ! cmake -S . -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release \
     -DDETERM_BUILD_CRYPTOTEST=OFF -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
     -DENABLE_LIBFUZZER=OFF -DENABLE_PARSER_LIBFUZZER=OFF \
-    -DDETERM_ASAN=OFF -DDETERM_UBSAN=OFF >"$BUILD_DIR/configure.log" 2>&1; then
+    -DDETERM_ASAN="$ASAN_FLAG" -DDETERM_UBSAN="$UBSAN_FLAG" >"$BUILD_DIR/configure.log" 2>&1; then
   cat "$BUILD_DIR/configure.log"
   echo "FAIL(build): C99 configure"
   return 1
@@ -63,12 +68,15 @@ if ! cmake --build "$BUILD_DIR" --config Release --clean-first -j "$JOBS" \
 fi
 echo "BUILD_OK(c99): ${C99_TESTS[*]}"
 
+export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
+export ASAN_OPTIONS="halt_on_error=1"
+
 C99_FAILED=0
 for target in "${C99_TESTS[@]}"; do
   binary=""
   for candidate in "$BUILD_DIR/$target" "$BUILD_DIR/Release/$target" \
       "$BUILD_DIR/$target.exe" "$BUILD_DIR/Release/$target.exe"; do
-    if [ -x "$candidate" ]; then binary="$candidate"; break; fi
+    if [ -x "$candidate" ] || [ -f "$candidate" ]; then binary="$candidate"; break; fi
   done
   if [ -z "$binary" ]; then
     echo "FAIL(launch): $target not found in configured build"
