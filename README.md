@@ -48,7 +48,9 @@ bash tools/ci_local.sh --c99-mutants --jobs 4
 The arithmetic and local state-machine tests are portable C99. The network driver
 and its live socket tests currently use POSIX transport; Windows transport support
 is not established by these checks. The ordinary `ci_local.sh` path still tests the
-C++ implementation.
+C++ implementation. Pull-request CI also configures a separate Ubuntu 24.04 job
+for the C99 suite, isolated mutation checks and documentation guards; local Darwin
+results do not substitute for that runner's result.
 
 ## C++ implementation reference
 

@@ -1,7 +1,6 @@
-# Determ CI — the push-triggered form of tools/ci_local.sh (same content):
-# build the five binaries (determ, determ-wallet, determ-light,
-# determ-cryptotest, determ-dsf) + run the FAST=1 suite + the offline
-# doc-coherence guards, on a clean Linux runner and a clean Windows/MSVC runner.
+# Determ CI — the push-triggered form of tools/ci_local.sh:
+# shared C++ binaries + FAST + doc guards on Linux and Windows/MSVC;
+# a separate Linux job runs C99 targets, isolated mutants and doc guards.
 #
 # The local WSL2 run via tools/ci_local.sh is the primary gate on the dev box;
 # this workflow is the pushed mirror of it (repo:
@@ -57,6 +56,24 @@ jobs:
           python -m pip install cryptography argon2-cffi pynacl
       - name: Build + FAST + guards
         run: bash tools/ci_local.sh --jobs 4
+
+  c99:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # The C99 gate configures with the OpenSSL oracle disabled and fetches
+      # disconnected. Its mutation runner requires a successful fresh build
+      # before counting a rejected mutant; no third-party Python packages.
+      - name: Build + C99 gates
+        run: bash tools/ci_local.sh --c99 --jobs 4
+      - name: Isolated C99 mutation gates
+        run: bash tools/ci_local.sh --c99-mutants --jobs 4
+      - name: Documentation guards
+        run: bash tools/ci_local.sh --docs-only
 
   windows:
     runs-on: windows-2022

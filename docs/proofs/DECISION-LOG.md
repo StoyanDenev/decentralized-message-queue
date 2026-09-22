@@ -6286,3 +6286,16 @@ counted, the anchor was narrowed, and the full suite was rerun. Documentation gu
 pass 16/16; the strict C99 Makefile build passes. Runtime evidence is Darwin arm64;
 shared C++ validation is recorded in the preceding prerequisite entry. This is a
 mergeable experimental foundation, not completed production sharding or settlement.
+
+
+## 2026-09-22 — Run C99 gates in pull-request CI
+
+Branch integration review found that the existing CI jobs invoked only the C++
+`ci_local` path and UBSan, so the new C99 regressions were not exercised on pull
+requests. A separate pinned Ubuntu 24.04 job now invokes `--c99`, `--c99-mutants`
+and `--docs-only`, with Python 3.12 and a 30-minute timeout. It preserves all
+existing jobs and requires no additional crypto-oracle dependency installation.
+The workflow and exact wrapper commands were independently reviewed and parsed as
+YAML. Local gate results remain those above; no Linux Actions execution is claimed
+by this configuration change. Current remote main was checked through the GitHub
+API and matches the stored `origin/main` ancestor; no merge conflict is present.
