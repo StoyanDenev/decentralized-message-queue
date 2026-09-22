@@ -1,196 +1,146 @@
 --------------------------- MODULE Consensus ---------------------------
 (*
-FB1 — TLA+ formal specification of Determ's per-height K=2 VDF Duel consensus.
+FB1 — TLA+ formal specification of Determ's Heaviest-Chain PoSW Consensus.
 
 Grounding:
-  * Supersedes the legacy K-of-K BFT/unanimous model.
-  * Formalized in K2_VDF_Soundness.md.
-  * Implemented in src/consensus/duel_state.c, include/determ/consensus/duel_state.h.
-
-Architecture:
-  * Committee of size K=2: elected Aggregator and Contributor.
-  * Phase 1: Aggregator and Contributor publish cryptographic commitments.
-  * Phase 2 (AWAIT_REVEALS): Governed exclusively by a monotonic local timer.
-    - If Contributor reveals payload within W_reveal, VDF evaluates dual bundle (A+B).
-    - If Contributor straggles or drops (timer > W_reveal), the 1-of-2 fallback
-      executes unconditionally, evaluating Aggregator's payload (A) alone.
-  * Phase 3 (VDF_EVALUATING): Evaluates sequential VDF over T_vdf steps.
-  * Zero-Bit Bias / Time-Lock: T_vdf > W_reveal + Delta_max guarantees no participant
-    learns the outcome before committing.
-  * Absolute Liveness: Network progress is guaranteed under asynchronous network
-    drops without requiring a Byzantine quorum.
+  * Supersedes legacy BFT duel states and 0-bit bias assumptions (ADR-004, ADR-005).
+  * Formalized in docs/proofs/PoSW_Nakamoto_Safety.md and PoSW_Economic_Soundness.md.
+  * Fork Choice Rule: Max(accumulated_vdf_iterations).
+  * Models temporary network forks (conflicting candidate blocks at height H).
+  * Proves Eventual Consensus under synchronous delivery bounds.
 *)
 
 EXTENDS Naturals, FiniteSets, TLC
 
 CONSTANTS
-    Aggregator,         \* Elected Aggregator node identity
-    Contributor,        \* Elected Contributor node identity
-    W_reveal,           \* Reveal window bound (monotonic timer ticks)
-    T_vdf               \* Sequential VDF evaluation steps
+    Nodes,              \* Set of honest observer nodes, e.g. {"node_1", "node_2"}
+    BlockIds,           \* Finite set of available block IDs, e.g. {1, 2, 3}
+    MaxHeight,          \* Maximum block height to explore, e.g. 2
+    WeightOptions       \* Set of possible VDF iterations per block, e.g. {1, 2}
+
+GenesisId == 0
+
+GenesisBlock == [
+    id |-> GenesisId,
+    height |-> 0,
+    parent |-> GenesisId,
+    accumulated_vdf_iterations |-> 0
+]
 
 ASSUME ConstantsOK ==
-    /\ W_reveal \in Nat /\ W_reveal >= 1
-    /\ T_vdf \in Nat /\ T_vdf >= 1
-    /\ Aggregator /= Contributor
+    /\ Nodes /= {}
+    /\ BlockIds /= {}
+    /\ GenesisId \notin BlockIds
+    /\ MaxHeight \in Nat /\ MaxHeight >= 1
+    /\ WeightOptions \subseteq (Nat \ {0})
 
 VARIABLES
-    stage,              \* {"INIT", "COMMIT", "AWAIT_REVEALS", "VDF_EVALUATING", "FINAL"}
-    timer,              \* Monotonic clock tick in AWAIT_REVEALS (0..W_reveal+1)
-    vdf_timer,          \* Progress ticks in VDF_EVALUATING (0..T_vdf)
-    agg_committed,      \* TRUE once Aggregator publishes commitment
-    contrib_committed,  \* TRUE once Contributor publishes commitment
-    contrib_revealed,   \* TRUE once Contributor reveals payload
-    vdf_mode,           \* {"NONE", "DUAL", "FALLBACK"}
-    finalized,          \* Set of finalized block digests
-    network_drop        \* Simulated network drop / Byzantine silence of Contributor
+    blocks,             \* Set of all mined blocks in the universe
+    network_pool,       \* Set of broadcasted blocks in flight in the network
+    delivered,          \* [n \in Nodes |-> set of blocks delivered to node n]
+    local_tip           \* [n \in Nodes |-> current canonical tip block of node n]
 
-vars == <<stage, timer, vdf_timer, agg_committed, contrib_committed,
-          contrib_revealed, vdf_mode, finalized, network_drop>>
+vars == <<blocks, network_pool, delivered, local_tip>>
 
 ----------------------------------------------------------------------------
-\* Initial state: both nodes idle, timers reset, network drop nondeterministically set.
+\* Helper Predicates
+
+UsedBlockIds == {b.id : b \in blocks}
+
+IsHeavier(cand, current) ==
+    \/ cand.accumulated_vdf_iterations > current.accumulated_vdf_iterations
+    \/ (cand.accumulated_vdf_iterations = current.accumulated_vdf_iterations /\ cand.id < current.id)
+
+AllDelivered ==
+    \A n \in Nodes: network_pool \subseteq delivered[n]
+
+----------------------------------------------------------------------------
+\* Initial State
 
 Init ==
-    /\ stage = "INIT"
-    /\ timer = 0
-    /\ vdf_timer = 0
-    /\ agg_committed = FALSE
-    /\ contrib_committed = FALSE
-    /\ contrib_revealed = FALSE
-    /\ vdf_mode = "NONE"
-    /\ finalized = {}
-    /\ network_drop \in BOOLEAN
+    /\ blocks = {GenesisBlock}
+    /\ network_pool = {GenesisBlock}
+    /\ delivered = [n \in Nodes |-> {GenesisBlock}]
+    /\ local_tip = [n \in Nodes |-> GenesisBlock]
 
 ----------------------------------------------------------------------------
-\* Actions.
+\* Actions
 
-StartCommit ==
-    /\ stage = "INIT"
-    /\ stage' = "COMMIT"
-    /\ UNCHANGED <<timer, vdf_timer, agg_committed, contrib_committed,
-                   contrib_revealed, vdf_mode, finalized, network_drop>>
+\* 1. Mining / Proposing a block: extends an existing block, possibly creating a fork at height H
+MineBlock(b_id, parent_block, weight) ==
+    /\ b_id \in BlockIds \ UsedBlockIds
+    /\ parent_block \in blocks
+    /\ parent_block.height < MaxHeight
+    /\ weight \in WeightOptions
+    /\ LET new_block == [
+            id |-> b_id,
+            height |-> parent_block.height + 1,
+            parent |-> parent_block.id,
+            accumulated_vdf_iterations |-> parent_block.accumulated_vdf_iterations + weight
+          ]
+       IN
+          /\ blocks' = blocks \cup {new_block}
+          /\ network_pool' = network_pool \cup {new_block}
+          /\ UNCHANGED <<delivered, local_tip>>
 
-AggregatorCommit ==
-    /\ stage = "COMMIT"
-    /\ ~agg_committed
-    /\ agg_committed' = TRUE
-    /\ stage' = IF contrib_committed \/ network_drop THEN "AWAIT_REVEALS" ELSE stage
-    /\ UNCHANGED <<timer, vdf_timer, contrib_committed, contrib_revealed,
-                   vdf_mode, finalized, network_drop>>
+\* 2. Receiving a block and applying the Heaviest-Chain fork choice rule
+ReceiveBlock(n, b) ==
+    /\ b \in network_pool \ delivered[n]
+    /\ delivered' = [delivered EXCEPT ![n] = delivered[n] \cup {b}]
+    /\ local_tip' = [local_tip EXCEPT ![n] = IF IsHeavier(b, local_tip[n]) THEN b ELSE local_tip[n]]
+    /\ UNCHANGED <<blocks, network_pool>>
 
-ContributorCommit ==
-    /\ stage = "COMMIT"
-    /\ ~network_drop
-    /\ ~contrib_committed
-    /\ contrib_committed' = TRUE
-    /\ stage' = IF agg_committed THEN "AWAIT_REVEALS" ELSE stage
-    /\ UNCHANGED <<timer, vdf_timer, agg_committed, contrib_revealed,
-                   vdf_mode, finalized, network_drop>>
-
-ContributorDropDuringCommit ==
-    /\ stage = "COMMIT"
-    /\ agg_committed
-    /\ network_drop
-    /\ stage' = "AWAIT_REVEALS"
-    /\ UNCHANGED <<timer, vdf_timer, agg_committed, contrib_committed,
-                   contrib_revealed, vdf_mode, finalized, network_drop>>
-
-\* Monotonic wall-clock timer tick during AWAIT_REVEALS.
-MonotonicTimerTick ==
-    /\ stage = "AWAIT_REVEALS"
-    /\ timer <= W_reveal
-    /\ timer' = timer + 1
-    /\ UNCHANGED <<stage, vdf_timer, agg_committed, contrib_committed,
-                   contrib_revealed, vdf_mode, finalized, network_drop>>
-
-\* Contributor reveals payload within the valid reveal window.
-ContributorReveal ==
-    /\ stage = "AWAIT_REVEALS"
-    /\ timer <= W_reveal
-    /\ ~network_drop
-    /\ contrib_committed
-    /\ ~contrib_revealed
-    /\ contrib_revealed' = TRUE
-    /\ vdf_mode' = "DUAL"
-    /\ stage' = "VDF_EVALUATING"
-    /\ UNCHANGED <<timer, vdf_timer, agg_committed, contrib_committed,
-                   finalized, network_drop>>
-
-\* Monotonic timer expires without Contributor reveal: 1-of-2 fallback executes!
-FallbackTimeout ==
-    /\ stage = "AWAIT_REVEALS"
-    /\ timer > W_reveal
-    /\ ~contrib_revealed
-    /\ vdf_mode' = "FALLBACK"
-    /\ stage' = "VDF_EVALUATING"
-    /\ UNCHANGED <<timer, vdf_timer, agg_committed, contrib_committed,
-                   contrib_revealed, finalized, network_drop>>
-
-\* Sequential evaluation of the VDF.
-VDFStep ==
-    /\ stage = "VDF_EVALUATING"
-    /\ vdf_timer < T_vdf
-    /\ vdf_timer' = vdf_timer + 1
-    /\ UNCHANGED <<stage, timer, agg_committed, contrib_committed,
-                   contrib_revealed, vdf_mode, finalized, network_drop>>
-
-\* Finalization produces the canonical block header.
-Finalize ==
-    /\ stage = "VDF_EVALUATING"
-    /\ vdf_timer = T_vdf
-    /\ stage' = "FINAL"
-    /\ finalized' = IF vdf_mode = "DUAL" THEN {"DUAL_BLOCK"} ELSE {"FALLBACK_BLOCK"}
-    /\ UNCHANGED <<timer, vdf_timer, agg_committed, contrib_committed,
-                   contrib_revealed, vdf_mode, network_drop>>
-
-FinalStutter ==
-    /\ stage = "FINAL"
+\* 3. Stuttering action when all blocks are mined and delivered
+Terminating ==
+    /\ AllDelivered
+    /\ BlockIds \subseteq UsedBlockIds
     /\ UNCHANGED vars
 
 ----------------------------------------------------------------------------
-\* Next-state relation.
+\* Next-State Relation
 
 Next ==
-    \/ StartCommit
-    \/ AggregatorCommit
-    \/ ContributorCommit
-    \/ ContributorDropDuringCommit
-    \/ MonotonicTimerTick
-    \/ ContributorReveal
-    \/ FallbackTimeout
-    \/ VDFStep
-    \/ Finalize
-    \/ FinalStutter
+    \/ \E b_id \in BlockIds, parent \in blocks, w \in WeightOptions:
+          MineBlock(b_id, parent, w)
+    \/ \E n \in Nodes, b \in network_pool:
+          ReceiveBlock(n, b)
+    \/ Terminating
 
 Spec == Init /\ [][Next]_vars /\ WF_vars(Next)
 
 ----------------------------------------------------------------------------
-\* Invariants.
+\* Invariants
 
-\* 1. Canonical Block Safety: At most one canonical block finalizes at height h.
-Inv_OneBlockSafety ==
-    Cardinality(finalized) <= 1
-
-\* 2. Zero-Bit Bias / Time-Lock: Outcome cannot be finalized before reveal window closes.
-Inv_ZeroBitBiasTimeLock ==
-    (stage = "AWAIT_REVEALS" /\ timer <= W_reveal) => (stage /= "FINAL" /\ vdf_timer = 0)
-
-\* 3. Type invariant.
+\* Type invariant
 TypeOK ==
-    /\ stage \in {"INIT", "COMMIT", "AWAIT_REVEALS", "VDF_EVALUATING", "FINAL"}
-    /\ timer \in 0..(W_reveal + 1)
-    /\ vdf_timer \in 0..T_vdf
-    /\ agg_committed \in BOOLEAN
-    /\ contrib_committed \in BOOLEAN
-    /\ contrib_revealed \in BOOLEAN
-    /\ vdf_mode \in {"NONE", "DUAL", "FALLBACK"}
-    /\ finalized \subseteq {"DUAL_BLOCK", "FALLBACK_BLOCK"}
-    /\ network_drop \in BOOLEAN
+    /\ blocks \subseteq [
+            id: Nat,
+            height: Nat,
+            parent: Nat,
+            accumulated_vdf_iterations: Nat
+       ]
+    /\ network_pool \subseteq blocks
+    /\ \A n \in Nodes: delivered[n] \subseteq network_pool
+    /\ \A n \in Nodes: local_tip[n] \in delivered[n]
+
+\* Heaviest-Chain Invariant:
+\* Every honest node's local tip is the maximal accumulated_vdf_iterations block among all delivered blocks
+Inv_HeaviestChain ==
+    \A n \in Nodes:
+        \A b \in delivered[n]:
+            \/ local_tip[n].accumulated_vdf_iterations > b.accumulated_vdf_iterations
+            \/ (local_tip[n].accumulated_vdf_iterations = b.accumulated_vdf_iterations /\ local_tip[n].id <= b.id)
+
+\* Eventual Consensus Invariant:
+\* Once synchronous delivery bounds ensure all broadcasted blocks are delivered to all honest nodes,
+\* all honest nodes hold the identical canonical tip.
+Inv_EventualConsensus ==
+    AllDelivered => (\A n1, n2 \in Nodes: local_tip[n1] = local_tip[n2])
 
 ----------------------------------------------------------------------------
-\* Temporal property: Absolute liveness (network progress under arbitrary drop).
-
-Prop_Termination == <>(stage = "FINAL" /\ finalized /= {})
+\* Temporal Liveness Property:
+\* Under fair delivery, the network eventually converges to consensus.
+Prop_EventualConvergence ==
+    <>(AllDelivered /\ (\A n1, n2 \in Nodes: local_tip[n1] = local_tip[n2]))
 
 ============================================================================
