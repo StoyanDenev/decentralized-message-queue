@@ -48,6 +48,9 @@ arithmetic or a successful socket exchange cannot close these architectural gaps
 
 ## 3. Required design decisions and proof obligations
 
+The open questions in this section are tracked one by one, each with its K-of-K
+counterpart, as the holes in [ADR-004 §7](ADR-004-Fault-Model.md#7-open-design-holes-2026-09-24).
+
 ### 3.1 Producer and fault model
 
 Specify authenticated membership and admission cost; eligible stake/identity snapshot;

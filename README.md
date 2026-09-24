@@ -43,6 +43,12 @@ See the [C99 contracts and refutations](docs/proofs/K2_VDF_Soundness.md)
 and [security ledger](docs/SECURITY.md). [Temporal sharding](docs/decisions/ADR-005-Temporal-Sharding.md)
 is at its design gate; it does not deprecate the C++ beacon or EXTENDED topology.
 
+For protocol comparisons, start with the [preserved K=2 requirements and K-of-K
+comparison](docs/decisions/ADR-004-Fault-Model.md#6-preserved-k2-design-for-comparison-2026-09-24).
+It separates owner decisions, local-model evidence and unresolved production proofs.
+The [open K=2 design holes](docs/decisions/ADR-004-Fault-Model.md#7-open-design-holes-2026-09-24)
+list the outstanding proofs and specification details needed to qualify the design.
+
 Run the C99 checks through the project CI entry point:
 
 ```sh

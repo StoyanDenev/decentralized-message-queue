@@ -6596,3 +6596,928 @@ FAST; macOS; Clang with sanitizers (this container has no compiler-rt runtime).
 the 3b cap under D24; the RPC Host/Origin/Content-Type checks; the residuals the ledger
 lists for the kept rows (S-057, S-063, S-067, S-072, S-073, S-082, S-084, S-091, S-098,
 S-099).
+
+## 2026-09-24 — Preserve the K=2 design for comparison with K-of-K
+
+The owner requested that the K=2 design be saved for other agents to compare with
+K-of-K if it has no holes. The current record does not establish that condition:
+the production design/proof obligations in ADR-004/ADR-005 remain open. Preserve
+the agreed requirements and their status in ADR-004 §6, with a side-by-side
+comparison, links to FB74/FB75 and the bounded recovery model, and an explicit
+list of remaining obligations. README links to this comparison entry point.
+
+This is documentation of the owner's existing choices, not acceptance of a
+hole-free protocol or revival of the demoted PoSW/sharding proofs. Requiring two
+participants is itself a 2-of-2 cooperation rule; the substantive comparison is
+between the existing committee protocol and the proposed PoSW/recovery rules.
+The K-of-K baseline's assumptions and open findings remain in force. No source,
+wire format, model, test rule or implementation status changes. The 2026-09-23
+port-then-retire and uncommitted-delivery decisions remain controlling.
+
+Two independent reviews approved this documentation-only addition. All 16 guards
+pass through `tools/ci_local.sh --docs-only` on Darwin; no binaries or models were
+changed or re-tested. The existing staged restoration is preserved, and these
+three documentation updates are left unstaged for owner review.
+
+## 2026-09-24 — K=2 design holes opened for owner closure
+
+**Purpose.** The owner asked to open the K=2 design holes so that the owner can close
+them and finish the comparison with K-of-K that ADR-004 §6 preserves. ADR-004 §7 lists
+them as H0–H21. Each hole states one question, what is recorded, why it is open, the
+known candidate options (marked as not decided), what closes it, and how K-of-K answers
+the same question with its open findings. §6.3's five obligations are split among the
+holes; H0 (one adversary, network and hardware model for both designs), H13–H15 and
+H19–H21 are added.
+
+**Closure procedure** (ADR-004 §7.1). An owner entry records each choice and names any
+§6.1 requirement it revises; the rule is written precisely enough to implement; its
+claim is proved under H0, where a bounded search can only refute and a counterexample
+reopens the hole; an independent review accepts the proof. REFUTED needs a reviewed
+impossibility argument. The comparison is finished when every hole is CLOSED or
+REFUTED.
+
+**Order.** Suggested: H0; H3; H1, H4 and H6 as H3's choice requires; H5 and H14; H7 and
+H8; H2; H9–H12; the rest in any order. H3 decides whether the recorded design can have a
+replacement rule at all. The 2026-09-22 entry authorizes neither competing pairs nor an
+invented quorum, clock oracle or unproved delay certificate. Time-based admission (a
+proved delay certificate, or slot timing, whose family the 2026-09-16 entry lists as
+refuted for K-of-K) admits a later attempt whether or not the earlier one completed, so
+it needs an attempt-ordering rule that the recorded ranking lacks. A witness quorum
+needs an owner entry authorizing it. Competition, a lone-member fallback, widening,
+secret-share reconstruction and halting each revise a recorded requirement.
+
+**Scope.** Documentation only: no source, wire format, model, test or implementation
+status changes, and no hole is decided here. ADR-004 §6.3, README and ADR-005 §3 point
+to §7. Two independent reviews shaped the register. The first found incorrect K-of-K
+entries, a missing single-member grinding case, no ranking-manipulation hole, and
+options presented as recorded; the second found that time-based replacement lets a
+later attempt displace a completed one, and errors in several K-of-K entries and other
+holes. Both were addressed.
+`bash tools/ci_local.sh --docs-only` passes all 16 guards and `git diff --check` is
+clean on the owner's machine (desktop Linux VM).
+Like the preceding entry, these edits are left unstaged for owner review.
+
+## 2026-09-24 — H0 decided: one model for the K=2 and K-of-K comparison
+
+**Decision (owner).** Both designs are judged under the model now in ADR-004 §6.1, row
+"Common model": partial synchrony with a known Δ; clock drift bounded by ρ and not
+adversarial; fewer than a third of a shard's eligible population malicious, crashed,
+offline or flooded at any time (f < 1/3); delayed-adaptive corruption that takes effect
+only after a delay τ; flooding of members known in advance in scope, bounded in number
+and duration; the adversary's speed-up on the delay function at most α, set in H6. The
+owner chose these four options when the hole was presented; the clock and hardware
+terms were stated as defaults and not objected to.
+
+**Consequences.** K-of-K's proofs assume a fixed malicious set (Preliminaries §3.2).
+Under this model a K-of-K claim needs the time from a committee becoming known to the end
+of its term to be shorter than τ, which on the shipped presets is about an epoch
+(epoch_blocks = 100), and targeted flooding brings S-076's two-silent-member halt into
+scope. For K=2, the VDF's recorded role (delaying knowledge of the next pair) now has a
+purpose: the pair must become known less than τ before it finishes. H3's options must
+work in partial synchrony, and f < 1/3 keeps a 2/3 witness quorum available.
+
+**Scope.** Documentation only: the §6.1 row and H0's status in ADR-004 §7. Preliminaries,
+K-of-K's own proof base, is unchanged; the comparison restates K-of-K claims under this
+model where they differ. H0 proves no claim of its own and closes once an independent
+review confirms it is precise enough for the other holes.
+
+## 2026-09-24 — H3 decided: a witness quorum replaces a stalled K=2 pair
+
+**Decision (owner).** A stalled pair is replaced by the witness-quorum rule (ADR-004 §7.3
+H3, mechanism 3), now in §6.1 row "Replacement". After attempt a's deadline, a member of
+the shard's eligible population that has not received a completed attempt-a result signs
+a canonical failure statement for (chain, shard, height, a). Statements from at least two
+thirds of the population form a failure certificate, which authorizes attempt a+1's pair,
+and a block of attempt a+1 carries the certificates for every earlier attempt at its
+height. Late results: a candidate carrying certificates that cover another candidate's
+attempt outranks it, before the count criterion (§6.1 "Candidate ranking"). The owner
+thereby authorizes this quorum, which the 2026-09-22 entry had not; competing pairs, a
+clock oracle and an unproved delay certificate remain unauthorized. The shape matches the
+certified formation failure decided for K-of-K (R-15, D11).
+
+**Why this option.** Under H0 it is the only shortlisted rule in which a later pair can
+displace neither a result that reached the network in time nor one the pair withheld. The
+delay certificate and slot timing admit a later attempt on elapsed time alone and, with an
+earlier-attempt-wins order, let a colluding pair withhold its block and force a
+reorganization later; competition revises "no competing normal pairs".
+
+**Consequences.** The certificate authorizes and is not an input to the next pair's
+derivation (the Subsequent pair row, and the S-074 lesson that a set chosen by its
+assembler must not seed selection). H1 must weight and size the quorum and ensure that
+more than two thirds of a shard's population can sign in time, or choose a derived
+witness subset; H4 defines the deadline; H6 no longer needs a short-proof delay for
+replacement; H19 counts the certificate size, about two thirds of the population's
+signatures per stall. Still to prove under H0: a timely result is never displaced, a
+stalled attempt is certified within Δ of its deadline during synchrony, and a withheld
+result released later loses.
+
+**Scope.** Documentation only: ADR-004 §6.1 (a new "Replacement" row and an amended
+"Candidate ranking" row) and H3's status in §7 (DECIDED).
+
+## 2026-09-24 — H4 decided: local round start, informational timestamps
+
+**Decision (owner).** ADR-004 §6.1 row "Timing" now reads: attempt 0 starts when a node
+has received and validated the parent, and attempt a+1 when it has received attempt a's
+failure certificate; each deadline is 3B later. A node's clock decides only when it signs
+a failure statement (H3), never whether a block is valid. A block's timestamp must exceed
+its parent's, and nothing in consensus reads it.
+
+**Why.** With H3's witness quorum, validity rests on the certificate, so a local start
+does not make validity depend on local clocks, the defect that refuted the time-bucket
+designs for K-of-K (2026-08-12 "final+9"). Starting from the parent's timestamp would let
+the parent's pair move the next pair's deadlines. Checking timestamps against each
+verifier's clock, as K-of-K does (V14), would make validity clock-dependent again.
+
+**Consequences.** Nodes start up to Δ apart, which only shifts when they sign; still to
+prove under H0 that during synchrony a pair completing at least 2Δ, plus drift, before its
+own deadline cannot be certified as failed. No difficulty adjustment can read timestamps,
+so H6 must fix the delay parameter by protocol, as S009DelayHashRemoval F-2 already
+requires. K-of-K's ±30 s clock check stays a stated difference in the comparison.
+
+**Scope.** Documentation only: ADR-004 §6.1 row "Timing" and H4's status in §7 (DECIDED).
+
+## 2026-09-24 — H1 decided: stake-weighted membership, random shard assignment
+
+**Decision (owner).** ADR-004 §6.1 row "Membership": eligibility requires locked stake
+above a floor, and pair draws and witness quorums are weighted by stake; the protocol
+assigns a new member to a shard using randomness revealed after its admission; every
+member of a shard's eligible population may sign H3's failure statements, and the quorum
+is two thirds of the shard's stake; each shard's minimum population is derived from a
+network-wide faulty share below 1/3 by a stated margin, so that random assignment keeps
+every shard below 1/3 except with a stated probability.
+
+**Why.** Under an unbiased draw the chance of a bad pair depends on f alone; population
+size matters through the cost of reaching f and through how evenly faulty members spread
+across shards. Stake weighting makes splitting stake across identities useless. A member
+that could pick its shard, or grind a key into it with about S tries under modulus
+assignment, could concentrate there. Under H0's f < 1/3 with no margin, a sampled witness
+subset can exceed a third faulty by chance, so the whole population witnesses. For equal
+stakes, a 1/4 network-wide share and about 1,000 members per shard leave a given shard at
+or above 1/3 faulty with probability about 2⁻²⁹.
+
+**Consequences.** H0's per-shard bound now holds except with the stated probability. Every
+eligible member must follow its shard closely enough to sign within the deadline. Shard
+assignment needs randomness revealed after admission, which H2 and H18 must provide. A
+certificate carries up to two thirds of a shard's signatures (about 43 KB with Ed25519 at
+1,000 members), counted in H19. Admission needs a working join path; K-of-K shows that it
+can be missing by accident (S-069). K-of-K counts identities above a floor (S-010), lets
+members choose their region on EXTENDED, and caps a pool at 2K − 1 under D5a: a stated
+difference. Still to set: the eligibility snapshot rule, the margin, the probability
+target and the stake floor.
+
+**Scope.** Documentation only: a new §6.1 row "Membership" and H1's status in §7
+(DECIDED).
+
+## 2026-09-24 — H5 decided: committed, then revealed, ephemeral DH scalars
+
+**Decision (owner).** ADR-004 §6.1 row "Cryptographic contributions": each co-creator
+commits, before either reveals, to its ephemeral public share and to the hash of the
+transactions it received; each then reveals its ephemeral scalar, and any receiver
+recomputes the DH result from the two scalars and checks both commitments. The eligible
+body, the intersection of the two committed lists, is fixed before either reveal.
+
+**Why.** It meets the recorded requirement, a publicly verifiable DH-derived result bound
+to the body and context, with the existing curve code and no new proof system. Only the
+second revealer sees the result before publication; with a DLEQ proof both members would
+know it from the share exchange onward. An ephemeral scalar is not an identity key, so the
+recorded exclusion of private-key disclosure is respected. Fixing the received list in
+the commitment keeps one member from choosing the body with the result in view.
+
+**Consequences.** H7: the second revealer can still veto by withholding its scalar. H8:
+informed grinding by one member through the body is removed; a colluding pair still knows
+both contributions. H14 must define the canonical body rule over the intersection. H19:
+verification costs two scalar multiplications and hash checks per block. Still to specify
+and prove: canonical commitment and reveal bytes bound to chain, shard, parent, height
+and attempt; point and scalar checks; binding and hiding of the commitments.
+
+**Scope.** Documentation only: the §6.1 row "Cryptographic contributions" and H5's status
+in §7 (DECIDED).
+
+## 2026-09-24 — H14 decided: canonical body over the joint-receipt intersection
+
+**Decision (owner).** ADR-004 §6.1 row "Senders and body eligibility": the block body is a
+function of the two committed received-lists and the parent state (drop what is invalid
+on the parent, resolve same-sender/nonce conflicts by the smaller data hash, order
+canonically, fill to the block cap). The censorship guarantee is the joint-receipt bound.
+
+**Why.** A body chosen after the reveals would let one member shape it with the result in
+view (H8). The union rule would drop the recorded "received by both co-creators".
+
+**Consequences.** A transaction that every faulty member omits waits for the first fully
+honest pair: about 1/(1 − f)² heights on average for an unbiased draw (2.25 as f
+approaches 1/3), with probability (1 − (1 − f)²)^k of staying out for k heights, below
+10⁻⁵ for 20. K-of-K's union rule lets one honest member commit a transaction, but its body
+is not committee-signed (Censorship §0): a stated difference. The canonical order decides
+who gets in when the intersection exceeds the cap, so it needs care (fee priority against
+neutrality), and H11 must account for padding within the intersection. Still to specify
+and prove: the canonical order and cap, and the bound under bias from H2, H7 and H8.
+
+**Scope.** Documentation only: the §6.1 row "Senders and body eligibility" and H14's
+status in §7 (DECIDED).
+
+## 2026-09-24 — H6 decided: a class-group VDF that keeps grinding blind
+
+**Decision (owner).** The delay's job is to keep grinding blind: on the fastest admitted
+adversary hardware (speed-up α, H0) it outlasts a pair's choosing window of 3B, so no pair
+can evaluate candidate contributions or bodies before its deadline. The pair for a height
+is therefore derived from a VDF output over the DH result d > 3α heights earlier, recorded
+on chain with its proof before it is needed. The construction is a class-group VDF with
+short Wesolowski-style proofs and no trusted setup. ADR-004 §6.1 row "Subsequent pair"
+records this.
+
+**Why.** Without blind trials a colluding pair (about f² of heights, up to 1/9) can
+evaluate candidates in parallel before committing, pick a colluding successor, and repeat
+until it holds the shard. Blindness also leaves the second revealer's veto (H7) blind. An
+RSA group needs a modulus nobody can factor; whoever held the factors could compute every
+output instantly, a trusted setup the no-backdoor constraint argues against. The in-tree
+AES/SHA-256 evaluator has no hardness argument (K2_VDF_Soundness §1) and repeats the S-009
+defect, and checking blind-length delays by recomputation would cost every node about 3α
+cores continuously.
+
+**Consequences.** The adversary learns each pair about d·B before it acts, so H0's τ must
+exceed that. With informational timestamps (H4) and no migrations, the iteration count is
+frozen at genesis, and its margin must cover hardware gains over the chain's life. New
+from-scratch big-integer and class-group code enters the C99 crypto library under
+CRYPTO-C99-SPEC. S009DelayHashRemoval F-2 applies: the attacks stopped are colluding-pair
+grinding and the last-revealer veto; the iteration count is protocol-derived and in the
+genesis; verification cost does not grow with the delay. Still to specify and prove: the
+group, proof and assumption; α and the lifetime margin; the iteration count; d; who
+computes and publishes each output and proof, and what happens if nobody does; the
+per-block verification cost (H19).
+
+**Scope.** Documentation only: the §6.1 row "Subsequent pair" and H6's status in §7
+(DECIDED).
+
+## 2026-09-24 — Session handoff: earlier answers and proposal dispositions
+
+The owner asks whether this session's decisions and answers to design-hole questions
+are saved so another agent can continue. The comparison in ADR-004 §6 preserves the
+agreed requirements; its live H0–H21 register in §7 records the subsequent questions,
+choices and proof status. This entry fills gaps in the earlier discussion's rationale.
+It is a substantive continuation record, not a verbatim transcript or a new protocol
+approval. Source task: `01a0c659-2a1e-7df3-bab1-928ff93957c6`, "Review Gemini sharding design".
+
+**Read later decisions before earlier answers.** The H entries below the 2026-09-23
+restoration record take precedence where they revise the earlier discussion. In
+particular, H1 distinguishes validator assignment from account modulus routing; H3
+now selects a witness failure certificate and its ranking priority; H4 selects local
+starts and informational timestamps; H5 selects committed/revealed ephemeral scalars;
+and H14 selects the body-policy direction. Earlier statements that these mechanism
+families were unselected are historical. DECIDED does not mean CLOSED or implemented:
+use each hole's remaining details and proof obligations. This note does not re-review
+or certify those newer choices, and does not modify them.
+
+### Earlier discussion coverage
+
+| Discussion | Answer or disposition to preserve |
+|---|---|
+| Incomplete cooperation with no candidate | A required silent party can leave no completed candidate at all; inventing a reveal or treating one contribution as completion is not a remedy. Local timeout ends an attempt. Defining subsequent-pair authority and late-result treatment is separate; H3/H4 now select that direction, with proof still required. |
+| A VDF satisfying construction, freshness and timing requirements | Class-group repeated squaring with Wesolowski proofs was suggested for evaluation, not adopted. The three distinct requirements were a specified construction/assumptions, a fresh context-bound challenge, and a timing model covering hardware advantage, head start and delivery. No VDF name alone discharged all three; the remaining work was a protocol obligation, not a claim that a new primitive must be invented. Follow H6's current choice/status. |
+| Larger key/group size and maximum iterations | The earlier answer distinguished cryptographic group size from iteration count. Both must fit supported evaluation, proof, verification and communication budgets; maximizing both is not itself a security argument. The illustrative inequality T/R_max − H >= W assumed a maximum adversarial rate R_max and bounded head start H for cooperation window W. It was not an adopted production rule and preceded the correction that the VDF does not authorize replacement. |
+| Hardware-based calibration | The owner proposed manual calibration for a government configuration and calibration from the best node in an open configuration. The answer treated public performance as evidence, not a bound on private adversarial hardware: a fast node can conceal its capacity. Any adopted calibration needs explicit margins, supported honest hardware and common parameters. No automatic fastest-node rule, parameter values or exception to no-migrations was selected by that exchange; H6/H21 retain the relevant decisions and obligations. |
+| Economic irrationality of predicting co-creators | Early knowledge of a fixed pair does not select that pair, forge its signatures or authorize early production. The assistant's earlier claim that the VDF itself authorized replacement was corrected by the owner. Targeted denial of service and influence over inputs/withholding remain separate questions; an assumed lack of economic incentive was not accepted as a security proof. |
+| TCP timeout and the 1:3 choice | The earlier answer distinguished transport delivery from application cooperation: a peer may acknowledge TCP while withholding its contribution. No universal TCP timer was adopted as consensus authority. The owner then explicitly chose configurable B with total attempt timeout 3B, not B plus 3B. TCP acknowledgments or unrelated traffic do not constitute completion of the required cooperation. H4 now specifies when local deadlines start and what clocks affect. |
+| Current time, registered keys and ephemeral shares | The owner clarified registered long-term public keys **alongside** the chosen ephemeral contributions, not replacing them. The earlier answer noted that known long-term DH pairs can be precomputed, a fixed time may be predictable, and creator-chosen time can offer candidate choices. Neither adding a clock value nor naming an ephemeral share proves freshness or absence of grinding. H4's later informational-timestamp decision supersedes any proposal to use that timestamp in consensus randomness; H5/H7/H8 govern the remaining construction and influence questions. |
+| Forks, branches and signed transactions | A fork gives alternative histories; choosing one does not erase the signed bytes of the others. A transaction may cease to be effective in a node's selected history, requiring dependent transactions to be replayed/revalidated. Signature validity authenticates an author and does not prevent that author signing conflicting messages. This recovery issue exists on one chain too; sharding adds dependencies across histories. |
+| Propagating all blocks to all shards | The owner proposed this as a way to expose competing histories. The answer was that it can supply recovery data, but does not itself select a history or execute dependency correction. Every recipient would receive aggregate block traffic; storage depends on retention. No compulsory all-to-all dissemination/retention policy or O(1) total-network claim was adopted. Follow H16/H18/H19. The owner's correction to discuss transactions, not an invented separate credit/approval mechanism, remains in force. |
+| Proper versus faulty nodes | "Proper" means following the validation/selection rules. The same observable omission or conflicting output is treated alike whether caused by intent, hardware or networking. Local recovery does not require attributing motives. Its progress claim still needs explicit delivery and participation assumptions; delayed data cannot be treated as data already seen. H0 now supplies the comparison model. |
+| Sharding versus partitioning | This was a terminology question, not authorization to rename the repository or change the design. Partitioning is the broader division of work/state; the specific ownership, validation and cross-shard rules determine the architecture. Existing sharding names remain. |
+| Properties emerging from the design | The owner asked whether remaining properties could follow from analysis of existing rules. That is a request to derive them before adding mechanisms, not a decision that they are already proved. A derivation must name its assumptions and actual transitions; a bounded simulation can falsify it but a green result alone cannot close it. Use the explicit H-register obligations rather than inferring blanket closure from "move on" or acceptance of a narrower answer. |
+
+The final rules and their superseded alternatives are also preserved in the earlier
+entries: distinct valid included transactions rather than network-message counts;
+full numeric headers rather than header hashes; transaction-data-hash preference only
+at assembly/requeue; shared receipt eligibility; noninteractive senders; recoverable
+local acceptance; DSF recovery testing; and large shard-local producer populations.
+The assistant's sender-unanimity/offline-approval objection was withdrawn, the
+same-body branch illustration did not establish reachable competing continuations,
+and the canonical account modulus was already defined rather than a new choice.
+None of those earlier misinterpretations is a reason to reopen an agreed requirement.
+
+### Continuation entry points
+
+1. Read the 2026-09-23 restoration entry here, then every later owner decision that
+   applies to the item being worked on. Older implementation and CI claims are dated
+   history, not evidence about today's restored working tree.
+2. Read ADR-004 §§6–7 for current requirements, the K-of-K comparison and H statuses;
+   read ADR-005 §3 for detailed sharding/recovery requirements, applying later H
+   decisions where earlier proposal wording has been superseded.
+3. Check `K2_VDF_Soundness.md`, FB74 (`tla/K2LocalAttempt.tla`) and DSF-SPEC §10.4 for
+   actual local/model evidence; use PROTOCOL and SECURITY for the C++ baseline and
+   its open findings. Do not turn finite-model fixtures into production guarantees.
+4. Continue with the outstanding details/proofs in the chosen H item, preserving
+   recorded owner choices. Do not silently substitute a different election, ranking,
+   sender-participation or settlement model. Port-then-retire remains the independent
+   C99 migration rule.
+
+The staged restoration and concurrent H-register work are preserved. This handoff
+adds no implementation, test rule, model, proof closure or commit authorization.
+
+## 2026-09-24 — H7 decided: attested suspension for withholding
+
+**Decision (owner).** ADR-004 §6.1 row "Replacement" now adds: co-creators broadcast their
+commitments, reveals and signatures to the shard; each failure statement also names the
+member whose messages the witness did not receive by the deadline; when two thirds of the
+shard's stake name the same member, it is suspended for a window, with no stake deduction.
+A crashed member is treated the same way.
+
+**Why.** After H6 the second revealer cannot see the next pair before its deadline, so its
+veto no longer steers the election, but a faulty member can still stall every attempt it
+sits in: about 1/(1 − f)² attempts per height, and roughly 5B per height instead of B, if
+every faulty member stalls. Because replacement pairs are known in advance, a stall can
+also hand a height to a known colluding pair (≈ f²). Only the partner sees who withheld,
+so attribution needs the witnesses. The shape matches the suspension decided for K-of-K
+(R-16, D12); suspending both members would let an attacker remove an honest partner at
+the cost of its own seat.
+
+**Consequences.** Every commitment, reveal and signature is broadcast to the shard (H19
+counts it). Still to specify and prove: the suspension window; phase deadlines under which
+an honest member is never named for a message it could not yet send, such as a reveal
+delayed by its partner's late commitment; that during synchrony an honest member that sent
+in time is never named by two thirds; and the remaining production shift, now paid for
+with the staller's seat.
+
+**Scope.** Documentation only: the §6.1 row "Replacement" and H7's status in §7 (DECIDED).
+
+## 2026-09-24 — H8 decided: longest history first, delay sized for a stall margin
+
+**Decision (owner).** ADR-004 §6.1 row "Candidate ranking": the longer valid history wins,
+and the same-height rules (H3's certificate criterion, then count, then header) decide only
+between histories of equal length. Row "Subsequent pair": the delay also outlasts k
+stalled attempts at the next height.
+
+**Why.** After H5, H14 and H6 a single faulty member has no informed choice and a colluding
+pair's trials are blind. The remaining lever is equivocation with delayed release: a
+colluding pair signs several candidates for its attempt, publishes one, evaluates the
+delay privately and later releases a better sibling, padded to outrank the first. Under
+longest history first, a withheld sibling loses once the published block has a child;
+colluders can delay that child only by stalling the next height's attempts, each stall
+costing the staller its seat (H7). With the delay sized for k stalls, the lever needs k
+consecutive colluder-containing pairs, about (2f − f²)^k (about 0.003 for k = 10 as f
+approaches 1/3). A seen-certificate would close the lever deterministically but is the
+irreversible network-wide certificate §6.1 excluded and costs two thirds of the shard's
+signatures per block.
+
+**Consequences.** This fixes the core of H10: with a fixed delay per block, the most
+validated work is the longest valid history, matching ADR-004 §1. A private fork cannot
+use H3's replacement, since the adversary holds less than a third of the witness stake, so
+it grows only where every pair on it is fully colluding; to prove with H12. k joins α, τ
+and d as parameters, and a larger k lengthens d and therefore the time each pair is known
+in advance. Still to prove: blind choices for one member and for a colluding pair, the
+release bound, and the bias left over.
+
+**Scope.** Documentation only: the §6.1 rows "Candidate ranking" and "Subsequent pair",
+H8's status (DECIDED) and a partly-decided note on H10 in ADR-004 §7.
+
+## 2026-09-24 — H2 decided: public stake-weighted draw, VDF output carried in block h+d−1
+
+**Decision (owner).** ADR-004 §6.1 row "Subsequent pair": seed = hash(domain tag, chain,
+shard, height, attempt, VDF output); two distinct members are drawn by stake without
+replacement from the eligibility snapshot, the first as Aggregator and the second as
+Contributor. This is deterministic sampling, not a VRF (ADR-005 §3.2). The VDF output and
+proof for height h must be in block h+d−1, which is invalid without them; anyone may
+compute and gossip them.
+
+**Why.** It keeps the recorded "exactly one elected pair" derived from agreed state, with
+H6's delay as the privacy mechanism. Private VRF sortition would hide the pair until it
+acts, but needs a verified VRF implementation and a rule for a winner who stays silent,
+and changes how the single pair is established. Requiring the output in one specific
+block leaves no gap in which the next pair cannot be derived; a pair that lacks the
+output stalls and is replaced under H3.
+
+**Consequences.** Replacement attempts reuse the height's VDF output with the next attempt
+index, so their pairs are known in advance (H7). Still to specify and prove: the domain
+tag and canonical encoding, the weighted-sampling algorithm with test vectors, that the
+draw is unbiased given H6's blindness and H8's release bound, and H1's shard-assignment
+randomness from the same outputs.
+
+**Scope.** Documentation only: the §6.1 row "Subsequent pair" and H2's status in §7
+(DECIDED).
+
+## 2026-09-24 — H9 decided: a block's identity is its signed content
+
+**Decision (owner).** ADR-004 §6.1 row "Candidate ranking": a block's header, for ranking
+and for its child's parent commitment, is the content its pair signs. Pair signatures and
+witness signature sets travel outside it, and a certificate is referenced by the height
+and attempt it certifies. "The smaller full header" is the smaller signed header content,
+read as a big-endian number. One new canonical big-endian fixed-width header replaces the
+212-byte and 120-byte prototype formats; it has no work field, since with a fixed delay per
+block work equals height.
+
+**Why.** A signer can produce many valid signatures, and anyone holding extra failure
+statements can swap which two-thirds subset a certificate carries. If either entered the
+compared bytes or the parent commitment, parties other than the pair could change a
+block's rank or identity, the defect recorded for the K-of-K block hash (S-029, S-102).
+
+**Consequences.** The remaining header freedom belongs to the pair alone, through the
+content it signs, which is H13's equivocation and is bounded by H8. Still to specify and
+prove: the field list and encoding with test vectors, and that the parent commitment
+covers content only.
+
+**Scope.** Documentation only: the §6.1 row "Candidate ranking" and H9's status in §7
+(DECIDED).
+
+## 2026-09-24 — H10 decided: fork-point comparison, unbounded correction depth
+
+**Decision (owner).** ADR-004 §6.1 row "Candidate ranking": with H8's longest-history
+rule, histories of equal length are compared at their first differing height by the
+same-height rules (certificate, count, signed-header value), and a longer valid history
+wins however far back it diverges; settlement is a confirmation depth derived in H12.
+
+**Why.** A fork-point comparison does not change as both histories grow by the same amount
+and contains the owner's smaller-successor rule; comparing tips would let the winner flip
+and give a withheld tip leverage. A depth bound would make local acceptance irreversible
+after D blocks, the finality §6.1 excluded, and would split the network for good if a
+partition outlasted D·B.
+
+**Consequences.** Every correction, however deep, goes through H17's recovery, and users
+need H12's confirmation depth. Still to prove: every honest node computes the same total
+order from the same candidates, and the bounded model covers competing descendants
+(`K2_MODEL_UNSUPPORTED_BRANCHING`).
+
+**Scope.** Documentation only: the §6.1 row "Candidate ranking" and H10's status in §7
+(DECIDED).
+
+## 2026-09-24 — H11 decided: keep the count criterion, with its bound stated
+
+**Decision (owner).** The "more distinct valid included transactions" criterion stays.
+After H8 (length first), H9 (content-only identity) and H10 (fork-point comparison),
+count and header decide only between equal-length histories whose fork-point blocks have
+the same certificate status: a colluding pair's own siblings, bounded by H8, or honest
+branches after a partition, where a sender can choose the surviving branch at a fee
+cost. Header grinding is left to the pair alone.
+
+**Why.** Dropping count would remove padding but revise the recorded rule and resolve
+partitions by an arbitrary header value; the remaining manipulation is narrow and priced.
+
+**Consequences.** H20 must make the fee cost of steering a partition explicit. Still to
+prove: that these are the only cases in which count or header decide.
+
+**Scope.** Documentation only: H11's status in ADR-004 §7 (DECIDED); §6.1 is unchanged.
+
+## 2026-09-24 — H13 decided: equivocation is recorded and suspends both members
+
+**Decision (owner).** ADR-004 §6.1 row "Replacement" now adds: two valid signatures by one
+member over different signed contents for the same (chain, shard, height, attempt) are
+equivocation evidence. The evidence goes on chain, capped and deduplicated per block, and
+both named members are suspended for a window, with no stake deduction; economic
+consequences, if any, stay with the L2 bond (D22). Members record their last signed
+(height, attempt) durably before signing.
+
+**Why.** K-of-K has no sound predicate, because its round identity is signer-chosen and an
+honest node's openings match a splitter's (R-1). Here the attempt index is canonical,
+since attempt a is valid only with certificates for every earlier attempt, and the content
+follows from the two commitments (H5, H14), so an honest member signs one content per
+(height, attempt). A member that loses its signing record in a crash produces the same
+evidence and, under the identical-treatment rule, is treated the same. Consistent with D4:
+L1 stake is never slashed for equivocation.
+
+**Consequences.** Equivocation, the only header freedom left after H9, now costs both
+members their seats, which strengthens H8's bound. Still to specify and prove: the
+evidence format, cap and window; that an honest member with a durable signing record never
+satisfies the predicate; and that results of different attempts are never taken for
+equivocation.
+
+**Scope.** Documentation only: the §6.1 row "Replacement" and H13's status in §7
+(DECIDED).
+
+## 2026-09-24 — H12 decided: settlement depth for 2⁻⁴⁰ over the chain's life
+
+**Decision (owner).** New ADR-004 §6.1 row "Settlement": a block is settled once z blocks
+extend it, with z set so that a reversal anywhere in the chain's life has probability at
+most 2⁻⁴⁰ against an adversary that waits for a run of fully colluding pairs: z = 20 as f
+approaches 1/3 and 15 at f = 1/4, for 10⁸ heights. d must be at least z + 2, failure
+statements name the parent block (row "Replacement"), and light clients apply the same z.
+
+**Why.** A private branch can never use a replacement, since the adversary lacks two
+thirds of the witness stake, and for its first d heights it must use the public
+schedule's pairs, whose honest members sign one content per attempt. Reversing a payment
+therefore needs z + 2 consecutive fully colluding pairs, each equivocating and losing its
+seat (H13). Because pairs are known d heights ahead, a patient adversary can wait for such
+a run, so z covers the chain's life rather than a single block (a per-block target would
+give z = 11). Binding failure statements to the parent keeps a certificate from being
+reused on another branch.
+
+**Consequences.** K-of-K comparison: under the common model, a committee drawn from a pool
+of at most 2K − 1 (D5a, decided but not landed) needs a Byzantine majority of the pool to
+fork, which f < 1/3 excludes, so K-of-K settles in one block; without D5a's cap its pool is
+unbounded (S-054). This is a stated K-of-K advantage in settlement latency. Still to prove
+under H0: convergence once synchrony resumes, the honest chain's growth rate, the reversal
+bound, and the chain-life assumption behind z.
+
+**Scope.** Documentation only: a new §6.1 row "Settlement", an addition to the row
+"Replacement", and H12's status in §7 (DECIDED).
+
+## 2026-09-24 — H16 decided: availability-gated full bodies, windowed retention
+
+**Decision (owner).** New ADR-004 §6.1 row "Availability": for a node, a block counts
+toward history length, and can be extended or witnessed, only once the node holds its full
+body; honest nodes relay every body they hold. Every node keeps full bodies for at least
+z + d heights plus periodic state snapshots; archive nodes keep all history, and a deeper
+correction fetches history from them.
+
+**Why.** A header whose body is withheld then never counts, and a selectively delivered
+body causes a temporary split that longest-history-first resolves once the body spreads.
+Data-availability sampling would add a large coding and cryptographic surface. Keeping
+everything on every node is simplest but grows without bound; z + d covers settlement and
+the VDF lookahead.
+
+**Consequences.** Witnesses sign failure statements only for blocks they cannot obtain in
+full, which is consistent with H3. Unbounded correction depth (H10) relies on archive
+nodes and snapshots. Still to specify and prove: the snapshot interval and format, that a
+withheld body never counts, that selective delivery resolves once the body spreads, and
+what a node does when no archive is reachable. K-of-K's body is outside the committee
+signatures (Censorship §0); here the body is a function of the signed commitments (H14).
+
+**Scope.** Documentation only: a new §6.1 row "Availability" and H16's status in §7
+(DECIDED).
+
+## 2026-09-24 — H17 decided: snapshot and replay with an atomic head switch
+
+**Decision (owner).** ADR-004 §6.1 row "Local correction": a node switching histories
+loads the latest snapshot at or below the fork point, replays the winning branch through
+the normal apply path and requeues abandoned transactions for revalidation; it writes the
+new state fully and then moves its head in one durable step, so a crash leaves either the
+old head or the new one.
+
+**Why.** With one code path, apply, recovery equals a fresh replay almost by construction;
+an undo journal would need an exact inverse for every transaction type, a second path to
+prove against apply. The cost is replay time bounded by the snapshot interval (H16).
+
+**Consequences.** Still to specify and prove: the snapshot format and interval; that the
+recovered state equals a fresh replay of the selected history over unbounded histories,
+extending the bounded model (DSF-SPEC §10.4); crash safety at every step; and that
+requeueing preserves conservation. K-of-K reorganizes only its head (S-048), atomically
+over an apply failure (S-102), and a snapshot-bootstrapped node cannot follow the chain
+(S-075).
+
+**Scope.** Documentation only: the §6.1 row "Local correction" and H17's status in §7
+(DECIDED).
+
+## 2026-09-24 — H15 decided: transfers and membership, length-prefixed signed bytes
+
+**Decision (owner).** New ADR-004 §6.1 row "Transactions": the K=2 design carries
+transfers, intra-shard and cross-shard (H18), and the membership transactions H1 needs
+(admission with stake, unstake, exit); the other K-of-K types (DApps, confidential
+transfers, governance, audit keys) are stated differences in the comparison. The signing
+preimage starts with a domain tag, the genesis hash and the shard id (D23's identity),
+and every variable-length field is length-prefixed.
+
+**Why.** The comparison concerns consensus; carrying all 17 K-of-K types would be a large
+design effort without changing it. A length-prefixed preimage is injective by
+construction, so the S-117 class cannot arise, and leaves room for additive types.
+
+**Consequences.** Still to specify and prove: the field lists, the injectivity argument
+and test vectors. K-of-K's signing bytes bind no chain identity (S-103; D23 not landed)
+and are not injective with a NUL in `to` (S-117): stated differences.
+
+**Scope.** Documentation only: a new §6.1 row "Transactions" and H15's status in §7
+(DECIDED).
+
+## 2026-09-24 — H18 decided: cross-shard credit after settlement, ordered per source
+
+**Decision (owner).** ADR-004 §6.1 row "Shards and dependencies": shard B credits a
+transfer from shard A only once A's block is settled (z deep, H12), proved by A's
+headers, pair signatures, certificates and a Merkle path; each A→B transfer carries a
+sequence number for that shard pair, and B applies them in order, exactly once. The
+revalidation rule for dependents stays, for corrections deeper than z.
+
+**Why.** Crediting only settled history keeps a correction on A from reaching B except
+with the settlement probability, instead of cascading corrections across shards, which
+would be the hardest part of the design to prove. The proof is A's own chain, so no
+receipt approval or sender voting is added. Per-pair sequence numbers make replays and
+gaps visible without a growing set of consumed receipts.
+
+**Consequences.** Cross-shard transfers take about z blocks. B's nodes verify A as light
+clients (H19). A stuck transfer holds up later ones from the same source. Still to specify
+and prove: the proof format; global conservation with per-shard accounting (debit on A,
+credit on B); exactly-once crediting across retries, crashes and corrections; and handling
+of a correction deeper than z. K-of-K: bundles are unauthenticated (S-064), and the inbound
+credit mints on the destination, so per-shard supply is not conserved (S-096).
+
+**Scope.** Documentation only: the §6.1 row "Shards and dependencies" and H18's status in
+§7 (DECIDED).
+
+## 2026-09-24 — H19 decided: verified light clients, plain Ed25519 certificates
+
+**Decision (owner).** New ADR-004 §6.1 row "Verification": each epoch's header commits a
+stake-sum Merkle root of the eligibility snapshot, so a light client checks each pair's
+stake-weighted draw with O(log N) proofs, the pair signatures and the VDF proof per block,
+and certificates on stalls, and treats a block as settled at depth z. Shards verify each
+other the same way (H18). Failure certificates are plain lists of Ed25519 signatures.
+
+**Why.** Earlier decisions keep a full node's per-block work small: two pair signatures,
+the commitment and DH checks (H5), one short VDF proof (H6), the transactions, and a
+certificate only on stalls. A verified light client serves small devices and H18's
+cross-shard proofs without trust. Aggregate signatures would shrink certificates but need
+new pairing-based cryptography written from scratch.
+
+**Consequences.** A certificate is about 43 KB at 1,000 members, plus per-signer stake
+proofs for light clients, and occurs only on stalls. Still to specify and measure: the
+per-block verification cost, the dissemination cost per height and per stall, and the
+light client's trust assumptions and proof sizes. K-of-K's determ-light checks block
+signatures against the committee with a quorum floor (S-100).
+
+**Scope.** Documentation only: a new §6.1 row "Verification" and H19's status in §7
+(DECIDED).
+
+## 2026-09-24 — H20 decided: subsidy and fees to the pair; duties are unpaid
+
+**Decision (owner).** New ADR-004 §6.1 row "Incentives": each completed block pays a
+subsidy and its fees, split equally between the two co-creators, and a stalled attempt
+earns nothing. Witnessing, carrying the VDF output (H2) and relaying bodies are duties of
+eligibility, paid only through each member's expected share of block rewards; failure
+statements are never paid.
+
+**Why.** Misbehaviour already costs a seat (H7, H13); this makes honest work pay, and a
+member earns more by committing everything it received. Burning fees would make padding
+always costly but give members no reason to include transactions. Paying per failure
+statement would reward certifying failures that did not happen, so enough greedy
+witnesses could displace honest results.
+
+**Consequences.** A colluding pair's self-padding costs it nothing, a case H8 bounds; a
+third-party sender steering a partition pays real fees (H11). K-of-K also keeps subsidy
+and fees (O-4, D3); its S-011 bound was narrowed on 2026-09-17 to the stake floor's entry
+cost. Still to specify and prove: the subsidy schedule, and that cooperation pays under H0.
+
+**Scope.** Documentation only: a new §6.1 row "Incentives" and H20's status in §7
+(DECIDED).
+
+## 2026-09-24 — H21 decided: deployment after the proofs; a genesis consensus field
+
+**Decision (owner).** New ADR-004 §6.1 row "Deployment": no chain runs K=2 until its holes
+are closed, and which deployments run it is decided from the comparison's result. A
+genesis consensus field names the protocol: K-of-K is the default and stays out of the
+genesis hash, so existing genesis hashes are unchanged, and K=2 is a non-default value
+mixed into the hash, as `crypto_profile` is.
+
+**Why.** Deployment is an outcome of the comparison, not an input to it. Under no
+migrations a chain's consensus is fixed at genesis, so it must be part of the chain's
+identity; treating it as a default-omitted field keeps every existing genesis hash.
+
+**Consequences.** With this entry every K=2 design hole in ADR-004 §7 is DECIDED; each
+closes only when its proof passes independent review (§7.1). The design as decided:
+stake-weighted open membership with random shard assignment and a derived minimum
+population (H1); pairs drawn publicly by stake from a class-group VDF output d > 3α heights
+back (H2, H6); committed, then revealed, DH scalars fixing a canonical body over the joint-
+receipt intersection (H5, H14); a two-thirds witness quorum for replacement, with attested
+suspension for withholding and equivocation (H3, H7, H13); local round start and
+informational timestamps (H4); longest history first, compared at the fork point, with a
+content-only header (H8–H11); settlement at depth z for 2⁻⁴⁰ over the chain's life (H12);
+availability-gated bodies with windowed retention, snapshot recovery, and cross-shard
+credit after settlement (H16–H18); verified light clients (H19); subsidy and fees to the
+pair (H20). Still to specify: the field's encoding in DGC1 and its place in the genesis
+hash, with test vectors.
+
+**Scope.** Documentation only: a new §6.1 row "Deployment", H21's status and the status
+line of ADR-004 §7.
+
+## 2026-09-24 — Review of the decided K=2 design: eight holes reopened
+
+**Review.** An independent adversarial review of the decisions of 2026-09-24 (ADR-004 §6.1
+and §7) found five high-severity counterexamples, so under §7.1 their holes reopen:
+flooding without a rate stalls every attempt and, through H7, suspends honest stake (H0,
+H7, H8); settlement fails under asynchrony with no corrupt member, and the lookahead in
+heights outlasts τ during long stalls (H12, H18); adaptive corruption and exit-and-rejoin
+defeat the per-shard bound derived from random assignment (H1); keys of former members
+enable a long-range attack under unbounded correction depth, and the first d pairs derive
+from a seed known at genesis publication (H10); and H8's length-first rule lets a late
+attempt-a block win once extended, contradicting H3's late-result guarantee (H3). The
+review also found that an equal-length branch wins by count, so the settlement run is
+z + 1, and that H0 lacks several parameters. It judged H0 not yet precise enough.
+
+**Corrections applied without changing any decision's intent.** H2: the output over block
+h's DH result selects the pairs for height h+d, and the eligibility snapshot for height
+h+d is fixed no later than height h − 1. H13: the predicate covers header signatures only,
+keyed on (chain, shard, height, attempt, parent), and suspends each member whose two
+signatures the evidence carries. H4: the attempt clock starts with the parent that
+carries the needed VDF output. H16: at most two bodies are relayed per (height, attempt,
+parent). §7.2 lists Candidate ranking among H8's possible revisions. A certificate at
+1,000 members is about 44 KB with signer indices, not 43 KB.
+
+**Next.** The reopened holes go back to the owner; confirmed figures stand (2.25 attempts,
+(5/9)²⁰ ≈ 7.8 × 10⁻⁶, about 4.75B per height under maximal stalling, z = 11 for a per-block
+target).
+
+**Scope.** Documentation only: ADR-004 §6.1 rows "Subsequent pair", "Replacement",
+"Timing" and "Availability", and the statuses and notes in §7.
+
+## 2026-09-24 — H10, H12, H18 decided again: finality checkpoints for settlement
+
+**Decision (owner).** Every E heights, members holding at least two thirds of the shard's
+stake vote a checkpoint final in the style of Casper FFG, with votes linking a finalized
+source checkpoint to a target. A finalized checkpoint is never reverted; fork choice runs
+only above the latest one; a payment is settled, and a cross-shard transfer creditable,
+once a finalized checkpoint covers its block. A new node, or one offline longer than the
+unbonding period, starts from a recent finalized checkpoint obtained from a source it
+trusts. ADR-004 §6.1 rows "Settlement", "Local correction", "Candidate ranking" and
+"Shards and dependencies" record this.
+
+**Why.** The review showed that a longest-history rule is safe only while the network is
+synchronous: an isolated set of honest attempt-0 pairs can extend a block a victim then
+treats as settled, while the certified majority builds a longer chain that later replaces
+it. It also showed a long-range attack with keys of former members under unbounded
+correction depth. Checkpoints keep settled blocks safe in any network condition under
+f < 1/3, because two conflicting finalities need a third of the stake to break a voting
+rule, which leaves evidence; and they stop correction at the last checkpoint. The
+alternative, synchrony-only settlement with forward-secure keys, would have left K-of-K's
+asynchronous safety as an unanswered advantage.
+
+**Revision recorded.** This revises the §6.1 exclusion of an irreversible network-wide
+certificate: acceptance above the latest checkpoint stays recoverable, checkpoints do
+not. It also revises H10's unbounded depth and replaces H12's depth-z settlement.
+
+**Consequences.** Finalization needs two thirds of the stake online and voting, as H3
+already does. Still to specify and prove: the voting rules and accountable safety; the
+liveness of finalization during synchrony; the interval E, the unbonding period and the
+weak-subjectivity window. Settlement latency is about E heights plus the voting time,
+against one block for K-of-K.
+
+**Scope.** Documentation only: four §6.1 rows and the statuses of H10, H12 and H18 in §7.
+
+## 2026-09-24 — H1 decided again: per-shard f < 1/3 is an explicit assumption
+
+**Decision (owner).** Each shard's faulty stake is assumed below 1/3 at all times, as an
+explicit assumption applied equally to both designs, K-of-K's pools included. Random
+shard assignment stays as defence in depth; the derivation of a per-shard minimum from a
+network-wide margin is withdrawn (ADR-004 §6.1 row "Membership").
+
+**Why.** The review showed that the derivation fails under the decided corruption model:
+members are never reassigned, so the adversary can corrupt one shard's members after
+assignment, and exit and re-admission reach a chosen shard at the cost of time; even for
+a static adversary the per-snapshot figure of 2⁻²⁹ is about 2⁻⁹ across 100 shards and 10⁴
+snapshots. A periodic reshuffle with cuckoo-style joins would derive the bound, but at the
+cost of re-syncing members every period and a substantial new design.
+
+**Consequences.** Under the same assumption, a K-of-K pool of at most 2K − 1 = 5 holds at
+most one faulty member, so the settlement comparison applies H0 equally to both designs.
+Still to specify: the minimum population, the assignment randomness, a membership message
+carried under finality, and an unbonding period longer than the weak-subjectivity window.
+
+**Scope.** Documentation only: the §6.1 row "Membership" and H1's status in §7.
+
+## 2026-09-24 — H7 decided again, H0 in part: silence costs only the reward; flooding is rate-bounded
+
+**Decision (owner).** Silence is not penalized beyond the lost reward: a stalled attempt
+earns nothing (H20), failure statements no longer name members, and only H13's
+equivocation evidence suspends a member (ADR-004 §6.1 row "Replacement"). In H0,
+targeted flooding is rate-bounded: at most b members per window T, with liveness and the
+H8 and H14 bounds stated as functions of b and T (row "Common model"; the rest of H0 is
+still open).
+
+**Why.** Pairs are known in advance, so flooding one member of each pair in turn stalls
+every attempt; under attested suspension each flood also suspended an honest member,
+since a flooded member cannot be told apart from a withholder, and suspended honest stake
+pushed the effective faulty share past 1/3. A staller could also time its last message so
+that no member was named by two thirds. Equivocation evidence cannot be produced by
+flooding, so it remains the only suspending fault.
+
+**Consequences.** A colluder's stalls now cost only the reward, so H8's margin must cover
+them and the flooding budget. The attested-suspension text of the earlier H7 entry is
+superseded. Still to prove: the liveness bound as a function of f, b and T, for both
+designs (for K-of-K, S-076's two-silent-member halt).
+
+**Scope.** Documentation only: the §6.1 rows "Replacement" and "Common model", and H7's
+status in §7.
+
+## 2026-09-24 — H3 and H8 decided again: certificate first at the fork point; k covers flooding
+
+**Decision (owner).** Where two histories diverge at height h, a block there carrying
+failure certificates, bound to their common parent, that cover the other block's attempt
+wins regardless of length; otherwise the longer valid history wins, and equal lengths are
+compared at the fork point by count and then header (ADR-004 §6.1 row "Candidate
+ranking"). H8's stall margin k covers the stalls that colluder-containing pairs and
+flooding (b per T) can jointly produce while the delay runs (row "Subsequent pair").
+
+**Why.** Under length first, a late attempt-a block that the next pair extended before
+attempt a+1's block arrived would win despite the certificate, breaking H3's late-result
+guarantee. Certificate first keeps it and resolves a partition toward the certified
+majority. It is safe with finality checkpoints: below the last checkpoint no history can
+change, and above it a certificate needs two thirds of current stake. The equivocation
+siblings of H8 share an attempt, so the length rule still governs them. Since stalls now
+cost a colluder only its reward (H7), the margin must include them and the flooding
+budget.
+
+**Consequences.** This supersedes the ranking order recorded in the H8 entry (length
+first) and the H3 entry's certificate-before-count placement. Still to prove: a late
+original never beats a certified replacement at their fork point, certificates cannot be
+reused across branches, and the release bound as a function of f, b, T and k.
+
+**Scope.** Documentation only: the §6.1 rows "Candidate ranking" and "Subsequent pair",
+and the statuses of H3 and H8 in §7.
+
+## 2026-09-24 — H0 completed after review
+
+**Decision (owner).** The common model (ADR-004 §6.1 row "Common model") gains nine terms:
+f is measured by stake, with each shard's faulty stake below 1/3 at all times for both
+designs; finalized checkpoints must be safe in any network condition, while fork choice
+above the last checkpoint, liveness and replacement are claimed only during synchrony;
+claims relying on producers known in advance require the known-to-finished time to be
+shorter than τ; the adversary may acquire former members' keys, with finality and an
+unbonding period longer than the weak-subjectivity window bounding the damage; relay of
+messages up to the block cap within Δ during synchrony; α measured against a named
+reference evaluator, with a genesis margin for its growth; durable storage, a node that
+loses its signing record counting as faulty; the cryptographic assumptions (SHA-256,
+Ed25519 EUF-CMA, class-group VDF sequentiality and soundness, hiding and binding
+commitments); and pairs for the first d heights that cannot be computed before launch.
+Flooding is rate-bounded as decided earlier today.
+
+**Why.** The review listed these as missing or ambiguous; each is now a stated parameter or
+assumption rather than an implicit one.
+
+**Status.** With this entry all eight reopened holes are decided again. H0 closes once an
+independent review confirms it is precise enough; the other holes close when their proofs
+pass review.
+
+**Scope.** Documentation only: the §6.1 row "Common model" and H0's status in §7.
+
+## 2026-09-24 — Second review of the K=2 decisions: H3 reopened, corrections applied
+
+**Review.** A focused re-review of today's revisions found most earlier findings resolved
+in design, with proofs outstanding, and one new high-severity problem. Certificate-first
+at the fork point (the second H3 decision) lets a fully colluding attempt-(a+1) pair,
+known in advance, sign certified siblings, withhold them, and release the one whose VDF
+outcome it prefers before a checkpoint above that height finalizes; the certified block
+then beats the whole honest branch regardless of length. That is informed grinding at
+about (5/9)(1/9), or 6%, of heights with no stalls, reorganizations back to the last
+checkpoint, and possible bouncing of justified branches. H3 reopens. The recommendation of
+certificate-first was the assistant's and was wrong.
+
+**Corrections applied without changing any decision's intent.** The checkpoint rule now
+states Casper FFG as defined: justified sources, justification and finalization by
+two-thirds links, double-vote and surround-vote evidence, fork choice rooted at the highest
+justified checkpoint, named voter snapshots, and exits only after unbonding. The remaining
+depth-z references are marked superseded: light clients and destination shards verify
+checkpoint votes; retention reaches back to the latest finalized checkpoint plus d.
+H13's durable record is the set of signed (height, attempt, parent) keys above the latest
+finalized checkpoint. H1's stale "margin and probability target" is removed. H20 notes
+that free stalls raise the share of heights produced by fully colluding pairs to
+f²/(f² + (1 − f)²), and that abstaining voters count as offline. H6 notes that the
+lookahead is time, about T_vdf(1 − 1/α) plus 3B per attempt.
+
+**H0.** Still not precise enough: flooding needs sliding-window semantics and a feasibility
+condition; claims relying on τ need attempt bounds; the adversary's parallel computation
+and rushing need stating; probabilistic claims need a common target and horizon.
+
+**Scope.** Documentation only: ADR-004 §6.1 rows "Settlement", "Verification",
+"Availability", "Shards and dependencies", "Replacement" and "Membership", and notes in §7.
+
+## 2026-09-24 — H3 decided a third time: length first, certificates only at equal length
+
+**Decision (owner).** Above the fork-choice root, the highest justified checkpoint, the
+longer valid history wins; at equal length the fork-point blocks are compared by the
+certificate criterion, then count, then header (ADR-004 §6.1 row "Candidate ranking").
+This supersedes certificate-first. H3's late-result guarantee is restated: a late original
+wins only if it is extended before the replacement arrives, a choice that H8's delay keeps
+blind.
+
+**Why.** Certificate-first let a fully colluding replacement pair withhold certified
+siblings and release its preferred one late, beating a longer honest branch. With silence
+no longer punished (H7), nothing else relies on certificate-first. A per-block receipt
+quorum would close the attack under certificate-first, but it is the per-block certificate
+declined in H8.
+
+**Scope.** Documentation only: the §6.1 row "Candidate ranking" and H3's status in §7.
+
+## 2026-09-24 — H0 completed further: flooding window, attempt bounds, adversary, target
+
+**Decision (owner).** Four terms join ADR-004 §6.1 row "Common model": at most b distinct
+members are flooded within any sliding window of length T, and liveness requires
+b·3B/T < (1 − f)², since flooding together with free colluder stalls could otherwise stall
+every fully honest pair; every claim relying on τ or on the delay states its assumed number
+of consecutive stalls and the probability of exceeding it; the adversary has unlimited
+parallel computation, α bounding only its sequential VDF speed, and is rushing; and every
+probabilistic claim fails with probability at most 2⁻⁴⁰ over the chain's life (10⁸
+heights), per shard with a union bound over shards, the target already chosen for
+settlement.
+
+**Why.** The second review found these four terms missing before proofs can be stated
+against the model.
+
+**Scope.** Documentation only: the §6.1 row "Common model" and H0's note in §7. H0 closes
+once an independent review confirms the model is precise enough.
+
+## 2026-09-24 — Third review of the K=2 decisions: H0 closed, remaining text aligned
+
+**Review.** The third independent review found the second-round problems resolved: length
+first above the highest justified checkpoint leaves a withheld certified replacement
+winning only at equal length, which H8's margin covers; the Casper FFG correction, the
+superseded depth-z references and the smaller corrections are as recorded; and H0 is now
+precise enough. H0 therefore closes: it proves no claim of its own.
+
+**Text aligned.** The §6.1 closing paragraph notes that finality checkpoints were adopted
+explicitly (H12). The §6.2 K=2 column now describes the decided rules with proofs pending,
+including finality and its latency (about E heights plus voting, against one block for
+K-of-K). H16's bullet states the corrected retention, and H18's pointer is fixed. H8's k
+counts every colluder-containing or flooded attempt after the fork, whether it stalls or
+completes on both branches. In H0's liveness condition f excludes flooded members, which b
+counts.
+
+**Proof notes.** H12's accountable-safety proof must fix each link's voter set from
+finalized state; its liveness proof must adopt a newly justified root only at defined
+points, against vote withholding.
+
+**Status.** H0 CLOSED; H1–H21 DECIDED, each closing when its proof passes independent
+review (ADR-004 §7.1).
+
+**Scope.** Documentation only: ADR-004 §6.1, §6.2 and §7.
