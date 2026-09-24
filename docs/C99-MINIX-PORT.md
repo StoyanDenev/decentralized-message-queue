@@ -51,9 +51,9 @@ Clang), and CI runs 21 targets with each compiler, again under ASan + UBSan with
 
 | C++ component | C99 counterpart | State |
 |---|---|---|
-| Crypto primitives (`src/crypto/**`) | `determ-crypto-c99` | done (predates the experiment; used by the C++ binaries) |
-| DSSO identity service | `dapps/dsso` over `src/crypto/dsso/opaque3dh.c` | done (C99) |
-| D.5 random-selection DApp | `src/dapp/d5*.c`, `dapps/d5-random-selection` | done (C99) |
+| Crypto primitives (`src/crypto/**`) | `determ-crypto-c99` | done as hosted code (predates the experiment; used by the C++ binaries); not admitted to the freestanding target as a whole (§3, CRYPTO-C99-SPEC) |
+| DSSO identity service | `dapps/dsso` over `src/crypto/dsso/opaque3dh.c` | done (hosted C99; not target-qualified) |
+| D.5 random-selection DApp | `src/dapp/d5*.c`, `dapps/d5-random-selection` | done (hosted C99; not target-qualified) |
 | Transaction / block wire codec | `src/wire/binary_codec.c` | partial — envelope, HELLO, transaction (in the D23 layout; C++ carries the pre-D23 layout since the 2026-09-23 revert), BLOCK_SIG, CONTRIB, the request/status, abort, equivocation, SHARD_TIP and receipt-bundle frames, and DMF1/DBK1/DHF1 records; no Block body decoder; no differential parity gate against the C++ codec |
 | Block / transaction validation | none | not started |
 | Chain state apply + state root | `src/ledger/state.c` (transfer-only, in memory, not integrated) | skeleton |
@@ -336,8 +336,13 @@ length, big-endian 16-bit shard number, then at most 248 opaque payload bytes.
 The parser accepts only version 1, types 1/2 and an exact total length. A shard
 number here is merely decoded; production eligibility is a separate validation.
 
-The core uses compiler-provided `<stddef.h>`, `<stdint.h>` and `<limits.h>` type and
-limit declarations, not a runtime C library. The target must have 8-bit bytes and
+The core uses only the freestanding headers `<stddef.h>`, `<stdint.h>` and `<limits.h>`
+for type and limit declarations; it calls no runtime C library function. With GCC on a
+hosted toolchain, `<limits.h>` reaches the C library's `limits.h` through
+`#include_next`, so the example needs those headers at build time (not at run time):
+under `-nostdinc` with only GCC's own include directory it does not compile, while
+Clang's own headers suffice. A `UINT8_MAX` guard in place of the `CHAR_BIT` check
+would remove that dependency; it changes the example and needs new §11.6 evidence. The target must have 8-bit bytes and
 the exact-width integer types the example requires. It uses no string/memory
 library function, allocation, wire-struct overlay, packed struct or unaligned
 integer dereference. Layout/endianness is decoded byte by byte. Never send the
@@ -463,7 +468,9 @@ Disabling stack protection isolates this example's runtime dependencies; it is
 not a recommendation to remove a production mitigation. LTO was disabled.
 Each profile passed 452,306 ordinary assertions, 722,741 assertions in the
 instrumented trace build, and its ASan/UBSan run. All four core objects and
-`-nostdlib` relocatable links had no unresolved references. These links do not
+`-nostdlib` relocatable links had no unresolved references (the relocatable link of
+one object that already has none re-checks the object audit; it is not independent
+evidence, and the gate reports its status only in `report.json`). These links do not
 include boot code, drivers or a production executable.
 
 Six isolated mutants per profile compiled successfully and then failed a test
@@ -493,6 +500,11 @@ The reviewed core object's SHA-256 identifies the scope of each observation:
 
 Tested core source SHA-256:
 `9b80f795858db60902f08ad536e5271a032967a23f4ab95eab22eecd2086ded8`.
+The other committed gate inputs (SHA-256, checked against the commits of 2026-09-24):
+header `aa30ae2a11fa3b92a5edca4e3c5a278f10c05ddf39c36cc57a88bda0b14b5db7`, test
+`6e4cd9a9d8cb895480394fa6c645afae7ca69718e518025bfab3e99a8a7d4df0`, gate
+`87966f79884afd6bba35c14ec8888eadc9e0254eda49bddf2a1f09823f27d430` and the
+`tools/ci_local.sh` it ran under, `afade32a918fd0ed7d321f7a11544cef5e0c11997c67a6d63537b5037a77a228`.
 The local report and command logs are retained under
 `/var/folders/3w/8ys8lvtj6qbdkgwsd89kfmfr0000gn/T/determ-freestanding-examples-v3zal_8a/`;
 `report.json` records compiler paths, flags, source/gate hashes and artifact hashes,

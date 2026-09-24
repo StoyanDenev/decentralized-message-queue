@@ -111,6 +111,15 @@ deployment is authorized. Preserve unrelated staged work; retain the C++ referen
 under port-then-retire, with specification-based checks for approved changed rules.
 The earlier status entries below are historical where this entry supersedes them.
 
+STATE 2026-09-24 — STARTING WORK COMMITTED (DECISION-LOG: "Starting work committed
+after independent review"). The staged restoration, the K=2 hole register, the
+freestanding foundation and the plan documentation are local commits on `main`;
+`cats.json` and `top100.json` stay staged and uncommitted. The doctrine line
+"fork-free consensus" describes the shipped K-of-K reference; the adopted design
+keeps recoverable histories above the latest finalized checkpoint (ADR-004 §8.4,
+H12). Open review items are listed in that entry. NEXT: ADR-004 §8.4's first
+deliverable.
+
 STATE 2026-09-24 (DECISION-LOG: "Latest freestanding goal takes precedence over
 conflicting target plans"). The owner
 requires a strict freestanding C99 unikernel/MicroVM target with no libc, external
@@ -121,8 +130,8 @@ contracts. Existing Argon2id secret-dependent addressing and libc-backed crypto
 helpers are not qualified for the target; a conforming solution needs independent
 review before admission. No blanket constant-time or whole-system proof follows
 from the completed foundation examples (C99-MINIX-PORT §11). Port-then-retire,
-uncommitted delivery, existing consensus choices and outstanding proof obligations
-remain. This status updates the target, not the earlier safety-first work order.
+uncommitted delivery (superseded for the Claude handoff by the entry above), existing
+consensus choices and outstanding proof obligations remain. This status updates the target, not the earlier safety-first work order.
 
 STATE 2026-09-23 (owner decisions, DECISION-LOG 2026-09-23 — read that entry first). Between
 2026-09-20 and 2026-09-22 two other AI agents worked on the tree (Google Antigravity; ChatGPT

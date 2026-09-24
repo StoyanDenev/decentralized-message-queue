@@ -7747,3 +7747,87 @@ CRLF-aware whitespace checking passed. The five recorded foundation/example gate
 source hashes still match the prior validation report. This turn changes only
 documentation; it neither re-runs binary/model tests nor claims the large staged
 restoration has been validated as a commit. The preexisting index is unchanged.
+
+## 2026-09-24 — Starting work committed after independent review
+
+**Commits.** Following the C99-MINIX-PORT §12 handoff, the preexisting index, the
+unstaged documentation and the untracked foundation files were committed locally in four
+scoped commits on `main`, each tree reviewed and validated as committed: `8f7233e1`
+restores the reference tree of `c54c37a7`, reverting the eight 2026-09-22 agent commits,
+and applies the 2026-09-23 coherence corrections (entry "Coherence restoration after the
+2026-09-20..22 agent commits"), whose per-change history stays on
+`refs/claude/coherence` (`511eea53`); `8aff1068` records the preserved K=2 design and
+its hole register (ADR-004 §6–§7) with the entries from "Preserve the K=2 design"
+through "Third review of the K=2 decisions"; `619d9c97` adds the freestanding foundation
+example and its `--freestanding-examples` gate; `f471c9d3` adds the comparison, target
+convergence, adopted plan and handoff documentation with the entries from "Comparison
+objective" onward. `cats.json` and `top100.json` (added in `4fa2e8f5`, referenced by
+nothing) are in no commit and stay staged in the owner's index. Nothing is pushed or
+merged.
+
+**Validation.** Linux x86_64, GCC 13.3.0, Clang 18.1.3, tla2tools v1.7.4; each
+`ci_local.sh` mode run separately on the exact tree. `8f7233e1`: default build and FAST
+341/341 wrappers with 16 guards; `--c99` 21/21 with GCC and with Clang; `--c99-sanitize`
+21/21 (GCC); `--c99-mutants` 106/106 after fresh builds, the kqueue-only case skipped;
+`--tla` 48/48. The restoration-only tree (`c54c37a7` without the two data files) was
+checked but is not a commit of its own: Clang cannot build `src/net/k2_net.c` there
+(implicit `usleep`). `8aff1068`–`f471c9d3`: `--docs-only` 16/16. `619d9c97` and
+`f471c9d3`: `--freestanding-examples` passes for GCC and Clang at `-O2`/`-O3` with 6/6
+mutants per profile; Clang's sanitizer runs are reported NOT VERIFIED (no compiler-rt
+here). `f471c9d3` also passes the default mode and `--c99` (GCC). `git diff --check`
+with the handoff's whitespace set is clean for `8aff1068`–`f471c9d3`; `8f7233e1` re-adds
+three trailing-whitespace lines verbatim with the restored C++ and twelve Markdown
+hard-break line ends in the three demoted design notes.
+
+**Independent review.** Four reviewers (C++ reverts; C99, TLA+ and CI; the foundation
+example and gate; documentation) found nothing blocking. Corrected in this entry's
+commit:
+
+- Two `[ANON]` exit-code asserts in the FAST wrapper
+  `test_cross_binary_tx_parity_edge.sh` still read `tr`'s status and could not fail;
+  they now read the command's. The 2026-09-23 sentence that such asserts "now read the
+  command's" holds for the FAST tier only from this commit; 82 captures in 28 non-FAST
+  wrappers still read `tr`'s status, next to hash-equality asserts.
+- Two `virtual_clock.hpp` citations became ambiguous, and so unchecked, when the
+  citation guard's search widened to `sim/`; they are path-qualified.
+- SECURITY.md: the C99 build row names the strict target set; the accept-loop row covers
+  the reactor and HTTP RPC accept loops; the FAST paragraph reads 341.
+- ADR-004: failure witnesses are shard-wide (H1, H3: every eligible member, the pair
+  included) where §8 said "outside the pair", and §8.4 says what "external" means; H18's
+  cross-reference follows §8.4's order; the K-of-K "finality floor" is marked a local
+  rule; the Argon2id pointer names CRYPTO-C99-SPEC's admission rule.
+- C99-MINIX-PORT: §0's "done" rows are hosted code, not target-qualified; §11 states
+  that GCC's `<limits.h>` reaches the C library's header through `#include_next`, so the
+  example needs those headers at build time; §11.6 names the committed gate inputs'
+  hashes and calls the relocatable link a re-audit.
+- CLAUDE.md: the freestanding STATE's "uncommitted delivery" is marked superseded for
+  the handoff; a STATE line records these commits and that doctrine's "fork-free
+  consensus" describes the shipped reference.
+
+**Recorded, not fixed.**
+
+- A C99 mutant counts as killed when its test dies from a signal: `ci_c99.sh` reports
+  any exit other than 0, 124, 126 or 127 as a test failure, nine harnesses report
+  assertion failures through `abort()`, and `parser-from-bound` dies on a guard-page
+  SIGSEGV by design. "106/106" therefore means that each mutant's harness exited
+  non-zero after a successful build, not that an assertion fired. Fix: a shared
+  assertion marker that the mutant runner requires.
+- `DETERM_C99_SANITIZE=ON` instruments `determ-crypto-c99` without propagating the
+  sanitizer link options, so its C++ consumers fail to link in that configuration; CI
+  builds only the C99 targets there.
+- `http_rpc_server` init returns before initializing its descriptors when `config` is
+  NULL; closing a zero-initialized server afterwards closes descriptor 0.
+- FB74's header says every non-success driver status aborts the open attempt; two
+  start-path failures return without aborting, and the driver can abort from IDLE (an
+  independent search found no invariant affected). Its non-vacuity mutants run only by
+  hand, the kqueue-only C99 mutant never runs in CI, and tests use fixed loopback ports
+  and `/tmp` paths.
+- The foundation example's dead-caller erasure check stores no secret before wiping; its
+  zero-length parser case cannot catch a premature read under ASan; its test binaries
+  are compiled from source rather than linked from the audited object.
+- ADR-004 §6.1's H14 "1/(1 − f)²" censorship illustration is superseded as a bound by
+  §8.3 but not annotated in place.
+
+The earlier entries' statements that delivery is uncommitted are superseded by these
+commits. **Scope.** Documentation and one test wrapper; no consensus, wire, model or
+proof-status change.

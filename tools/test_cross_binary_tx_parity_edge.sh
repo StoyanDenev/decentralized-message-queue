@@ -377,8 +377,9 @@ if [ -s "$TMP/anon.json" ]; then
     # the same envelope — same signing_bytes contract).
     DERIVE_RC=0
     set +e
-    DERIVE_HASH=$("$DETERM_WALLET" derive-tx-hash --tx-json "$TMP/anon.json" 2>/dev/null | tr -d '\r\n')
+    DERIVE_HASH=$("$DETERM_WALLET" derive-tx-hash --tx-json "$TMP/anon.json" 2>/dev/null)
     DERIVE_RC=$?
+    DERIVE_HASH=$(printf '%s' "$DERIVE_HASH" | tr -d '\r\n')
     set -e
     assert_eq "$DERIVE_RC" "0" "[ANON] wallet derive-tx-hash exits 0"
     assert_eq "$DERIVE_HASH" "$ANON_HASH" "[ANON] derive-tx-hash == sign-anon-tx hash"
@@ -402,8 +403,9 @@ with open(out, "wb") as f:
 PY_EOF
     CANON_RC=0
     set +e
-    CANON_HASH=$("$DETERM" tx-hash --in "$TMP/anon_numeric.json" 2>/dev/null | tr -d '\r\n')
+    CANON_HASH=$("$DETERM" tx-hash --in "$TMP/anon_numeric.json" 2>/dev/null)
     CANON_RC=$?
+    CANON_HASH=$(printf '%s' "$CANON_HASH" | tr -d '\r\n')
     set -e
     assert_eq "$CANON_RC" "0" "[ANON] determ tx-hash exits 0 on numeric-equivalent envelope"
     assert_eq "$CANON_HASH" "$ANON_HASH" "[ANON] determ tx-hash (canonical) == sign-anon-tx hash (copy C)"

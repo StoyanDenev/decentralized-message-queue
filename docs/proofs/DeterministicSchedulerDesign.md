@@ -200,7 +200,7 @@ seed-reproducible. The §Q1 clock (`VirtualClock`,
 [virtual_clock.hpp](../../include/determ/time/virtual_clock.hpp)) is stepped IN
 LOCKSTEP with this scheduler `virtual_now` at quiescent points (its header already
 anticipates this: "a virtual-time harness advances the clock at quiescent points",
-[virtual_clock.hpp:14-15](../../include/determ/time/virtual_clock.hpp)), subject to
+[include/determ/time/virtual_clock.hpp:14-15](../../include/determ/time/virtual_clock.hpp)), subject to
 the ≤30 s constraint of §3.
 
 **What `Node` needs.** An opt-in EXTERNAL-DRIVE mode: the `run()` setup (listen,
@@ -280,7 +280,7 @@ genuinely NEW algorithm here; everything else is additive plumbing.
    non-digest-bound on the production path (ClockInjectionSeam.md §1) but a
    nondeterminism source if a scenario ever exercises it; the harness must avoid
    the legacy-sentinel path (VirtualClock seeded ≥1.5e9,
-   [virtual_clock.hpp:27-32](../../include/determ/time/virtual_clock.hpp)).
+   [include/determ/time/virtual_clock.hpp:27-32](../../include/determ/time/virtual_clock.hpp)).
    *Mitigation:* seed the shared `VirtualClock` realistically and assert no
    scenario drives the fallback; a follow-on could hoist that value if a scenario
    needs it.
