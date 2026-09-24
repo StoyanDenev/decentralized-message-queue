@@ -16,6 +16,7 @@
 #   tools/ci_local.sh --c99-mutants [--jobs N]
 #   tools/ci_local.sh --c99-sanitize [--jobs N]  # the C99 targets under ASan+UBSan
 #   tools/ci_local.sh --docs-only
+#   tools/ci_local.sh --freestanding-examples # educational C99 examples, not production qualification
 #   tools/ci_local.sh --tla                   # TLC over docs/proofs/tla/*.cfg
 #                                             # (java + a pinned tla2tools.jar)
 #   tools/ci_local.sh --sanitize [--jobs N]   # UBSan pass over the consensus
@@ -57,6 +58,7 @@ C99_MUTANTS=0
 C99_SANITIZE=0
 DOCS_ONLY=0
 TLA=0
+FREESTANDING_EXAMPLES=0
 C99_TESTS=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -73,6 +75,7 @@ while [ $# -gt 0 ]; do
     --sanitize) SANITIZE=1; shift ;;
     --asan) ASAN=1; shift ;;
     --docs-only) DOCS_ONLY=1; shift ;;
+    --freestanding-examples) FREESTANDING_EXAMPLES=1; shift ;;
     --c99) C99=1; shift ;;
     --c99-test)
       [ $# -ge 2 ] || { echo "FAIL: --c99-test requires a target"; exit 1; }
@@ -111,6 +114,15 @@ run_doc_guards() {
   rm -f "$DOC_GUARD_LOG"
   [ "$GUARDS_OK" -eq 1 ] || { echo "FAIL: ci-local doc guards RED"; return 1; }
 }
+
+if [ "$FREESTANDING_EXAMPLES" -eq 1 ]; then
+  if [ "$C99" -ne 0 ] || [ "$SKIP_BUILD" -ne 0 ] || [ "$SANITIZE" -ne 0 ] || [ "$ASAN" -ne 0 ] || [ "$DOCS_ONLY" -ne 0 ] || [ "$TLA" -ne 0 ] || [ -n "$BUILD_DIR" ]; then
+    echo "FAIL: --freestanding-examples runs alone (fresh isolated builds required)"
+    exit 1
+  fi
+  run_doc_guards || exit 1
+  DETERM_FREESTANDING_GATE=1 exec python3 tools/test_freestanding_examples.py
+fi
 
 if [ "$DOCS_ONLY" -eq 1 ] || [ "$TLA" -eq 1 ]; then
   if [ "$C99" -ne 0 ] || [ "$SKIP_BUILD" -ne 0 ] || [ "$SANITIZE" -ne 0 ] || [ "$ASAN" -ne 0 ] || [ -n "$BUILD_DIR" ] || [ "$DOCS_ONLY" -eq "$TLA" ]; then
