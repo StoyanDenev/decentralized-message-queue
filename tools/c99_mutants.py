@@ -280,7 +280,122 @@ MUTANTS = [
      "memcpy(leaf + LEDGER_PUBKEY_LEN, &balance, sizeof(balance));"),
     ("ledger-tx-root-sig", "test-ledger-state", "src/ledger/state.c",
      "determ_sha256_update(&sha, txs[i].sig, LEDGER_SIG_LEN);", "/* mutant: signature not committed */"),
+    # Streaming stake quorum (ADR-004 §9.7, FB76 Lemma Q): each case breaks one
+    # clause of (C1)-(C3), the exact 128-bit comparison, or a guard the proof or
+    # the header's contract relies on.
+    ("sq-carry-dropped", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "uint64_t sum3_high = (sum >> 63) + (sum3_low < sum2_low ? 1U : 0U); /* SQ_CARRY */",
+     "uint64_t sum3_high = (sum >> 63); /* mutant: carry out of the low word lost */"),
+    ("sq-quorum-strict", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "(sum3_high == total2_high && sum3_low >= total2_low); /* SQ_QUORUM_COMPARE */",
+     "(sum3_high == total2_high && sum3_low > total2_low); /* mutant: exactly two thirds refused */"),
+    ("sq-high-word-ignored", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "return sum3_high > total2_high ||",
+     "return 0 ||"),
+    ("sq-total-high-lost", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "uint64_t total2_high = total >> 63;",
+     "uint64_t total2_high = 0U; (void)(total >> 63);"),
+    ("sq-quorum-off-by-one", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "if (sq_is_quorum(acc->sum, acc->total)) { /* SQ_QUORUM_CHECK */",
+     "if (sq_is_quorum(acc->sum + 1U, acc->total)) { /* mutant: one stake unit short */"),
+    ("sq-duplicate-signer", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "if (index < acc->next) return sq_reject(acc, SQ_ERR_ORDER); /* SQ_ORDER_CHECK */",
+     "if (index + 1U < acc->next) return sq_reject(acc, SQ_ERR_ORDER); /* mutant: repeat allowed */"),
+    ("sq-range-member-n", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "if (index >= acc->count) return sq_reject(acc, SQ_ERR_RANGE); /* SQ_RANGE_CHECK */",
+     "if (index > acc->count) return sq_reject(acc, SQ_ERR_RANGE); /* mutant: index N accepted */"),
+    ("sq-signature-ignored", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "acc->msg, acc->msg_len, signature) != 1)",
+     "acc->msg, acc->msg_len, signature) == 2)"),
+    ("sq-signature-nonzero", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "acc->msg, acc->msg_len, signature) != 1)",
+     "acc->msg, acc->msg_len, signature) == 0)"),
+    ("sq-key-unbound", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "acc->keys + (size_t)index * SQ_KEY_BYTES,",
+     "acc->keys, /* mutant: member 0's key for every entry */"),
+    ("sq-statement-truncated", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "acc->msg, acc->msg_len, signature)",
+     "acc->msg, acc->msg_len / 2U, signature)"),
+    ("sq-sum-not-updated", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "acc->sum += stake; /* SQ_SUM_UPDATE */",
+     "acc->sum += 0U; /* mutant */"),
+    ("sq-next-not-updated", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "acc->next = index + 1U; /* SQ_NEXT_UPDATE",
+     "acc->next = index; /* mutant"),
+    ("sq-next-16-bit", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "acc->next = index + 1U; /* SQ_NEXT_UPDATE",
+     "acc->next = (uint16_t)(index + 1U); /* mutant"),
+    ("sq-finish-repeat-closed", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "    if (acc->state != SQ_STATE_OPEN) return acc->verdict;\n",
+     "    if (acc->state == SQ_STATE_ACCEPTED) return SQ_ERR_CLOSED; /* mutant */\n"
+     "    if (acc->state != SQ_STATE_OPEN) return acc->verdict;\n"),
+    ("sq-null-signature-unchecked", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "    if (signature == NULL) return sq_reject(acc, SQ_ERR_ARGUMENT);\n",
+     "    /* mutant: a NULL signature reaches the verifier */\n"),
+    ("sq-verify-context-dropped", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "acc->verify(acc->verify_context,",
+     "acc->verify(NULL, /* mutant */"),
+    ("sq-signers-16-bit", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "    acc->signers += 1U;\n",
+     "    acc->signers = (uint16_t)(acc->signers + 1U); /* mutant */\n"),
+    ("sq-terminal-ignored", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "if (acc->state != SQ_STATE_OPEN) return SQ_ERR_CLOSED; /* SQ_TERMINAL */",
+     "/* mutant: absorbing continues after a rejection */"),
+    ("sq-late-entry-kept", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "if (acc->state == SQ_STATE_ACCEPTED) return sq_reject(acc, SQ_ERR_CLOSED); /* SQ_LATE_ENTRY */",
+     "if (acc->state == SQ_STATE_ACCEPTED) return SQ_ERR_CLOSED; /* mutant: acceptance stands */"),
+    ("sq-late-duplicate-kept", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "if (acc->state == SQ_STATE_ACCEPTED) return sq_reject(acc, SQ_ERR_CLOSED); /* SQ_LATE_ENTRY */",
+     "if (acc->state == SQ_STATE_ACCEPTED && index >= acc->next) return sq_reject(acc, SQ_ERR_CLOSED);"),
+    ("sq-late-range-kept", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "if (acc->state == SQ_STATE_ACCEPTED) return sq_reject(acc, SQ_ERR_CLOSED); /* SQ_LATE_ENTRY */",
+     "if (acc->state == SQ_STATE_ACCEPTED && index < acc->count) return sq_reject(acc, SQ_ERR_CLOSED);"),
+    ("sq-late-null-kept", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "if (acc->state == SQ_STATE_ACCEPTED) return sq_reject(acc, SQ_ERR_CLOSED); /* SQ_LATE_ENTRY */",
+     "if (acc->state == SQ_STATE_ACCEPTED && signature != NULL) return sq_reject(acc, SQ_ERR_CLOSED);"),
+    ("sq-sum-guard-removed", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "if (stake > acc->total - acc->sum) return sq_reject(acc, SQ_ERR_SNAPSHOT); /* SQ_SUM_GUARD */",
+     "/* mutant: changed stakes not detected */"),
+    ("sq-zero-stake-accepted", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "if (stakes[i] == 0U) return SQ_ERR_SNAPSHOT; /* SQ_ZERO_STAKE */",
+     "/* mutant: zero stake accepted */"),
+    ("sq-zero-stake-first-accepted", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "if (stakes[i] == 0U) return SQ_ERR_SNAPSHOT; /* SQ_ZERO_STAKE */",
+     "if (i > 0U && stakes[i] == 0U) return SQ_ERR_SNAPSHOT; /* mutant: first stake unchecked */"),
+    ("sq-total-overflow", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "if (stakes[i] > UINT64_MAX - total) return SQ_ERR_SNAPSHOT; /* SQ_TOTAL_OVERFLOW */",
+     "/* mutant: total may wrap */"),
+    ("sq-total-max-refused", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "if (stakes[i] > UINT64_MAX - total) return SQ_ERR_SNAPSHOT; /* SQ_TOTAL_OVERFLOW */",
+     "if (stakes[i] >= UINT64_MAX - total) return SQ_ERR_SNAPSHOT; /* mutant: W = 2^64 - 1 refused */"),
+    ("sq-total-recorded-low", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "    snapshot->total = total;\n",
+     "    snapshot->total = total - (count > 32U ? 1U : 0U); /* mutant */\n"),
+    ("sq-total-recorded-high", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "    snapshot->total = total;\n",
+     "    snapshot->total = total + (count > 8U ? 1U : 0U); /* mutant */\n"),
+    ("sq-total-copied-low", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "acc->total = snapshot->total;",
+     "acc->total = snapshot->total - (snapshot->count > 32U ? 1U : 0U); /* mutant */"),
+    ("sq-begin-keys", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "if (snapshot->keys == NULL) return SQ_ERR_SNAPSHOT; /* SQ_BEGIN_KEYS */",
+     "/* mutant: NULL keys accepted */"),
+    ("sq-begin-stakes", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "if (snapshot->stakes == NULL) return SQ_ERR_SNAPSHOT; /* SQ_BEGIN_STAKES */",
+     "/* mutant: NULL stakes accepted */"),
+    ("sq-begin-count", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "if (snapshot->count == 0U) return SQ_ERR_SNAPSHOT; /* SQ_BEGIN_COUNT */",
+     "/* mutant: empty member list accepted */"),
+    ("sq-begin-total", "test-stake-quorum", "src/consensus/stake_quorum.c",
+     "if (snapshot->total == 0U) return SQ_ERR_SNAPSHOT; /* SQ_BEGIN_TOTAL */",
+     "/* mutant: zero total accepted */"),
 ]
+
+# Targets whose harness reports every failed assertion with a marker line and
+# exit status 1. For these a mutant counts as rejected only when the marker and
+# exit 1 both appear, so a crash, sanitizer abort or signal is never a kill
+# (the recorded gap for the other harnesses: DECISION-LOG 2026-09-24).
+ASSERTION_MARKERS = {"test-stake-quorum": "SQ-TEST ASSERTION FAILED"}
 
 
 # Cases whose mutated code is compiled for one event-loop backend only; on the
@@ -374,6 +489,11 @@ def main():
             if code == 0 or "FAIL(test): " + target + " (exit " not in output:
                 print(output, flush=True)
                 raise RuntimeError("mutant survived or failed outside its gate: " + name)
+            marker = ASSERTION_MARKERS.get(target)
+            if marker is not None and (marker not in output or
+                                       "FAIL(test): " + target + " (exit 1)" not in output):
+                print(output, flush=True)
+                raise RuntimeError("mutant was not rejected by an assertion: " + name)
             print("RED(mutant): %s [%s; fresh build succeeded]" % (name, target), flush=True)
             shutil.rmtree(source)
             shutil.rmtree(work / ("build-%02d" % number))

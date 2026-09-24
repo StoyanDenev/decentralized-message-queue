@@ -45,7 +45,7 @@ It is a separate experiment built around the proposed K=2 design (ADR-004): a lo
 two-party commit/reveal attempt (FB74, `K2_VDF_Soundness.md`), a repeated-work
 evaluator, a bounded pending inbox, an in-memory transfer ledger and POSIX
 networking/RPC. It builds as strict ISO C99 (`determ_c99_strict` in CMake; GCC and
-Clang), and CI runs 21 targets with each compiler, again under ASan + UBSan with GCC
+Clang), and CI runs 22 targets with each compiler, again under ASan + UBSan with GCC
 (crypto library included), plus an isolated mutation gate (`tools/ci_local.sh --c99` /
 `--c99-sanitize` / `--c99-mutants`). Against this plan it stands at:
 
@@ -231,9 +231,9 @@ qualified earlier; production integration waits for its protocol dependencies.
   sampler, producer-only abort rule or fork choice solely to discard it.
   [ADR-004 §9](decisions/ADR-004-Fault-Model.md#9-one-shard-receiver-state-and-resource-contract-2026-09-24)
   specifies the one-shard receiver contract (proofs in FB76). Its first component,
-  the streaming stake-quorum verifier of §9.7, is a verification primitive to be
-  qualified ahead of its callers under the rule above; components that depend on the
-  open decisions D1–D8 wait for them.
+  the streaming stake-quorum verifier of §9.7, is a verification primitive qualified
+  ahead of its callers under the rule above (§13); components that depend on the open
+  decisions D1–D8 wait for them.
 - **Phase 5 — platform integration.** Bounded gossip/RPC reactor and device backend,
   then target wallet/light interfaces. *Gate:* unchanged protocol surfaces
   interoperate through a hosted adapter and changed surfaces satisfy their reviewed
@@ -646,3 +646,104 @@ mode must not be combined with the other CI modes. These are verification entry
 points, not a statement that the large restoration snapshot has been revalidated
 by this documentation-only handoff. §11.6 records the prior example evidence and
 its limits; Claude must report results for the actual snapshots it commits.
+
+## 13. Combined-design receiver components (2026-09-24)
+
+[ADR-004 §9](decisions/ADR-004-Fault-Model.md#9-one-shard-receiver-state-and-resource-contract-2026-09-24)
+is the one-shard receiver contract, and its arguments are in
+[OneShardReceiverContract.md](proofs/OneShardReceiverContract.md) (FB76). Components land
+one increment at a time, each with its proof, independent review and gates. A component
+that has no production caller yet is a primitive qualified ahead of its callers (§7). Its
+production integration waits for the decisions listed in ADR-004 §9.6.
+
+### 13.1 `stake_quorum`: streaming two-thirds-of-stake verification
+
+- **Files.** `include/determ/consensus/stake_quorum.h` and `src/consensus/stake_quorum.c`,
+  with the test `tests/test_stake_quorum.c`. The freestanding audit is
+  `tools/check_no_undefined.cmake`, with its canary `tests/freestanding_audit_canary.c`.
+- **Contract (FB76 Lemma Q).** Once the caller has absorbed the last entry of a
+  certificate's framing, `sq_finish` accepts exactly the canonical certificates:
+  - snapshot indices strictly increase and stay below N;
+  - every signature is valid under the caller's verifier, which must return exactly 1
+    for a valid signature;
+  - the signers hold at least two thirds of the stake. The module compares 3·sum with
+    2·W exactly, as 128-bit values built from shifts and additions.
+
+  The state is O(1). An out-of-order or out-of-range entry is refused before any
+  verification. A rejection is final, and an entry offered after an accepting finish
+  turns the verdict into a rejection: a caller that finished too early is told so if it
+  offers a further entry, but not if it stops reading. The key and stake arrays are
+  borrowed and must not change from validation to the last finish. `sq_begin` copies the
+  snapshot's fields, so the snapshot object may be reused.
+- **Freestanding.**
+  - The module includes only `<stddef.h>` and `<stdint.h>`. It makes no library call,
+    allocates nothing and keeps no global state. Its source has no 64-bit division or
+    multiplication; the only multiplication is the `size_t` key offset, a shift. A
+    compiler may still call a helper: Clang 18 turns the shift-and-add comparison into a
+    64-bit multiply that calls `__aeabi_lmul` on ARMv6-M and ARMv8-M Baseline. The audit
+    below decides each target profile.
+  - Building `test-stake-quorum` with GCC or Clang, as every full `--c99`,
+    `--c99-sanitize` and `--c99-mutants` run does, also compiles the module with
+    `-ffreestanding -fno-builtin -fno-stack-protector -fno-lto -fno-sanitize=all` (plus
+    `-fno-pic` on ELF), with interprocedural optimization off. The build fails if `nm -u`
+    finds an undefined symbol in that object. A build with global `--coverage` therefore
+    fails here: Clang 18 cannot exclude coverage per target, and GCC's
+    `-fprofile-exclude-files` is not used.
+  - On ELF targets the build also fails if the object defines writable data. COFF and
+    Mach-O `nm` report section and literal-pool symbols that would misfire, so on those
+    formats "no global state" rests on inspection.
+  - The same audit must flag the canary, which calls an external function and defines
+    writable data, so each active check is shown able to fail.
+  - The audit covers only the configured compiler and target. Here that was x86_64 Linux
+    with GCC 13.3.0 and Clang 18.1.3 in CMake's Release configuration. The 32-bit
+    addressability check in `sq_snapshot_init` is compiled out on 64-bit targets, so no
+    gate executes it.
+  - By hand, `nm -u` also found nothing at `-O0` to `-O3` and `-Os` for GCC and Clang on
+    x86_64, and for Clang on i686, armv7, riscv32, aarch64 and x86_64 MinGW (with
+    `-fno-pic`), and GCC `-m32`. On i686, Clang's default PIE object references
+    `_GLOBAL_OFFSET_TABLE_`, as does a `-fPIC` object from either compiler. Clang on
+    ARMv6-M and ARMv8-M Baseline needs `__aeabi_lmul` (above).
+- **Caller obligations (ADR-004 §9.7).**
+  - The statement bytes follow D5; the snapshot follows D6 and holds no small-order
+    key.
+  - Every receiver uses one Ed25519 variant.
+  - 1 ≤ W ≤ 2^64 − 1 and N ≤ 2^32 − 1, and every signature pointer names 64 bytes.
+  - The snapshot given to `sq_begin` is one that `sq_snapshot_init` accepted, or a copy
+    of its fields.
+  - `sq_finish` is called only after the last framed entry.
+- **Gates.** `test-stake-quorum` is a portable `--c99` target. It checks:
+  - the quorum comparison against an independent formulation (32-bit halves and
+    multiplication) for every W up to 200,000 at the boundary, all pairs of 17 edge
+    values, and 2,000,000 random pairs;
+  - snapshot and argument validation, including a zero stake first, later or alone, and
+    each of `sq_begin`'s defensive checks on its own, with outputs unchanged on failure;
+  - a total the fixture sums itself;
+  - W = 2^64 − 1 exactly;
+  - exact-threshold boundaries, including stake-not-head-count cases;
+  - order, duplicate and range rejection without verification;
+  - binding of each signature to its signer's key and to the statement;
+  - terminal verdicts, a repeated finish after acceptance, and late entries of every kind
+    after an accepting finish (duplicate, out of range, NULL signature);
+  - changed stakes, and reuse of the snapshot object;
+  - the verifier's return-value contract, and that it receives the caller's context and
+    a non-NULL signature;
+  - an exhaustive differential check for up to five members with stakes 1–3: every
+    subset and every single corrupted signature;
+  - 30,000 randomized differential cases with up to 64 members, totals near 2^64, and
+    injected reorderings, duplicates, out-of-range indices and bad signatures;
+  - a 70,000-member snapshot, including all 70,000 signing;
+  - real Ed25519 signatures from the hosted library.
+
+  `--c99-mutants` adds 35 cases for this target. Each must fail with the harness's
+  assertion marker and exit status 1, so a crash or a signal never counts as a kill here,
+  unlike the gap the DECISION-LOG records for the older harnesses. Mutants that delete
+  a NULL check on `acc` or `snapshot`, or `sq_snapshot_init`'s check on `stakes`, or
+  that let `UINT32_MAX` through a wrapping range check to the stake read, can only
+  crash, so they are not listed.
+- **Not established.**
+  - a production caller;
+  - the D5 encoding and the D6 snapshot;
+  - the Ed25519 variant that receivers use;
+  - a freestanding Ed25519 (the hosted verifier allocates for messages over 448 bytes);
+  - the audit on profiles other than those above;
+  - constant-time properties, which are not needed because all inputs are public.

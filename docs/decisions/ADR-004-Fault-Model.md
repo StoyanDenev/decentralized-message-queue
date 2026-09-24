@@ -1333,13 +1333,15 @@ arbitrary order would need a different verifier.
   H12's encoding are decided. It is useful only if D5 adopts snapshot-index order; the
   owner is asked to confirm that direction.
 - **Implementation.** `stake_quorum` in freestanding C99: no libc, heap or global state,
-  and the caller injects the snapshot arrays and the Ed25519 predicate.
+  and the caller injects the snapshot arrays and the Ed25519 predicate. It is qualified
+  as a primitive in C99-MINIX-PORT §13 and still has no production caller.
 - **Tests.** They cover the certificate-acceptance predicate itself, with positive and
   negative cases and falsify-on-mutant gates run through `ci_local.sh`. The receiver-layer
   gate comes with its first production caller (§9.8 item 1).
 - **Caller obligations.**
   - The snapshot total is the sum of its stakes, with 1 ≤ W ≤ 2^64 − 1 and
-    N ≤ 2^32 − 1.
+    N ≤ 2^32 − 1, and the key and stake arrays do not change from validation to the last
+    finish.
   - The statement bytes follow D5.
   - The snapshot follows D6.
   - One Ed25519 variant is used everywhere.

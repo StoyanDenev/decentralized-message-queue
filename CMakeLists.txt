@@ -716,6 +716,65 @@ determ_c99_strict(test-shard-routing)
 target_include_directories(test-shard-routing PRIVATE include)
 target_link_libraries(test-shard-routing PRIVATE determ-crypto-c99)
 
+# ── test-stake-quorum: streaming two-thirds-of-stake certificate verifier ─────
+# ADR-004 §9.7, FB76 Lemma Q. The module is freestanding C99; the test links the
+# hosted Ed25519 only to make and check real signatures.
+add_executable(test-stake-quorum tests/test_stake_quorum.c src/consensus/stake_quorum.c)
+target_compile_features(test-stake-quorum PRIVATE c_std_99)
+determ_c99_strict(test-stake-quorum)
+target_include_directories(test-stake-quorum PRIVATE include)
+target_link_libraries(test-stake-quorum PRIVATE determ-crypto-c99)
+# Freestanding audit, part of building the test: the module compiled with
+# -ffreestanding must reference no external symbol, and a canary object that
+# does must be caught, so the audit is shown able to fail on every build. On
+# ELF targets it also rejects writable data (the canary defines some); COFF
+# and Mach-O nm list section and literal-pool symbols that would misfire, so
+# there that half rests on inspection. It covers the configured compiler and
+# target only (GCC or Clang, the build's own flags plus those below).
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  add_library(stake-quorum-freestanding OBJECT src/consensus/stake_quorum.c)
+  add_library(freestanding-audit-canary OBJECT tests/freestanding_audit_canary.c)
+  # Real object code, never LTO bitcode: nm cannot see the calls a later link
+  # step would emit, so an LTO object would pass the audit vacuously.
+  if(APPLE OR WIN32 OR CYGWIN)
+    set(SQ_AUDIT_ELF OFF)
+  else()
+    set(SQ_AUDIT_ELF ON)
+  endif()
+  foreach(tgt stake-quorum-freestanding freestanding-audit-canary)
+    set_target_properties(${tgt} PROPERTIES
+      C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF
+      INTERPROCEDURAL_OPTIMIZATION OFF)
+    # Global sanitizer flags would add runtime calls that are not the module's
+    # own, so sanitizers are off here. A global --coverage build fails this
+    # audit: Clang cannot exclude coverage per target, and GCC's
+    # -fprofile-exclude-files is not used.
+    target_compile_options(${tgt} PRIVATE -ffreestanding -fno-builtin
+      -fno-stack-protector -fno-lto -fno-sanitize=all -Wall -Wextra -Werror -pedantic)
+    if(SQ_AUDIT_ELF)
+      # Never linked, so position independence buys nothing; without this,
+      # Clang's default i686 PIE object would reference _GLOBAL_OFFSET_TABLE_.
+      target_compile_options(${tgt} PRIVATE -fno-pic)
+    endif()
+    target_include_directories(${tgt} PRIVATE include)
+  endforeach()
+  set(STAKE_QUORUM_AUDIT ${CMAKE_CURRENT_BINARY_DIR}/stake-quorum-freestanding.audit)
+  add_custom_command(OUTPUT ${STAKE_QUORUM_AUDIT}
+    COMMAND ${CMAKE_COMMAND} -DNM=${CMAKE_NM}
+      "-DOBJECTS=$<TARGET_OBJECTS:stake-quorum-freestanding>"
+      "-DCANARY=$<TARGET_OBJECTS:freestanding-audit-canary>"
+      -DCHECK_DATA=${SQ_AUDIT_ELF} -DSTAMP=${STAKE_QUORUM_AUDIT}
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_undefined.cmake
+    DEPENDS $<TARGET_OBJECTS:stake-quorum-freestanding>
+      $<TARGET_OBJECTS:freestanding-audit-canary>
+      ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_undefined.cmake
+    VERBATIM)
+  add_custom_target(stake-quorum-freestanding-audit DEPENDS ${STAKE_QUORUM_AUDIT})
+  add_dependencies(stake-quorum-freestanding-audit
+    stake-quorum-freestanding freestanding-audit-canary)
+  add_dependencies(test-stake-quorum stake-quorum-freestanding-audit)
+endif()
+
 add_executable(test-pending-transfer tests/test_pending_transfer.c
   src/ledger/pending_transfer.c src/ledger/shard_routing.c src/wire/binary_codec.c)
 target_compile_features(test-pending-transfer PRIVATE c_std_99)

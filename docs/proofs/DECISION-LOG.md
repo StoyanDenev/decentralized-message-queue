@@ -7907,3 +7907,97 @@ D5 keeps snapshot-index order; the owner is asked to confirm that.
 
 **Verification.** `ci_local.sh --docs-only` passes all 16 guards, and `git diff --check`
 is clean. No code, model or test changes.
+
+## 2026-09-24 — First combined-design component: the streaming stake-quorum verifier
+
+**What.** `stake_quorum` implements FB76's Lemma Q in freestanding C99 (C99-MINIX-PORT
+§13, ADR-004 §9.7). It decides whether a certificate of (member index, signature)
+entries is canonical for an eligibility snapshot: indices strictly increasing and below
+N, each signature valid under one caller-supplied verifier, and signers holding at least
+two thirds of the stake. The last clause is compared exactly as 3·sum ≥ 2·W in 128 bits,
+using only shifts and additions. The certificate is streamed through O(1) state.
+
+**Status.** It is a primitive qualified ahead of its callers, as C99-MINIX-PORT §7
+allows, and it has no production caller. Its production use waits for D5 (statement
+bytes and snapshot-index order), D6 (the weighting snapshot), the Ed25519 variant, and,
+for checkpoint links, H12's encoding. It applies only if D5 keeps snapshot-index order;
+the owner is asked to confirm that. No consensus rule, wire format or proof status
+changes.
+
+**Gates.**
+
+- `test-stake-quorum` is a portable `--c99` target; C99-MINIX-PORT §13 lists what it
+  checks.
+- A freestanding audit runs whenever `test-stake-quorum` is built with GCC or Clang, as
+  in every full `--c99`, `--c99-sanitize` and `--c99-mutants` run. The module, compiled
+  freestanding without LTO or sanitizers, must have no undefined symbol and, on ELF, no
+  writable data. A canary with both must be caught.
+- 35 mutation cases. For this target a mutant counts as killed only if the harness
+  prints its assertion marker and exits 1, so a crash or a signal never counts, unlike
+  the older harnesses (entry "Starting work committed after independent review").
+  Mutants that delete a NULL check on `acc` or `snapshot`, or `sq_snapshot_init`'s check
+  on `stakes`, or let `UINT32_MAX` through a wrapping range check to the stake read, can
+  only crash and are not listed.
+
+**Review.** Two independent reviewers checked the code: the first in rounds one and
+two, the second in rounds three and four.
+
+- Round one found one blocking defect: the snapshot ownership rule allowed an acceptance
+  that was not canonical, because stakes changed after validation and the accumulator
+  kept only a pointer to the snapshot object.
+- It also found five should-fix items:
+  - a differential reference that reused the module's own total;
+  - an audit that LTO bitcode passed vacuously;
+  - 64-bit division helpers on 32-bit targets;
+  - a header that contradicted the code on late entries;
+  - an overstated usage claim.
+- Nine mutants survived round one:
+  - seven are now listed and killed;
+  - an 8-bit loop counter in `sq_snapshot_init` hangs on the 70,000-member snapshot
+    instead of failing an assertion, so the C99 gate's timeout catches it and it is not
+    listed;
+  - truncating the key offset to 32 bits changes nothing below 2^27 members, so that
+    line rests on inspection.
+- Round two found one blocking defect: the new writable-data check misfired on COFF and
+  Mach-O, so it is now ELF-only.
+- Round two also found that late entries were tested only with a harmless one, and that
+  three more mutants survived; they are now tested and listed.
+- Round three found nothing blocking. It found five should-fix items:
+  - the header omitted the obligation to finish only after the last framed entry, and
+    overstated what an entry after an early finish reveals;
+  - the header claimed no compiler helper on 32-bit targets, but Clang 18 calls
+    `__aeabi_lmul` on ARMv6-M and ARMv8-M Baseline;
+  - a repeated finish after acceptance was never tested, and a mutant survived;
+  - a zero stake was tested only at a later index, and a mutant survived;
+  - the test called itself a receiver-level gate, which ADR-004 §9.7 defers to the
+    first production caller.
+- Its notes: two mutants died only by crashing; `sq_begin` trusts a hand-built snapshot;
+  the audit's stated scope was too broad, and global sanitizer or coverage flags broke
+  it; a 16-bit signer counter survived.
+- Round four found nothing blocking. Its one should-fix item: the account of crash-only
+  mutants named a class that includes a listed mutant, `sq-range-member-n`. Its notes
+  were wording: why coverage builds fail, full runs versus narrowed ones, a snapshot
+  copied field by field, and which i686 objects reference `_GLOBAL_OFFSET_TABLE_`. All
+  are fixed.
+- Resolutions:
+  - `sq_begin` copies the snapshot's fields;
+  - the fixture sums its own total;
+  - `-fno-lto`, and `-fno-pic` on ELF;
+  - shift-and-add arithmetic;
+  - an entry after an accepting finish rejects the certificate;
+  - the header states both caller obligations and scopes the helper claim to audited
+    profiles;
+  - five more listed mutants, with tests for a repeated finish, a zero first stake, the
+    verifier's context and signature pointers, and all 70,000 members signing;
+  - the audit objects are compiled with `-fno-sanitize=all`. Coverage builds still fail
+    the audit, as C99-MINIX-PORT §13.1 records.
+
+**Not established.**
+
+- a production caller, D5 and D6;
+- the Ed25519 variant;
+- a freestanding Ed25519;
+- the audit on other compilers, targets and object formats, and freedom from compiler
+  helpers on unaudited profiles (Clang 18 needs `__aeabi_lmul` on ARMv6-M and ARMv8-M
+  Baseline);
+- execution of the 32-bit addressability check, which is compiled out on 64-bit targets.

@@ -117,9 +117,10 @@ recorded rules do not compose with fixed budgets"). ADR-004 §9 and FB76
 memory, but under the recorded rules per-block certificate evidence and the unfinalized
 suffix are unbounded, so no fixed-budget node accepts every valid history. The owner
 decisions X1, D1–D8 and the refusal choices (ADR-004 §9.6) come first; meanwhile do not cap
-attempts, prune required certificates or treat refusal as progress. NEXT: qualify §9.7's
-streaming stake-quorum verifier as a primitive (no production caller until D5 and D6),
-then §9.8's increments as decisions land.
+attempts, prune required certificates or treat refusal as progress. The first component,
+§9.7's streaming stake-quorum verifier, is qualified as a primitive (C99-MINIX-PORT §13;
+no production caller until D5 and D6). NEXT: the owner decisions, then §9.8's increments
+as they land.
 
 STATE 2026-09-24 — STARTING WORK COMMITTED (DECISION-LOG: "Starting work committed
 after independent review"). The staged restoration, the K=2 hole register, the

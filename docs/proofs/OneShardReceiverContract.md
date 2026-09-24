@@ -102,17 +102,24 @@ order or range violation is rejected before its signature is checked.
 since the state carries everything between calls. Any split of E across calls gives the
 same verdict.
 
-**Q6 (terminal states).** After a rejection or finish, every further absorb is refused
-and finish repeats the stored verdict, so a rejected certificate cannot be resumed.
+**Q6 (terminal states).** After a rejection, every further absorb is refused and finish
+repeats the stored verdict, so a rejected certificate cannot be resumed. The
+implementation also treats an absorb after an accepting finish as a rejection. A caller
+that finished before the last entry of the framing is therefore told so if it offers
+another entry, but not if it stops reading, which is why finish must follow the last
+entry.
 
-Q1 is a statement about whole lists. A caller must call finish only after the last entry
-of the certificate's framing. A receiver that stopped once the quorum was met would accept
-a valid prefix followed by a bad entry that another receiver rejects, and receivers would
-diverge.
+Q1 is a statement about whole lists and one unchanged snapshot. The implementation
+compares 3·sum with 2·W exactly, as 128-bit values built from shifts and additions, and
+copies the snapshot's fields at begin. The key and stake arrays must not change between
+the snapshot's validation and the last finish that uses them. A caller must call finish
+only after the last entry of the certificate's framing. A receiver that stopped once the
+quorum was met would accept a valid prefix followed by a bad entry that another receiver
+rejects, and receivers would diverge.
 
-Q1–Q6 are the contract of the C99 component selected in ADR-004 §9.7. They say nothing
-about which statement bytes or snapshot a receiver must use; those are the caller's
-obligations (D5, D6).
+Q1–Q6 are the contract of the C99 component of ADR-004 §9.7 (C99-MINIX-PORT §13). They
+say nothing about which statement bytes or snapshot a receiver must use; those are the
+caller's obligations (D5, D6).
 
 ## 3. Lemma P — a predecessor certificate implies all earlier certificates
 
@@ -395,14 +402,15 @@ hosted C99 block store's fsync-then-rename manifest.
 ## 8. Status
 
 - **Proved here, pending independent review:**
-  - Q1–Q6.
+  - Q1–Q6. The code review of the implementation also checked Lemma Q in both
+    directions.
   - Lemma P and P1, under (P-a)–(P-d).
   - P2, under (X1).
   - U1, U2 and U3 (counterexamples), and U4.
 - **Sketched, not proved:** R2, R3 and D2's attempt bound.
-- **Selected for implementation:** Lemma Q, as the freestanding C99 component
-  `stake_quorum` (ADR-004 §9.7). It lands in its own increment, with no production caller
-  until D5 and D6 (and H12's encoding, for links) are decided.
+- **Implemented as a qualified primitive:** Lemma Q, as the freestanding C99 component
+  `stake_quorum` (ADR-004 §9.7, C99-MINIX-PORT §13). It has no production caller until D5
+  and D6 (and H12's encoding, for links) are decided.
 - **Open:**
   - D1–D8 await owner decisions, and so do the refusal choices in §4.
   - (X1) and the (P-b) discharge.
