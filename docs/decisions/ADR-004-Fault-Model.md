@@ -1,6 +1,8 @@
+> **TIER: FUTURE — accepted research direction, not implemented.** Nothing in this ADR is shipped consensus; the C++ K-of-K rules remain the implemented protocol. Roadmap index: [ROADMAP.md](../ROADMAP.md)
+
 # ADR 004: Fault Model Correction (Proof of Sequential Work)
-**Date:** 2026-09-22
-**Status:** Direction accepted; production protocol and security proof incomplete.
+**Date:** 2026-09-22 (tier marker and design-note references added 2026-09-23)
+**Status:** Research direction accepted by the owner; not implemented, production protocol and security proof incomplete. (The owner's separate goal, restated 2026-09-23, is the C99 migration — docs/C99-MINIX-PORT.md §0.)
 
 ## 1. Equivocation and finality
 
@@ -42,3 +44,13 @@ zero bias and hardware-independent enforced blindness are withdrawn. This ADR
 does not replace the existing C++ accept rules or validate their separate claims.
 [ADR-005](ADR-005-Temporal-Sharding.md) records the proposed sharding design gate;
 beacon deprecation and sharding security do not follow from choosing PoSW.
+
+## 5. Design notes (not proofs)
+
+[PoSW_Nakamoto_Safety.md](../proofs/PoSW_Nakamoto_Safety.md),
+[PoSW_Economic_Soundness.md](../proofs/PoSW_Economic_Soundness.md),
+[VRF_Sharding_Safety.md](../proofs/VRF_Sharding_Safety.md) and
+[tla/PoSWForkChoiceDesign.tla](../proofs/tla/PoSWForkChoiceDesign.tla) sketch parts of this
+direction. Each is a future-tier design note whose review-status section lists the
+unproven steps and the mechanisms missing from the code; none discharges an obligation
+of §2.

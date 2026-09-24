@@ -29,13 +29,25 @@ static int make_directory(const char *dir) {
     return mkdir(dir, 0755);
 }
 
-static void get_block_path(const char *base_dir, uint64_t height, char *out_path, size_t max_len) {
-    snprintf(out_path, max_len, "%s/%llu.blk", base_dir, (unsigned long long)height);
+/* Returns 0 on success, -1 if the path does not fit (never a truncated path). */
+static int get_block_path(const char *base_dir, uint64_t height, char *out_path, size_t max_len) {
+    int n = snprintf(out_path, max_len, "%s/%llu.blk", base_dir, (unsigned long long)height);
+    return (n < 0 || (size_t)n >= max_len) ? -1 : 0;
+}
+
+/* Make a completed rename in dir durable. */
+static int sync_directory(const char *dir) {
+    int dfd = open(dir, O_RDONLY);
+    if (dfd < 0) return -1;
+    int rc = fsync(dfd);
+    close(dfd);
+    return rc;
 }
 
 static block_store_status_t write_manifest_atomic(const block_store_t *store, uint64_t height, const uint8_t head_hash[32]) {
     char tmp_path[BLOCK_STORE_MAX_PATH + 32];
-    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%d", store->manifest_path, (int)getpid());
+    int tn = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%d", store->manifest_path, (int)getpid());
+    if (tn < 0 || (size_t)tn >= sizeof(tmp_path)) return BLOCK_STORE_ERR_INVALID_ARG;
 
     uint8_t mbuf[WIRE_MANIFEST_BYTES];
     size_t mlen = 0;
@@ -67,6 +79,11 @@ static block_store_status_t write_manifest_atomic(const block_store_t *store, ui
         unlink(tmp_path);
         return BLOCK_STORE_ERR_IO;
     }
+    /* The rename is visible now; fsync the directory so it survives a crash
+     * (this also persists a new block file's directory entry). */
+    if (sync_directory(store->base_dir) != 0) {
+        return BLOCK_STORE_ERR_IO;
+    }
     return BLOCK_STORE_OK;
 }
 
@@ -82,7 +99,10 @@ block_store_status_t block_store_open(block_store_t *store, const char *base_dir
         return BLOCK_STORE_ERR_IO;
     }
 
-    snprintf(store->manifest_path, sizeof(store->manifest_path), "%s/manifest.bin", base_dir);
+    {
+        int mn = snprintf(store->manifest_path, sizeof(store->manifest_path), "%s/manifest.bin", base_dir);
+        if (mn < 0 || (size_t)mn >= sizeof(store->manifest_path)) return BLOCK_STORE_ERR_INVALID_ARG;
+    }
 
     struct stat st;
     if (stat(store->manifest_path, &st) != 0) {
@@ -125,7 +145,8 @@ block_store_status_t block_store_open(block_store_t *store, const char *base_dir
     /* Index and validate each block file from 0 to current_height - 1 */
     char bpath[BLOCK_STORE_MAX_PATH];
     for (uint64_t h = 0; h < m.height; h++) {
-        get_block_path(store->base_dir, h, bpath, sizeof(bpath));
+        if (get_block_path(store->base_dir, h, bpath, sizeof(bpath)) != 0)
+            return BLOCK_STORE_ERR_INVALID_ARG;
         struct stat bst;
         if (stat(bpath, &bst) != 0 || bst.st_size < 4) {
             return BLOCK_STORE_ERR_CORRUPT_BLOCK;
@@ -143,9 +164,10 @@ block_store_status_t block_store_open(block_store_t *store, const char *base_dir
         if (h < BLOCK_STORE_MAX_INDEX) {
             store->index[h].height = h;
             store->index[h].frame_len = (uint32_t)(bst.st_size - 4);
-            /* Head block has head_hash */
+            /* Block files carry no hash; the manifest vouches for the head only. */
             if (h == m.height - 1) {
                 memcpy(store->index[h].hash, m.head_hash, 32);
+                store->index[h].hash_known = true;
             }
             store->indexed_count = h + 1;
         }
@@ -171,7 +193,8 @@ block_store_status_t block_store_append_block(block_store_t *store,
     }
 
     char bpath[BLOCK_STORE_MAX_PATH];
-    get_block_path(store->base_dir, height, bpath, sizeof(bpath));
+    if (get_block_path(store->base_dir, height, bpath, sizeof(bpath)) != 0)
+        return BLOCK_STORE_ERR_INVALID_ARG;
 
     int bfd = open(bpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (bfd < 0) return BLOCK_STORE_ERR_IO;
@@ -196,10 +219,12 @@ block_store_status_t block_store_append_block(block_store_t *store,
     }
     close(bfd);
 
-    /* Atomically commit manifest */
+    /* Atomically commit manifest. On failure the block file stays: if the
+     * rename happened the manifest references it; otherwise it lies above the
+     * manifest height, where open ignores it and the next append at this
+     * height truncates it. */
     block_store_status_t mrc = write_manifest_atomic(store, height + 1, hash);
     if (mrc != BLOCK_STORE_OK) {
-        unlink(bpath);
         return mrc;
     }
 
@@ -207,6 +232,7 @@ block_store_status_t block_store_append_block(block_store_t *store,
     if (height < BLOCK_STORE_MAX_INDEX) {
         store->index[height].height = height;
         memcpy(store->index[height].hash, hash, 32);
+        store->index[height].hash_known = true;
         store->index[height].frame_len = (uint32_t)frame_len;
         if (height + 1 > store->indexed_count) {
             store->indexed_count = height + 1;
@@ -231,7 +257,8 @@ block_store_status_t block_store_read_block(const block_store_t *store,
     }
 
     char bpath[BLOCK_STORE_MAX_PATH];
-    get_block_path(store->base_dir, height, bpath, sizeof(bpath));
+    if (get_block_path(store->base_dir, height, bpath, sizeof(bpath)) != 0)
+        return BLOCK_STORE_ERR_INVALID_ARG;
 
     struct stat st;
     if (stat(bpath, &st) != 0 || st.st_size < 4) {
@@ -277,7 +304,8 @@ block_store_status_t block_store_get_hash_by_height(const block_store_t *store,
                                                     uint64_t height,
                                                     uint8_t out_hash[32]) {
     if (!store || !store->open || !out_hash) return BLOCK_STORE_ERR_INVALID_ARG;
-    if (height >= store->current_height || height >= store->indexed_count) {
+    if (height >= store->current_height || height >= store->indexed_count ||
+        !store->index[height].hash_known) {
         return BLOCK_STORE_ERR_NOT_FOUND;
     }
     memcpy(out_hash, store->index[height].hash, 32);

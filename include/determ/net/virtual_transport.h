@@ -13,12 +13,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
-#if defined(_WIN32)
-#include <BaseTsd.h>
-typedef SSIZE_T ssize_t;
-#else
 #include <sys/types.h>
-#endif
 #include "determ/net/event_loop.h"
 
 #ifdef __cplusplus
@@ -56,11 +51,7 @@ ssize_t determ_net_send(int fd, const void *buf, size_t len, int flags);
 #else
 
 /* Production zero-cost pass-throughs */
-#if defined(_WIN32)
-#include <winsock2.h>
-#else
 #include <sys/socket.h>
-#endif
 
 #define determ_net_recv(fd, buf, len, flags) recv((fd), (buf), (len), (flags))
 #define determ_net_send(fd, buf, len, flags) send((fd), (buf), (len), (flags))

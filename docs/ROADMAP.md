@@ -45,7 +45,8 @@
 | **Threshold crypto** — DKG ceremony | **block-beacon DE-SCOPED**; FROST module **FROZEN 2026-07-03**, then **REMOVED from the tree 2026-07-09** (pre-launch register B2; FROST_DEVIATION_NOTICE §8). The v2.10 doc set (`v2.10-DKG-SPEC.md` et al.) was deleted 2026-07-09, doc-consolidation inc.1 — `proofs/FROST_DEVIATION_NOTICE.md` §9 + git history are the design record |
 | **Post-quantum** — Dilithium/Falcon migration | v2.8 (in `V2-DESIGN.md`) |
 | **Tooling** — deterministic-simulation framework | `proofs/DSF-SPEC.md` |
-| **Portability** — C99 / MINIX reimplementation | `C99-MINIX-PORT.md` |
+| **Portability** — C99 / MINIX reimplementation (the owner's C99 migration; §0 has the 2026-09-23 status and the port-then-retire rule) | `C99-MINIX-PORT.md`, `proofs/K2_VDF_Soundness.md`, `proofs/tla/K2LocalAttempt.tla` |
+| **Consensus** — K=2 Proof of Sequential Work (ADR-004, accepted direction, not implemented) | `decisions/ADR-004-Fault-Model.md`; design notes (not proofs): `proofs/PoSW_Nakamoto_Safety.md`, `proofs/PoSW_Economic_Soundness.md`, `proofs/VRF_Sharding_Safety.md`, `proofs/tla/PoSWForkChoiceDesign.tla` |
 | **Launch** — v1.1 mainnet (address-derivation decision **DECIDED 2026-07-03**: formula frozen as-is — DECISION-LOG) | `proofs/V1.1-PLAN.md`, `proofs/AnonAddressDerivationMigration.md` |
 | **Full design space** | `V2-DESIGN.md` (v2 themes; 10 of 25 shipped), `V2-DAPP-DESIGN.md` (DApp themes; v2.18/v2.19 substrate shipped) |
 

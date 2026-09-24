@@ -2,13 +2,19 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
- * LLVM libFuzzer & Memory Safety Test Suite for Bare-Metal C99 State
+ * Ledger input sweep and local seam checks for the C99 prototype.
  *
- * Fuzz Targets:
- *   1. verify_triple_entry_tx: Mathematical overflow & overspend immunity
- *   2. OPAQUE DSSO structures: OPRF blind request, envelope unsealing, zero-knowledge auth
- *   3. Native DSF seams: determ_clock_now(), virtual clock fast-forwarding, socket readiness
- *   4. Reactor non-blocking multiplexer: zero-allocation echo server verification
+ * Checks:
+ *   1. verify_triple_entry_tx: overflow and overspend rejection
+ *   2. DSF seams: virtual clock fast-forward against the duel reveal deadline
+ *   3. Input sweep: each input drives a fresh ledger through up to four
+ *      transactions. The sender is always the registered key; nonce, amount,
+ *      fee, recipient and signature are shaped from the input so every check
+ *      of verify_triple_entry_tx is reached. Each verify and apply status must
+ *      equal a reference model, and after every apply the sum of balances plus
+ *      total_fees is unchanged, the sender balance only falls and the sender
+ *      nonce advances by exactly one on success and not at all on failure.
+ *   4. Reactor: non-blocking accept, send and echo over loopback
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -25,9 +31,7 @@
 #include <errno.h>
 
 #include "determ/ledger/state.h"
-#include "determ/crypto/opaque_dsso.h"
 #include "determ/crypto/ed25519/ed25519.h"
-#include "determ/crypto/secure_zero.h"
 #include <determ/crypto/sha2/sha2.h>
 #include "determ/net/reactor.h"
 #include "determ/consensus/duel_state.h"
@@ -40,73 +44,146 @@
     } \
 } while (0)
 
+#define FUZZ_SETUP_BYTES 8U
+#define FUZZ_MAX_TXS     4U
+
 static account_t s_test_sender;
+static uint8_t s_sender_seed[32];
+static const uint8_t s_receiver_key[32] = {
+    0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42,
+    0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42
+};
+static ledger_state_t s_fuzz_state, s_fuzz_before;
+/* Sweep coverage: how often each verify status (index -status) was reached. */
+static unsigned long s_verify_seen[10];
 
 static void init_fuzz_state(void) {
-    uint8_t seed[32];
     for (size_t i = 0; i < 32; ++i) {
-        seed[i] = (uint8_t)(i + 1);
+        s_sender_seed[i] = (uint8_t)(i + 1);
     }
-    determ_ed25519_pubkey_from_seed(seed, s_test_sender.pubkey);
+    determ_ed25519_pubkey_from_seed(s_sender_seed, s_test_sender.pubkey);
     s_test_sender.balance = 1000000ULL; /* 1,000,000 units initial balance */
     s_test_sender.nonce = 10;
 }
 
+/* Sum of every balance plus total_fees, as a 128-bit (hi, lo) pair. */
+static void total_value(const ledger_state_t *state, uint64_t *hi, uint64_t *lo) {
+    uint64_t h = 0, l = state->total_fees;
+    for (size_t i = 0; i < state->account_count; ++i) {
+        uint64_t balance = state->accounts[i].balance;
+        l += balance;
+        if (l < balance) h++;
+    }
+    *hi = h;
+    *lo = l;
+}
+
+/* The documented check order of verify_triple_entry_tx. */
+static int expected_verify(const account_t *sender, const triple_entry_tx_t *tx,
+                           uint64_t min_fee, bool signature_valid) {
+    uint64_t amount = tx->amount, fee = tx->fee;
+    if (memcmp(sender->pubkey, tx->from, LEDGER_PUBKEY_LEN) != 0) return LEDGER_ERR_PUBKEY_MISMATCH;
+    if (sender->nonce == UINT64_MAX || tx->nonce != sender->nonce + 1) return LEDGER_ERR_INVALID_NONCE;
+    if (fee < min_fee) return LEDGER_ERR_FEE_TOO_LOW;
+    if (amount > UINT64_MAX - fee) return LEDGER_ERR_OVERFLOW;
+    if (sender->balance < amount + fee) return LEDGER_ERR_OVERSPEND;
+    return signature_valid ? LEDGER_OK : LEDGER_ERR_INVALID_SIG;
+}
+
+/* One transaction record: the bytes are copied over triple_entry_tx_t; its
+ * first bytes (inside `from`, which is then replaced) select the shaping. */
+static void fuzz_one_tx(ledger_state_t *state, const uint8_t *rec, uint64_t min_fee) {
+    triple_entry_tx_t tx;
+    const uint8_t control = rec[0];
+    account_t *sender = ledger_find_account(state, s_test_sender.pubkey);
+    bool signature_valid = false;
+    TEST_ASSERT(sender != NULL);
+
+    memcpy(&tx, rec, sizeof(tx));
+    memcpy(tx.from, s_test_sender.pubkey, LEDGER_PUBKEY_LEN);
+    if (control & 0x01) tx.nonce = sender->nonce + 1;
+    if (control & 0x02) {
+        tx.amount >>= (rec[1] & 63);
+        tx.fee >>= (rec[2] & 63);
+    }
+    if (control & 0x04) memcpy(tx.to, s_test_sender.pubkey, LEDGER_PUBKEY_LEN);
+    else if (control & 0x08) memcpy(tx.to, s_receiver_key, LEDGER_PUBKEY_LEN);
+    /* A signature is examined only after every other check passes; sign only
+     * then (signing is the sweep's dominant cost). */
+    if ((control & 0x10) && expected_verify(sender, &tx, min_fee, true) == LEDGER_OK) {
+        uint8_t signing_bytes[LEDGER_TX_SIGNING_BYTES];
+        triple_entry_tx_signing_bytes(&tx, signing_bytes);
+        TEST_ASSERT(determ_ed25519_sign(s_sender_seed, s_test_sender.pubkey, signing_bytes,
+                                        sizeof(signing_bytes), tx.sig) == 0);
+        signature_valid = (control & 0x20) == 0;
+        if (!signature_valid) tx.sig[rec[3] & 63] ^= (uint8_t)(1U << (rec[3] >> 6));
+    }
+
+    const int want_verify = expected_verify(sender, &tx, min_fee, signature_valid);
+    const int got_verify = verify_triple_entry_tx(sender, &tx, min_fee);
+    TEST_ASSERT(got_verify == want_verify);
+    s_verify_seen[-got_verify]++;
+
+    /* Apply adds the fee accumulator, arena and receiver-balance checks. */
+    const account_t *receiver = ledger_find_account(state, tx.to);
+    int want_apply = want_verify;
+    if (want_apply == LEDGER_OK) {
+        if (UINT64_MAX - state->total_fees < tx.fee) want_apply = LEDGER_ERR_OVERFLOW;
+        else if (!receiver && state->account_count >= LEDGER_MAX_ACCOUNTS) want_apply = LEDGER_ERR_ARENA_FULL;
+        else if (receiver && receiver != sender && UINT64_MAX - receiver->balance < tx.amount)
+            want_apply = LEDGER_ERR_OVERFLOW;
+    }
+    const uint64_t old_nonce = sender->nonce, old_balance = sender->balance;
+    const uint64_t old_receiver = receiver ? receiver->balance : 0;
+    uint64_t hi_before, lo_before, hi_after, lo_after;
+    total_value(state, &hi_before, &lo_before);
+    memcpy(&s_fuzz_before, state, sizeof(*state));
+
+    TEST_ASSERT((int)ledger_apply_tx(state, &tx, min_fee) == want_apply);
+    total_value(state, &hi_after, &lo_after);
+    TEST_ASSERT(hi_after == hi_before && lo_after == lo_before);
+    sender = ledger_find_account(state, s_test_sender.pubkey);
+    TEST_ASSERT(sender != NULL && sender->balance <= old_balance);
+    if (want_apply != LEDGER_OK) {
+        TEST_ASSERT(memcmp(&s_fuzz_before, state, sizeof(*state)) == 0);
+        return;
+    }
+    TEST_ASSERT(sender->nonce == old_nonce + 1);
+    TEST_ASSERT(state->total_fees == s_fuzz_before.total_fees + tx.fee);
+    if (memcmp(tx.to, tx.from, LEDGER_PUBKEY_LEN) == 0) {
+        TEST_ASSERT(sender->balance == old_balance - tx.fee);
+    } else {
+        const account_t *credited = ledger_find_account(state, tx.to);
+        TEST_ASSERT(sender->balance == old_balance - tx.amount - tx.fee);
+        TEST_ASSERT(credited != NULL && credited->balance == old_receiver + tx.amount);
+        TEST_ASSERT(state->account_count == s_fuzz_before.account_count + (receiver ? 0U : 1U));
+    }
+}
+
 /*
- * LLVM libFuzzer Entrypoint
+ * LLVM libFuzzer Entrypoint: FUZZ_SETUP_BYTES of setup, then up to
+ * FUZZ_MAX_TXS records of sizeof(triple_entry_tx_t) bytes each.
  */
 int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
-    if (!Data || Size == 0) {
+    if (!Data || Size < FUZZ_SETUP_BYTES + sizeof(triple_entry_tx_t)) {
         return 0;
     }
+    const uint8_t setup = Data[0];
+    const uint64_t min_fee = Data[1];
 
-    /* ── Target 1: Fuzz verify_triple_entry_tx with arbitrary mutations ── */
-    triple_entry_tx_t tx;
-    memset(&tx, 0, sizeof(tx));
-    size_t copy_len = Size > sizeof(tx) ? sizeof(tx) : Size;
-    memcpy(&tx, Data, copy_len);
+    ledger_state_init(&s_fuzz_state);
+    TEST_ASSERT(ledger_register_account(&s_fuzz_state, s_test_sender.pubkey,
+                                        (setup & 0x01) ? UINT64_MAX : 1000000ULL) != NULL);
+    if (setup & 0x02)
+        TEST_ASSERT(ledger_register_account(&s_fuzz_state, s_receiver_key, UINT64_MAX - 1000ULL) != NULL);
+    if (setup & 0x04) s_fuzz_state.total_fees = UINT64_MAX - 1000ULL;
 
-    uint64_t min_fee = 100;
-    int rc = verify_triple_entry_tx(&s_test_sender, &tx, min_fee);
-
-    /* Mathematical invariant verification */
-    if (UINT64_MAX - tx.amount < tx.fee) {
-        /* Any addition overflow MUST be rejected */
-        TEST_ASSERT(rc == LEDGER_ERR_OVERFLOW || rc == LEDGER_ERR_PUBKEY_MISMATCH ||
-               rc == LEDGER_ERR_INVALID_NONCE || rc == LEDGER_ERR_FEE_TOO_LOW);
+    /* at <= Size holds throughout, so Size - at never wraps. */
+    for (size_t i = 0, at = FUZZ_SETUP_BYTES;
+         i < FUZZ_MAX_TXS && Size - at >= sizeof(triple_entry_tx_t);
+         ++i, at += sizeof(triple_entry_tx_t)) {
+        fuzz_one_tx(&s_fuzz_state, Data + at, min_fee);
     }
-    if ((UINT64_MAX - tx.amount >= tx.fee) && (s_test_sender.balance < tx.amount + tx.fee)) {
-        /* Overspend MUST be rejected */
-        TEST_ASSERT(rc == LEDGER_ERR_OVERSPEND || rc == LEDGER_ERR_PUBKEY_MISMATCH ||
-               rc == LEDGER_ERR_INVALID_NONCE || rc == LEDGER_ERR_FEE_TOO_LOW);
-    }
-
-    /* ── Target 2: Fuzz OPAQUE DSSO Structs & Multi-Party Handshake ──────── */
-    if (Size >= sizeof(opaque_oprf_request_t)) {
-        opaque_oprf_request_t req;
-        memcpy(&req, Data, sizeof(opaque_oprf_request_t));
-        opaque_oprf_response_t resp;
-        uint8_t dummy_key[32] = {0x07};
-        (void)opaque_dsso_oprf_evaluate(dummy_key, &req, &resp);
-    }
-
-    if (Size >= sizeof(opaque_envelope_t)) {
-        opaque_envelope_t env;
-        memcpy(&env, Data, sizeof(opaque_envelope_t));
-        uint8_t dec_buf[128];
-        size_t dec_len = 0;
-        uint8_t dummy_key[32] = {0x42};
-        (void)opaque_dsso_unseal_envelope(dummy_key, &env, dec_buf, &dec_len);
-
-        opaque_auth_request_t auth_req;
-        memset(&auth_req, 0, sizeof(auth_req));
-        if (Size >= sizeof(opaque_envelope_t) + sizeof(opaque_auth_request_t)) {
-            memcpy(&auth_req, Data + sizeof(opaque_envelope_t), sizeof(opaque_auth_request_t));
-        }
-        opaque_envelope_t released;
-        (void)opaque_dsso_verify_and_release(dummy_key, &auth_req, &env, &released);
-    }
-
     return 0;
 }
 
@@ -153,7 +230,7 @@ static void on_test_client_read(int fd, const uint8_t *data, size_t len, void *u
  * ── 1. Extreme Integer Overflow & Overspend Test ─────────────────────────────
  */
 static void test_extreme_overflow_and_overspend(void) {
-    printf("[TEST] 1. Mathematical Overflow & Overspend Immunity Sweep...\n");
+    printf("[TEST] 1. Overflow and overspend rejection over 121 amount/fee pairs...\n");
 
     const uint64_t test_amounts[] = {
         0ULL, 1ULL, 50ULL, 100ULL, 1000000ULL,
@@ -215,91 +292,14 @@ static void test_extreme_overflow_and_overspend(void) {
     int overflow_rc = verify_triple_entry_tx(&s_test_sender, &overflow_tx, 100);
     TEST_ASSERT(overflow_rc == LEDGER_ERR_OVERFLOW);
 
-    printf("  -> PASS: 121 extreme combinations tested. Overspends and overflows strictly rejected.\n");
+    printf("  -> PASS: every overflowing or overspending pair was rejected with its status code.\n");
 }
 
 /*
- * ── 2. OPAQUE DSSO Zero-Knowledge Authentication Test ───────────────────────
- */
-static void test_opaque_mock_user_authentication(void) {
-    printf("[TEST] 2. OPAQUE aPAKE Mock User Authentication (Zero-Knowledge)...\n");
-
-    /* Plaintext password exists exclusively on client stack */
-    uint8_t password[] = "SuperSecureQuantumResistantPassword#2026";
-    size_t pwd_len = strlen((char *)password);
-
-    uint8_t blind_scalar[32] = {
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-        0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
-        0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38
-    };
-
-    uint8_t server_oprf_key[32] = {
-        0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11,
-        0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21,
-        0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31,
-        0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41
-    };
-
-    /* 1. Client Blinds Password */
-    opaque_oprf_request_t req;
-    TEST_ASSERT(opaque_dsso_oprf_blind(password, pwd_len, blind_scalar, &req) == 0);
-
-    /* 2. Server Blindly Evaluates (Never learns plaintext or scalar) */
-    opaque_oprf_response_t resp;
-    TEST_ASSERT(opaque_dsso_oprf_evaluate(server_oprf_key, &req, &resp) == 0);
-
-    /* 3. Client Finalizes OPRF */
-    uint8_t oprf_output[32];
-    TEST_ASSERT(opaque_dsso_oprf_finalize(password, pwd_len, blind_scalar, &resp, oprf_output) == 0);
-
-    /* Zero out plaintext password from memory immediately */
-    determ_secure_zero(password, sizeof(password));
-
-    /* 4. Derive Keys and Seal Private Credential Envelope */
-    uint8_t envelope_key[32];
-    uint8_t client_proof[32];
-    TEST_ASSERT(opaque_dsso_derive_keys(oprf_output, envelope_key, client_proof) == 0);
-
-    const uint8_t secret_seed[32] = "USER-COLD-WALLET-SEED-BYTES-42";
-    uint8_t nonce[OPAQUE_ENVELOPE_NONCE_LEN] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
-    uint8_t client_pk[OPAQUE_ID_LEN] = {0xAA};
-    uint8_t server_pk[OPAQUE_ID_LEN] = {0xBB};
-
-    opaque_envelope_t envelope;
-    TEST_ASSERT(opaque_dsso_seal_envelope(envelope_key, nonce, secret_seed, 32,
-                                          client_pk, server_pk, &envelope) == 0);
-
-    /* 5. Zero-Knowledge Authorization: Verify Proof & Release Envelope */
-    opaque_auth_request_t auth_req;
-    memcpy(auth_req.account_id, client_pk, 32);
-    memcpy(auth_req.client_identity_proof, client_proof, 32);
-
-    opaque_envelope_t released_env;
-    bool auth_ok = opaque_dsso_verify_and_release(client_proof, &auth_req, &envelope, &released_env);
-    TEST_ASSERT(auth_ok == true);
-
-    /* 6. Unseal Released Envelope to Recover Secret */
-    uint8_t recovered_secret[64];
-    size_t recovered_len = 0;
-    TEST_ASSERT(opaque_dsso_unseal_envelope(envelope_key, &released_env, recovered_secret, &recovered_len) == 0);
-    TEST_ASSERT(recovered_len == 32);
-    TEST_ASSERT(memcmp(recovered_secret, secret_seed, 32) == 0);
-
-    /* Verify that a forged identity proof strictly fails and zeroes output */
-    auth_req.client_identity_proof[0] ^= 0xFF;
-    bool forged_ok = opaque_dsso_verify_and_release(client_proof, &auth_req, &envelope, &released_env);
-    TEST_ASSERT(forged_ok == false);
-
-    printf("  -> PASS: Mock user authenticated via OPAQUE without exposing secret; forged proof rejected.\n");
-}
-
-/*
- * ── 3. Native DSF Seams & Virtual Clock Fast-Forward ─────────────────────────
+ * ── 2. Native DSF Seams & Virtual Clock Fast-Forward ─────────────────────────
  */
 static void test_native_dsf_seams(void) {
-    printf("[TEST] 3. Native DSF Seams & Virtual Clock 2-Second Reveal Fast-Forward...\n");
+    printf("[TEST] 2. Virtual clock fast-forward past the 2 s reveal deadline...\n");
 
     /* Reset virtual clock and transport */
     dsf_reset_seams();
@@ -334,33 +334,46 @@ static void test_native_dsf_seams(void) {
     TEST_ASSERT(sm.state == DUEL_STATE_ABORTED);
     TEST_ASSERT(sm.vdf_input_len == 0);
 
-    printf("  -> PASS: Virtual clock jumped 2001ms instantly without CPU sleep; buzzer triggered strict 2-of-2 skip.\n");
+    printf("  -> PASS: late reveal dropped; attempt aborted as incomplete.\n");
 }
 
 /*
- * ── 4. Simulated Fuzzing Mutation Sweep ──────────────────────────────────────
+ * ── 3. Simulated Fuzzing Mutation Sweep ──────────────────────────────────────
  */
 static void test_malformed_fuzzing_mutations(void) {
-    printf("[TEST] 4. Malformed Byte Array Fuzzing Sweep (5,000 mutations)...\n");
-    uint8_t fuzz_buf[256];
+    printf("[TEST] 3. Random ledger sweep (5000 inputs, up to %u transactions each)...\n", FUZZ_MAX_TXS);
+    uint8_t fuzz_buf[FUZZ_SETUP_BYTES + FUZZ_MAX_TXS * sizeof(triple_entry_tx_t)];
+    const size_t min_len = FUZZ_SETUP_BYTES + sizeof(triple_entry_tx_t);
     uint32_t lcg = 0x12345678;
 
+    memset(s_verify_seen, 0, sizeof(s_verify_seen));
     for (int iter = 0; iter < 5000; iter++) {
         for (size_t k = 0; k < sizeof(fuzz_buf); k++) {
             lcg = lcg * 1664525U + 1013904223U;
             fuzz_buf[k] = (uint8_t)(lcg >> 24);
         }
-        size_t fuzz_len = (lcg % (sizeof(fuzz_buf) - sizeof(triple_entry_tx_t) + 1)) + sizeof(triple_entry_tx_t);
+        size_t fuzz_len = (lcg % (sizeof(fuzz_buf) - min_len + 1)) + min_len;
         LLVMFuzzerTestOneInput(fuzz_buf, fuzz_len);
     }
-    printf("  -> PASS: 5,000 malformed frames fuzzed with zero memory violations.\n");
+    /* The sweep must reach every check past the key comparison. */
+    TEST_ASSERT(s_verify_seen[-LEDGER_OK] > 0);
+    TEST_ASSERT(s_verify_seen[-LEDGER_ERR_INVALID_NONCE] > 0);
+    TEST_ASSERT(s_verify_seen[-LEDGER_ERR_FEE_TOO_LOW] > 0);
+    TEST_ASSERT(s_verify_seen[-LEDGER_ERR_OVERFLOW] > 0);
+    TEST_ASSERT(s_verify_seen[-LEDGER_ERR_OVERSPEND] > 0);
+    TEST_ASSERT(s_verify_seen[-LEDGER_ERR_INVALID_SIG] > 0);
+    printf("  -> PASS: statuses matched the reference model; value conserved after every apply "
+           "(ok %lu, nonce %lu, fee %lu, overflow %lu, overspend %lu, signature %lu).\n",
+           s_verify_seen[-LEDGER_OK], s_verify_seen[-LEDGER_ERR_INVALID_NONCE],
+           s_verify_seen[-LEDGER_ERR_FEE_TOO_LOW], s_verify_seen[-LEDGER_ERR_OVERFLOW],
+           s_verify_seen[-LEDGER_ERR_OVERSPEND], s_verify_seen[-LEDGER_ERR_INVALID_SIG]);
 }
 
 /*
- * ── 5. Native Event Loop Reactor Verification ────────────────────────────────
+ * ── 4. Native Event Loop Reactor Verification ────────────────────────────────
  */
 static void test_reactor_nonblocking(void) {
-    printf("[TEST] 5. Native Event Loop Reactor Non-Blocking I/O...\n");
+    printf("[TEST] 4. Reactor loopback accept, send and echo...\n");
     reactor_t reactor;
     int rc_init = reactor_init(&reactor);
     TEST_ASSERT(rc_init == 0);
@@ -418,24 +431,23 @@ static void test_reactor_nonblocking(void) {
     TEST_ASSERT(memcmp(ctx.received_data, msg, strlen(msg)) == 0);
 
     reactor_destroy(&reactor);
-    printf("  -> PASS: Reactor multiplexed non-blocking accept, send, and echo cleanly.\n");
+    printf("  -> PASS: accepted, sent and received the echoed bytes.\n");
 }
 
 int main(void) {
     printf("=================================================================\n");
-    printf("Running LLVM libFuzzer & Memory Safety Sweep (Pure C99)\n");
+    printf("Running C99 ledger sweep, DSF seam and reactor checks\n");
     printf("=================================================================\n");
 
     init_fuzz_state();
 
     test_extreme_overflow_and_overspend();
-    test_opaque_mock_user_authentication();
     test_native_dsf_seams();
     test_malformed_fuzzing_mutations();
     test_reactor_nonblocking();
 
     printf("=================================================================\n");
-    printf("ALL MEMORY SAFETY & FUZZING TESTS PASSED SUCCESSFULLY.\n");
+    printf("PASS: fuzz_ledger\n");
     printf("=================================================================\n");
     return 0;
 }

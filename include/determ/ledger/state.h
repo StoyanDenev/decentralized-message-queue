@@ -2,13 +2,18 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
- * Bare-Metal C99 Flat Triple-Entry Bookkeeping Ledger
+ * In-memory single-signature transfer ledger for the C99 prototype. (Type and
+ * function names keep the historical "triple_entry" prefix; the ledger keeps
+ * only balances, nonces and a total_fees sink.)
  *
- * Guarantees:
- *   - Zero dynamic heap memory allocation (no malloc/free).
- *   - Flat, zero-allocation memory structure (determ_account_t global_ledger[MAX_ACCOUNTS]).
- *   - Cryptographically enforced balance invariants: no integer overflow or underflow.
- *   - Ed25519 signature authentication on all state transitions.
+ *   - Zero dynamic heap memory allocation: a fixed arena of LEDGER_MAX_ACCOUNTS.
+ *   - ledger_apply_tx applies a transfer only when the Ed25519 signature by
+ *     `from` verifies, and rejects a wrong nonce, a fee below the minimum, an
+ *     amount + fee overflow, an overspend, a total_fees overflow and a
+ *     receiver-balance overflow, leaving the state unchanged (see
+ *     verify_triple_entry_tx and ledger_apply_tx below).
+ *   - ledger_register_account sets a balance without any signature: it is the
+ *     caller's genesis/test hook, not an authenticated transition.
  */
 
 #ifndef DETERMINISTIC_LEDGER_STATE_H
@@ -22,8 +27,7 @@
 extern "C" {
 #endif
 
-#define MAX_ACCOUNTS            1024U
-#define LEDGER_MAX_ACCOUNTS     MAX_ACCOUNTS
+#define LEDGER_MAX_ACCOUNTS     1024U
 #define LEDGER_PUBKEY_LEN       32U
 #define LEDGER_SIG_LEN          64U
 #define LEDGER_TX_SIGNING_BYTES (32U + 32U + 8U + 8U + 8U) /* 88 bytes */
@@ -45,15 +49,13 @@ typedef struct LEDGER_PACKED {
     uint8_t  pubkey[LEDGER_PUBKEY_LEN];
     uint64_t balance;
     uint64_t nonce;
-} determ_account_t;
-
-typedef determ_account_t account_t;
+} account_t;
 
 /*
- * Packed C99 Triple-Entry Transaction structure:
- * Entry 1: Sender debit (from, amount + fee)
- * Entry 2: Receiver credit (to, amount; fee credited to block aggregator)
- * Entry 3: Cryptographic ledger signature / receipt (sig over signing bytes)
+ * Packed C99 transfer (in-memory layout, not a wire format): `from` pays
+ * amount + fee, `to` receives amount, and the fee is added to
+ * ledger_state_t.total_fees; it is credited to no account. `sig` is an
+ * Ed25519 signature by `from` over triple_entry_tx_signing_bytes().
  */
 typedef struct LEDGER_PACKED {
     uint8_t  from[LEDGER_PUBKEY_LEN];
@@ -79,11 +81,6 @@ typedef enum {
     LEDGER_ERR_PUBKEY_MISMATCH       = -9
 } ledger_status_t;
 
-#define ERR_OVERFLOW        LEDGER_ERR_OVERFLOW
-#define ERR_OVERSPEND       LEDGER_ERR_OVERSPEND
-#define ERR_INVALID_NONCE   LEDGER_ERR_INVALID_NONCE
-#define ERR_INVALID_SIG     LEDGER_ERR_INVALID_SIG
-
 /*
  * Flat In-Memory Ledger State
  * Statically sized arena of accounts with zero heap allocation.
@@ -95,40 +92,26 @@ typedef struct {
 } ledger_state_t;
 
 /*
- * Statically allocated global ledger memory arena
- */
-extern determ_account_t global_ledger[MAX_ACCOUNTS];
-
-/*
- * Global ledger memory arena administration
- */
-void global_ledger_init(void);
-void global_ledger_clear(void);
-int  global_ledger_register(const uint8_t pubkey[LEDGER_PUBKEY_LEN], uint64_t balance, uint64_t nonce);
-determ_account_t* global_ledger_find(const uint8_t pubkey[LEDGER_PUBKEY_LEN]);
-
-/*
- * Serialize the 88 canonical signing bytes for a Triple-Entry Transaction:
+ * Serialize the 88 canonical signing bytes of a transfer:
  * [from(32)] || [to(32)] || [BE64(amount)] || [BE64(fee)] || [BE64(nonce)]
  */
 void triple_entry_tx_signing_bytes(const triple_entry_tx_t *tx,
                                    uint8_t out_signing_bytes[LEDGER_TX_SIGNING_BYTES]);
 
 /*
- * Cryptographically verify a raw transaction payload against the global_ledger arena.
- * Checks tx_nonce == account.nonce + 1, guards against integer overflow and overspends.
- */
-int verify_triple_entry_tx_payload(const uint8_t *tx_payload);
-
-/*
- * Verify a Triple-Entry Transaction against a specific sender account.
+ * Check a transfer against the sender's account, in this order: `from` equals
+ * the account key; nonce == account nonce + 1 (an account at UINT64_MAX can
+ * send nothing); fee >= min_fee; amount + fee does not overflow; balance >=
+ * amount + fee; Ed25519 signature over the signing bytes. Returns LEDGER_OK
+ * or the ledger_status_t of the first failing check.
  */
 int verify_triple_entry_tx(const account_t *sender,
                            const triple_entry_tx_t *tx,
                            uint64_t min_fee);
 
 /*
- * Verify a Triple-Entry Transaction directly against an isolated ledger state.
+ * verify_triple_entry_tx against the state's account for tx->from
+ * (LEDGER_ERR_ACCOUNT_NOT_FOUND when there is none).
  */
 int verify_triple_entry_tx_state(const triple_entry_tx_t *tx,
                                  const ledger_state_t *state,
@@ -140,8 +123,8 @@ int verify_triple_entry_tx_state(const triple_entry_tx_t *tx,
 void ledger_state_init(ledger_state_t *state);
 
 /*
- * Register or update an account in the flat ledger arena.
- * Returns pointer to account_t in state, or NULL if arena is full.
+ * Register an account with initial_balance and nonce 0. An existing account
+ * is returned unchanged. Returns NULL when the arena is full.
  */
 account_t* ledger_register_account(ledger_state_t *state,
                                    const uint8_t pubkey[LEDGER_PUBKEY_LEN],
@@ -155,22 +138,34 @@ account_t* ledger_find_account(ledger_state_t *state,
                                const uint8_t pubkey[LEDGER_PUBKEY_LEN]);
 
 /*
- * Apply a Triple-Entry Transaction with zero heap allocation.
- * Uses only stack variables and updates state in-place.
+ * Apply a transfer in place with zero heap allocation: after the checks of
+ * verify_triple_entry_tx, debit `from` by amount + fee (only the fee for a
+ * self-transfer), credit `to` with amount (registering it with balance 0 when
+ * absent), add the fee to total_fees (credited to no account) and set the
+ * sender nonce. Fails without changing the state on any error, including a
+ * total_fees or receiver-balance overflow and a full account arena.
  */
 ledger_status_t ledger_apply_tx(ledger_state_t *state,
                                 const triple_entry_tx_t *tx,
                                 uint64_t min_fee);
 
 /*
- * Compute the 32-byte Merkle root of an array of Triple-Entry transactions.
+ * Transaction root: leaf_i = SHA-256(triple_entry_tx_signing_bytes(tx_i) ||
+ * sig_i); a pairwise SHA-256 tree in array order carries an odd node up
+ * unchanged; root = SHA-256(BE64(count) || tree root), the tree root being 32
+ * zero bytes when count == 0. Returns -1 (out_root untouched) when
+ * count > LEDGER_MAX_ACCOUNTS or txs is NULL with count > 0.
  */
 int ledger_compute_tx_root(const triple_entry_tx_t *txs,
                            size_t count,
                            uint8_t out_root[32]);
 
 /*
- * Compute the 32-byte Merkle root of the flat ledger state accounts.
+ * State root over the accounts in arena (registration) order:
+ * leaf_i = SHA-256(pubkey || BE64(balance) || BE64(nonce)), with the tree and
+ * count commitment of ledger_compute_tx_root. total_fees is not committed.
+ * Returns -1 (out_root untouched) for a NULL state or
+ * account_count > LEDGER_MAX_ACCOUNTS.
  */
 int ledger_compute_state_root(const ledger_state_t *state,
                              uint8_t out_root[32]);

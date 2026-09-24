@@ -208,7 +208,7 @@ removed; `SELFTEST=1` proves each detector live).
 
 ## 5. Test surface
 
-`tools/test_light_state.sh` — 27 offline assertions, deterministic on every host
+`tools/test_light_state.sh` — 29 offline assertions, deterministic on every host
 (the persistence module is daemon-free): (A) `state --selftest` (the in-binary
 round-trip + 5 fail-closed reject paths: malformed JSON, bad `schema_version`,
 short `genesis_hash`, missing field, empty-`state_root` round-trip); (B)

@@ -50,12 +50,19 @@ int http_rpc_server_init(http_rpc_server_t *server, const http_rpc_config_t *con
     if (!server || !config) return -1;
     memset(server, 0, sizeof(*server));
     server->server_fd = -1;
-    server->port = config->port;
-    server->rpc_ctx = config->rpc_ctx;
-
+    /* Before any failure return: close() after a failed init must not see fd 0. */
     for (size_t i = 0; i < HTTP_RPC_MAX_CLIENTS; i++) {
         server->clients[i].fd = -1;
         server->clients[i].state = HTTP_CLIENT_INACTIVE;
+    }
+    server->port = config->port;
+    server->rpc_ctx = config->rpc_ctx;
+    {
+        /* Loopback unless the caller names an address explicitly. */
+        struct in_addr bind_addr;
+        const char *ip = config->bind_ip ? config->bind_ip : "127.0.0.1";
+        if (inet_pton(AF_INET, ip, &bind_addr) != 1) return -1;
+        server->bind_addr_be = (uint32_t)bind_addr.s_addr;
     }
     return 0;
 }
@@ -78,7 +85,7 @@ int http_rpc_server_start(http_rpc_server_t *server) {
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(server->port);
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_addr.s_addr = server->bind_addr_be;
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         close(fd);
@@ -106,7 +113,6 @@ static void send_http_error(http_client_t *c, int status_code, const char *statu
                            "HTTP/1.1 %d %s\r\n"
                            "Content-Type: text/plain\r\n"
                            "Content-Length: %zu\r\n"
-                           "Access-Control-Allow-Origin: *\r\n"
                            "Connection: close\r\n"
                            "\r\n"
                            "%s",
@@ -139,7 +145,6 @@ static int http_content_length(const uint8_t *data, size_t header_len, size_t *o
     int seen = 0;
     if (header_len > HTTP_RPC_BUF_SIZE - 1) return 413;
     const size_t limit = (HTTP_RPC_BUF_SIZE - 1) - header_len;
-    (void)limit;
     while (pos + 1 < header_len && !(data[pos] == '\r' && data[pos + 1] == '\n')) ++pos;
     if (pos + 1 >= header_len) return 400;
     pos += 2; /* Skip the request line. */
@@ -188,35 +193,14 @@ static void handle_client_request(http_rpc_server_t *server, http_client_t *c) {
 
     size_t header_len = (size_t)(hdr_end + 4 - (char *)c->rx_buf);
 
-    /* 1. CORS Preflight OPTIONS */
-    if (strncasecmp((char *)c->rx_buf, "OPTIONS ", 8) == 0) {
-        int written = snprintf((char *)c->tx_buf, sizeof(c->tx_buf),
-                               "HTTP/1.1 204 No Content\r\n"
-                               "Access-Control-Allow-Origin: *\r\n"
-                               "Access-Control-Allow-Methods: POST, GET, OPTIONS\r\n"
-                               "Access-Control-Allow-Headers: Content-Type\r\n"
-                               "Content-Length: 0\r\n"
-                               "Connection: close\r\n"
-                               "\r\n");
-        if (written > 0 && (size_t)written < sizeof(c->tx_buf)) {
-            c->tx_len = (size_t)written;
-            c->tx_sent = 0;
-            c->state = HTTP_CLIENT_SENDING;
-        } else {
-            close_client(c);
-        }
-        return;
-    }
-
-    /* 2. Healthcheck GET */
+    /* 1. Healthcheck GET */
     if (strncasecmp((char *)c->rx_buf, "GET ", 4) == 0) {
         static const char health_body[] = "{\"status\":\"OK\",\"node\":\"determ-c99\"}\n";
         size_t h_len = sizeof(health_body) - 1;
         int written = snprintf((char *)c->tx_buf, sizeof(c->tx_buf),
                                "HTTP/1.1 200 OK\r\n"
                                "Content-Type: application/json\r\n"
-                               "Access-Control-Allow-Origin: *\r\n"
-                               "Content-Length: %zu\r\n"
+                                   "Content-Length: %zu\r\n"
                                "Connection: close\r\n"
                                "\r\n"
                                "%s",
@@ -231,9 +215,9 @@ static void handle_client_request(http_rpc_server_t *server, http_client_t *c) {
         return;
     }
 
-    /* 3. JSON-RPC POST */
+    /* 2. JSON-RPC POST */
     if (strncasecmp((char *)c->rx_buf, "POST ", 5) != 0) {
-        send_http_error(c, 405, "Method Not Allowed", "Only POST, GET, OPTIONS supported");
+        send_http_error(c, 405, "Method Not Allowed", "Only POST and GET supported");
         return;
     }
 
@@ -268,7 +252,6 @@ static void handle_client_request(http_rpc_server_t *server, http_client_t *c) {
     int written = snprintf((char *)c->tx_buf, sizeof(c->tx_buf),
                            "HTTP/1.1 200 OK\r\n"
                            "Content-Type: application/json\r\n"
-                           "Access-Control-Allow-Origin: *\r\n"
                            "Content-Length: %d\r\n"
                            "Connection: close\r\n"
                            "\r\n"
@@ -341,8 +324,8 @@ int http_rpc_server_poll(http_rpc_server_t *server, int timeout_ms) {
                 /* Server saturated: 503 Service Unavailable */
                 static const char sat_resp[] =
                     "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                ssize_t w = write(c_fd, sat_resp, sizeof(sat_resp) - 1);
-                (void)w;
+                /* Best effort: the connection is closed either way. */
+                if (write(c_fd, sat_resp, sizeof(sat_resp) - 1) < 0) { /* ignored */ }
                 close(c_fd);
             }
         }

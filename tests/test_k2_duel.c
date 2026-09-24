@@ -25,10 +25,39 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     return 0;
 }
 #ifndef LIBFUZZER_ENABLED
+/* Regression vectors pinned from this implementation (the construction has no
+ * external reference): seed "determ-vdf-kat" (14 bytes) at 1000, 1001 and 2000
+ * iterations. Each iteration count must change the output. */
+static void test_vdf_known_answer(void) {
+    static const uint8_t seed[] = "determ-vdf-kat";
+    static const uint64_t iterations[3] = { 1000, 1001, 2000 };
+    static const char *const expected[3] = {
+        "e972c5f504df3f9955241c2f09f95f35189da84e8542e24d73d918bec4c89929",
+        "77525748738bd207a2a12e0003c46d86ef43385a4fa221818113b985bec6f933",
+        "2aa78045d45851c4930eda6ce41ec40fcc4a3a0321a4472ded92dbbef44ccfc9"
+    };
+    uint8_t out[3][VDF_OUTPUT_LEN];
+    for (size_t i = 0; i < 3; ++i) {
+        char hex[2 * VDF_OUTPUT_LEN + 1];
+        CHECK(vdf_init(&vdf, seed, sizeof(seed) - 1, iterations[i]) == 0);
+        CHECK(vdf_evaluate(&vdf, out[i]) == 0);
+        for (size_t j = 0; j < VDF_OUTPUT_LEN; ++j)
+            snprintf(hex + 2 * j, 3, "%02x", out[i][j]);
+        CHECK(strcmp(hex, expected[i]) == 0);
+    }
+    CHECK(memcmp(out[0], out[1], VDF_OUTPUT_LEN) != 0);
+    CHECK(memcmp(out[0], out[2], VDF_OUTPUT_LEN) != 0);
+    CHECK(memcmp(out[1], out[2], VDF_OUTPUT_LEN) != 0);
+    CHECK(vdf_verify(&vdf, seed, sizeof(seed) - 1, 1000, out[0]) == 1);
+    CHECK(vdf_verify(&vdf, seed, sizeof(seed) - 1, 1001, out[0]) == 0);
+    puts("PASS: pinned VDF outputs at 1000/1001/2000 iterations; each count gives a distinct output");
+}
+
 int main(void) {
     uint8_t output[32];
     uint8_t expected[sizeof(a) + sizeof(b) + 8];
     size_t len = 0;
+    test_vdf_known_answer();
     CHECK(duel_state_init(&sm) == DUEL_SUCCESS);
     CHECK(duel_state_start_commitment_phase(&sm) == DUEL_SUCCESS);
     CHECK(duel_state_start_reveal_window(&sm) == DUEL_ERR_INVALID_STATE);

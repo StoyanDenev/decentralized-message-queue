@@ -1,0 +1,3753 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Determ Contributors
+#include <determ/chain/chain.hpp>
+#include <determ/chain/registration_delay.hpp>
+#include <determ/chain/eligibility_floor.hpp>
+#include <determ/chain/genesis.hpp>
+#include <determ/chain/params.hpp>
+#include <determ/crypto/sha256.hpp>
+#include <determ/crypto/random.hpp>
+#include <determ/crypto/merkle.hpp>
+#include <determ/crypto/ed25519/ed25519_group.h>
+#include <determ/crypto/pedersen/ctxbundle.h>   // §3.22 determ_shield_verify / determ_unshield_verify
+#include <determ/chain/shielded.hpp>            // §3.22b unshield_spend_ctx_hash
+#include <determ/chain/ctx_enote.hpp>           // NC-8 §5 enote-region split/parse (shared mirror)
+#include <determ/util/json_validate.hpp>
+#include <nlohmann/json.hpp>
+#include <fstream>
+#include <filesystem>
+#include <stdexcept>
+#include <set>   // §3.22c CONFIDENTIAL_TRANSFER input/output dedup
+#include <cstdio>
+#include <cstring>     // D2 inc8 binary store: memcmp / memcpy over frame bytes
+#include <algorithm>   // D2 inc8: std::all_of over the manifest head_hash
+#include <iterator>    // D2 inc8: istreambuf_iterator whole-file reads
+#include <atomic>   // A4.5 crash-consistency test seam (g_save_crash_countdown)
+
+namespace determ::chain {
+
+using json = nlohmann::json;
+namespace fs = std::filesystem;
+using determ::crypto::sha256;
+using determ::util::json_require_array;
+
+// Registration / deregistration randomized delay: the formula + window now
+// live in include/determ/chain/registration_delay.hpp (R52 — extracted so
+// the light client's --track-registry replay shares the ONE definition;
+// S-043 single-formula discipline). Byte-identical to the former static
+// derive_delay here; the state-root goldens (test-consensus-vectors) and
+// test-randomized-delay pin it.
+
+// S-007: portable checked u64 addition. Returns false on overflow.
+// Used at every balance/counter mutation site that could realistically
+// overflow under adversarial genesis or accumulated-fees scenarios.
+// MSVC doesn't have __builtin_add_overflow; the if-check is uniformly
+// portable and the compiler optimizes it to a single ADC/JC sequence.
+static inline bool checked_add_u64(uint64_t a, uint64_t b, uint64_t* out) {
+    if (a > UINT64_MAX - b) return false;
+    *out = a + b;
+    return true;
+}
+
+Chain::Chain(Block genesis) {
+    auto applied = apply_transactions(genesis);
+    tx_applied_.push_back(std::move(applied));
+    blocks_.push_back(std::move(genesis));
+}
+
+void Chain::append(Block b) {
+    if (!blocks_.empty() && b.prev_hash != head_hash())
+        throw std::runtime_error("Block prev_hash mismatch");
+    auto applied = apply_transactions(b);
+    tx_applied_.push_back(std::move(applied));
+    blocks_.push_back(std::move(b));
+}
+
+const Block& Chain::head() const {
+    if (blocks_.empty()) throw std::runtime_error("Empty chain");
+    return blocks_.back();
+}
+
+const Block& Chain::at(uint64_t index) const {
+    if (index >= blocks_.size()) throw std::out_of_range("Block index out of range");
+    return blocks_[static_cast<size_t>(index)];
+}
+
+bool Chain::is_tx_applied(uint64_t index, size_t tx_index) const {
+    if (index >= tx_applied_.size())
+        return false;
+    size_t rel = static_cast<size_t>(index);
+    if (tx_index >= tx_applied_[rel].size())
+        return false;
+    return tx_applied_[rel][tx_index];
+}
+
+Hash Chain::head_hash() const {
+    return head().compute_hash();
+}
+
+// ─── State accessors ─────────────────────────────────────────────────────────
+
+uint64_t Chain::balance(const std::string& domain) const {
+    auto it = accounts_.find(domain);
+    return it != accounts_.end() ? it->second.balance : 0;
+}
+
+uint64_t Chain::next_nonce(const std::string& domain) const {
+    auto it = accounts_.find(domain);
+    return it != accounts_.end() ? it->second.next_nonce : 0;
+}
+
+// A9 Phase 2C: lock-free committed-view readers. atomic_load the
+// shared_ptr (lock-free on all major platforms for shared_ptr<T>),
+// then read from the contents. The snapshot is immutable for as long
+// as the local shared_ptr `p` holds it; the writer's atomic_store at
+// apply commit publishes a NEW shared_ptr without disturbing readers.
+// committed_accounts_view_ is null only on a freshly-constructed
+// Chain with no apply yet — return 0 in that edge case (matches the
+// "domain not found" semantics of the locked path).
+// Suppress MSVC's C4996 deprecation warning on std::atomic_load /
+// atomic_store free functions for shared_ptr. They are deprecated in
+// C++20 in favor of std::atomic<std::shared_ptr<T>> but remain
+// functional and well-supported. Migration is a follow-on cleanup;
+// the warning suppression is local to the four call sites in this
+// file. When the toolchain moves to C++26 (where the free functions
+// are removed), convert committed_accounts_view_ to
+// std::atomic<std::shared_ptr<const std::map<...>>> and rewrite the
+// call sites mechanically.
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4996)
+#endif
+
+std::shared_ptr<const Chain::CommittedStateBundle>
+Chain::committed_state_view() const {
+    return std::atomic_load(&committed_state_view_);
+}
+
+uint64_t Chain::balance_lockfree(const std::string& domain) const {
+    auto p = std::atomic_load(&committed_state_view_);
+    if (!p) return 0;
+    auto it = p->accounts.find(domain);
+    return it != p->accounts.end() ? it->second.balance : 0;
+}
+
+uint64_t Chain::next_nonce_lockfree(const std::string& domain) const {
+    auto p = std::atomic_load(&committed_state_view_);
+    if (!p) return 0;
+    auto it = p->accounts.find(domain);
+    return it != p->accounts.end() ? it->second.next_nonce : 0;
+}
+
+uint64_t Chain::stake_lockfree(const std::string& domain) const {
+    auto p = std::atomic_load(&committed_state_view_);
+    if (!p) return 0;
+    auto it = p->stakes.find(domain);
+    return it != p->stakes.end() ? it->second.locked : 0;
+}
+
+uint64_t Chain::stake_unlock_height_lockfree(const std::string& domain) const {
+    auto p = std::atomic_load(&committed_state_view_);
+    if (!p) return UINT64_MAX;
+    auto it = p->stakes.find(domain);
+    return it != p->stakes.end() ? it->second.unlock_height : UINT64_MAX;
+}
+
+std::optional<RegistryEntry> Chain::registrant_lockfree(const std::string& domain) const {
+    auto p = std::atomic_load(&committed_state_view_);
+    if (!p) return std::nullopt;
+    auto it = p->registrants.find(domain);
+    if (it == p->registrants.end()) return std::nullopt;
+    return it->second;
+}
+
+std::optional<DAppEntry> Chain::dapp_lockfree(const std::string& domain) const {
+    auto p = std::atomic_load(&committed_state_view_);
+    if (!p) return std::nullopt;
+    auto it = p->dapp_registry.find(domain);
+    if (it == p->dapp_registry.end()) return std::nullopt;
+    return it->second;
+}
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
+uint64_t Chain::stake(const std::string& domain) const {
+    auto it = stakes_.find(domain);
+    return it != stakes_.end() ? it->second.locked : 0;
+}
+
+uint64_t Chain::stake_unlock_height(const std::string& domain) const {
+    auto it = stakes_.find(domain);
+    return it != stakes_.end() ? it->second.unlock_height : UINT64_MAX;
+}
+
+std::optional<RegistryEntry> Chain::registrant(const std::string& domain) const {
+    auto it = registrants_.find(domain);
+    if (it == registrants_.end()) return std::nullopt;
+    return it->second;
+}
+
+// v2.18 Theme 7: DApp registry lookup. Returns nullopt for unknown or
+// inactive DApps. "Inactive" = inactive_from <= current height; we
+// don't have direct access to height here, so the caller (validator
+// or producer) checks inactive_from against the block context. This
+// accessor returns the raw entry regardless of activity — callers
+// gate on inactive_from themselves.
+std::optional<DAppEntry> Chain::dapp(const std::string& domain) const {
+    auto it = dapp_registry_.find(domain);
+    if (it == dapp_registry_.end()) return std::nullopt;
+    return it->second;
+}
+
+void Chain::set_shard_routing(uint32_t shard_count,
+                                 const Hash& salt,
+                                 ShardId my_shard_id) {
+    shard_count_ = shard_count;
+    shard_salt_  = salt;
+    my_shard_id_ = my_shard_id;
+}
+
+bool Chain::is_cross_shard(const std::string& to) const {
+    if (shard_count_ <= 1) return false;
+    return crypto::shard_id_for_address(to, shard_count_, shard_salt_)
+           != my_shard_id_;
+}
+
+bool Chain::inbound_receipt_applied(ShardId src_shard,
+                                       const Hash& tx_hash) const {
+    return applied_inbound_receipts_.count({src_shard, tx_hash}) > 0;
+}
+
+// A5 Phase 2: stage a PARAM_CHANGE for activation at `effective_height`.
+// Multiple changes can land at the same height; we preserve apply order
+// (vector push_back) so replay is deterministic.
+void Chain::stage_param_change(uint64_t effective_height,
+                                  std::string name,
+                                  std::vector<uint8_t> value) {
+    pending_param_changes_[effective_height].emplace_back(
+        std::move(name), std::move(value));
+}
+
+// S-033 / v2.1 foundation: byte-canonical hash over the current chain
+// state. Two honest nodes applying the same block sequence MUST produce
+// byte-identical state_root values; divergence = real consensus break.
+//
+// Serialization order is deterministic by construction: std::map iterates
+// in sorted-key order; std::set iterates in sorted order; every numeric
+// field is little-endian; every string is length-prefixed.
+//
+// Adding a new state field to Chain in the future: include it here in a
+// stable position. The position matters for the hash, so additions go
+// at the end (or behind a feature flag that only activates from a
+// flag-day height onward).
+// v2.1: Merkle tree state commitment. The previous "single-SHA-256
+// over canonical bytes" served the S-033 foundation; this revision
+// upgrades the computation to a sorted-leaves Merkle tree without
+// changing the wire format (still a 32-byte Hash in Block.state_root).
+//
+// Each state entry becomes a Merkle leaf with a domain-prefixed key:
+//   "a:" + domain        for accounts_
+//   "s:" + domain        for stakes_
+//   "r:" + domain        for registrants_
+//   "i:" + src_shard_be8 + tx_hash  for applied_inbound_receipts_
+//   "b:" + domain        for abort_records_ (S-032 cache)
+//   "m:" + shard_id_be4  for merge_state_
+//   "p:" + eff_height_be8 + idx_be4  for pending_param_changes_
+//   "k:const_name"       for genesis-pinned constants
+//   "c:counter_name"     for A1 counters
+//
+// Key prefixes domain-separate the namespaces so a key collision
+// across maps (e.g., the same domain appearing in both accounts_ and
+// stakes_) produces distinct leaves. Value-hash is the SHA-256 of a
+// fixed canonical byte serialization for that entry type.
+//
+// Upgrade path for inclusion proofs (v2.2 light clients): the same
+// (key, value_hash) leaves feed merkle_proof(); no schema change
+// required. Light clients query a peer for "account 'alice'", receive
+// the (key, value_hash, sorted_index, leaf_count, proof) tuple, and
+// verify against the committee-signed Block.state_root.
+// v2.2 light-client foundation: build the canonical Merkle leaves
+// vector covering the entire chain state. Used by both compute_state_root
+// (which feeds leaves into merkle_root) and state_proof (which feeds
+// the same leaves into merkle_proof plus searches for the target
+// leaf's sorted index).
+//
+// Refactored out as a private helper so the two callers don't drift
+// — any change to the leaf-encoding scheme MUST be the same for both
+// or proofs won't verify against the state_root. Keeping them in one
+// function is the invariant.
+// D3.2 (ShardTipMergeDesign.md §9): insert a distress record and enforce the
+// bounded ring — keep at most revert_threshold_blocks_ records per source shard,
+// dropping that shard's lowest-height record on overflow. Deterministic: the map
+// is sorted by (source_shard_id, height), so all nodes prune identically.
+void Chain::add_shard_tip_record(const ShardTipRecord& rec) {
+    const ShardId s = rec.source_shard_id;
+    shard_tip_records_[{s, rec.height}] = rec;
+
+    const size_t bound = revert_threshold_blocks_ ? revert_threshold_blocks_ : 1;
+    size_t count = 0;
+    for (auto it = shard_tip_records_.lower_bound({s, uint64_t{0}});
+         it != shard_tip_records_.end() && it->first.first == s; ++it)
+        ++count;
+    while (count > bound) {
+        // lower_bound({s,0}) is that shard's lowest-height record (oldest).
+        shard_tip_records_.erase(shard_tip_records_.lower_bound({s, uint64_t{0}}));
+        --count;
+    }
+}
+
+// D3.3a (ShardTipMergeDesign.md §9): store an epoch committee-checkpoint and
+// enforce the bounded ring (retain the most recent kCommitteeCheckpointRing
+// epochs). Members are canonicalized to domain-sorted order so the cc: leaf
+// hash is deterministic regardless of how the caller assembled the set.
+void Chain::add_committee_checkpoint(EpochIndex epoch, EpochCommitteeCheckpoint snap) {
+    std::sort(snap.members.begin(), snap.members.end(),
+              [](const CommitteeMember& a, const CommitteeMember& b) {
+                  return a.domain < b.domain;
+              });
+    committee_checkpoints_[epoch] = std::move(snap);
+    while (committee_checkpoints_.size() > kCommitteeCheckpointRing)
+        committee_checkpoints_.erase(committee_checkpoints_.begin());   // lowest epoch
+}
+
+std::vector<crypto::MerkleLeaf> Chain::build_state_leaves() const {
+    std::vector<crypto::MerkleLeaf> leaves;
+    leaves.reserve(accounts_.size() + stakes_.size() + registrants_.size()
+                  + applied_inbound_receipts_.size() + abort_records_.size()
+                  + merge_state_.size() + pending_param_changes_.size()
+                  + dapp_registry_.size()
+                  + 16); // constants + counters slack
+
+    auto k_with_prefix = [](const std::string& prefix, const std::string& s) {
+        std::vector<uint8_t> out;
+        out.reserve(prefix.size() + s.size());
+        out.insert(out.end(), prefix.begin(), prefix.end());
+        out.insert(out.end(), s.begin(), s.end());
+        return out;
+    };
+    auto hash_bytes = [](crypto::SHA256Builder& b) { return b.finalize(); };
+
+    // accounts_
+    for (auto& [domain, acct] : accounts_) {
+        crypto::SHA256Builder b;
+        b.append(acct.balance);
+        b.append(acct.next_nonce);
+        leaves.push_back({k_with_prefix("a:", domain), hash_bytes(b)});
+    }
+    // stakes_
+    for (auto& [domain, st] : stakes_) {
+        crypto::SHA256Builder b;
+        b.append(st.locked);
+        b.append(st.unlock_height);
+        leaves.push_back({k_with_prefix("s:", domain), hash_bytes(b)});
+    }
+    // registrants_
+    for (auto& [domain, r] : registrants_) {
+        crypto::SHA256Builder b;
+        b.append(r.ed_pub.data(), r.ed_pub.size());
+        b.append(r.registered_at);
+        b.append(r.active_from);
+        b.append(r.inactive_from);
+        b.append(static_cast<uint64_t>(r.region.size()));
+        b.append(r.region);
+        leaves.push_back({k_with_prefix("r:", domain), hash_bytes(b)});
+    }
+    // v2.18 Theme 7: dapp_registry_ (key = "d:" + domain). Each leaf
+    // is hash over the entry's canonical fields. Light clients prove
+    // a DApp's registration via state_proof using the "d:" namespace.
+    for (auto& [domain, e] : dapp_registry_) {
+        crypto::SHA256Builder b;
+        b.append(e.service_pubkey.data(), e.service_pubkey.size());
+        b.append(e.registered_at);
+        b.append(e.active_from);
+        b.append(e.inactive_from);
+        b.append(static_cast<uint64_t>(e.endpoint_url.size()));
+        b.append(e.endpoint_url);
+        b.append(static_cast<uint64_t>(e.topics.size()));
+        for (auto& t : e.topics) {
+            b.append(static_cast<uint64_t>(t.size()));
+            b.append(t);
+        }
+        // retention is one byte; promote to u64 for SHA256Builder.
+        b.append(static_cast<uint64_t>(e.retention));
+        b.append(static_cast<uint64_t>(e.metadata.size()));
+        if (!e.metadata.empty()) b.append(e.metadata.data(), e.metadata.size());
+        leaves.push_back({k_with_prefix("d:", domain), hash_bytes(b)});
+    }
+    // applied_inbound_receipts_  (key = "i:" + src_be8 + tx_hash)
+    for (auto& [src, tx_hash] : applied_inbound_receipts_) {
+        std::vector<uint8_t> key;
+        key.reserve(2 + 8 + 32);
+        key.push_back('i'); key.push_back(':');
+        // src is ShardId (uint32_t) but the key encodes it as 8 big-endian
+        // bytes; shifting a 32-bit value by 32..56 is UNDEFINED BEHAVIOR and
+        // resolves differently per compiler (MSVC folds to 0; x86 GCC masks
+        // the shift count mod 32) — a cross-toolchain state_root divergence,
+        // i.e. a consensus fork. Widen to uint64_t so the encoding is
+        // well-defined and identical everywhere. Byte-invariant vs the prior
+        // MSVC output (a <2^32 value has zero high bytes either way).
+        for (int i = 7; i >= 0; --i)
+            key.push_back((static_cast<uint64_t>(src) >> (8*i)) & 0xff);
+        key.insert(key.end(), tx_hash.begin(), tx_hash.end());
+        crypto::SHA256Builder b;
+        uint8_t marker = 1; b.append(&marker, 1);  // presence marker
+        leaves.push_back({std::move(key), hash_bytes(b)});
+    }
+    // abort_records_  (S-032 cache)
+    for (auto& [domain, ar] : abort_records_) {
+        crypto::SHA256Builder b;
+        b.append(ar.count);
+        b.append(ar.last_block);
+        leaves.push_back({k_with_prefix("b:", domain), hash_bytes(b)});
+    }
+    // merge_state_  (key = "m:" + shard_id_be4)
+    for (auto& [shard, info] : merge_state_) {
+        std::vector<uint8_t> key;
+        key.reserve(2 + 4);
+        key.push_back('m'); key.push_back(':');
+        for (int i = 3; i >= 0; --i) key.push_back((shard >> (8*i)) & 0xff);
+        crypto::SHA256Builder b;
+        b.append(static_cast<uint64_t>(info.partner_id));
+        b.append(static_cast<uint64_t>(info.refugee_region.size()));
+        b.append(info.refugee_region);
+        leaves.push_back({std::move(key), hash_bytes(b)});
+    }
+    // shard_tip_records_  (D3.2, key = "t:" + shard_id_be4 + height_be8)
+    // The `t:` distress-record ring binds the on-chain SHARD_TIP attestations
+    // into state_root so the MERGE_EVENT BEGIN admission gate (D3.6) verifies
+    // against committed, snapshot-inherited records. Empty ring ⇒ zero leaves ⇒
+    // byte-identical state_root (the non-EXTENDED / healthy invariant).
+    for (auto& [key_pair, rec] : shard_tip_records_) {
+        std::vector<uint8_t> key;
+        key.reserve(2 + 4 + 8);
+        key.push_back('t'); key.push_back(':');
+        for (int i = 3; i >= 0; --i)
+            key.push_back((rec.source_shard_id >> (8*i)) & 0xff);
+        for (int i = 7; i >= 0; --i)
+            key.push_back((rec.height >> (8*i)) & 0xff);
+        crypto::SHA256Builder b;
+        b.append(static_cast<uint64_t>(rec.eligible_count));
+        b.append(static_cast<uint64_t>(rec.region.size()));
+        b.append(rec.region);
+        b.append(rec.committee_sig_root.data(), rec.committee_sig_root.size());
+        leaves.push_back({std::move(key), hash_bytes(b)});
+    }
+    // committee_checkpoints_  (D3.3a, key = "cc:" + epoch_be8)
+    // The `cc:` epoch committee-checkpoint binds the frozen eligible set into
+    // state_root so a past shard committee is reconstructible with zero replay.
+    // Members are domain-sorted (add_committee_checkpoint canonicalizes) so the
+    // value hash is deterministic. Empty ring ⇒ zero leaves ⇒ byte-identical.
+    for (auto& [epoch, snap] : committee_checkpoints_) {
+        std::vector<uint8_t> key;
+        key.reserve(3 + 8);
+        key.push_back('c'); key.push_back('c'); key.push_back(':');
+        for (int i = 7; i >= 0; --i)
+            key.push_back((epoch >> (8*i)) & 0xff);
+        crypto::SHA256Builder b;
+        b.append(snap.epoch_rand.data(), snap.epoch_rand.size());
+        b.append(static_cast<uint64_t>(snap.members.size()));
+        for (auto& m : snap.members) {
+            b.append(static_cast<uint64_t>(m.domain.size()));
+            b.append(m.domain);
+            b.append(m.ed_pub.data(), m.ed_pub.size());
+            b.append(static_cast<uint64_t>(m.region.size()));
+            b.append(m.region);
+        }
+        leaves.push_back({std::move(key), hash_bytes(b)});
+    }
+    // pending_param_changes_  (key = "p:" + eff_be8 + idx_be4)
+    for (auto& [eff, entries] : pending_param_changes_) {
+        for (size_t idx = 0; idx < entries.size(); ++idx) {
+            auto& [name, value] = entries[idx];
+            std::vector<uint8_t> key;
+            key.reserve(2 + 8 + 4);
+            key.push_back('p'); key.push_back(':');
+            for (int i = 7; i >= 0; --i) key.push_back((eff >> (8*i)) & 0xff);
+            for (int i = 3; i >= 0; --i)
+                key.push_back((uint32_t(idx) >> (8*i)) & 0xff);
+            crypto::SHA256Builder b;
+            b.append(static_cast<uint64_t>(name.size()));
+            b.append(name);
+            b.append(static_cast<uint64_t>(value.size()));
+            if (!value.empty()) b.append(value.data(), value.size());
+            leaves.push_back({std::move(key), hash_bytes(b)});
+        }
+    }
+    // genesis-pinned constants (one leaf each, fixed keys).
+    auto const_leaf = [&](const char* name, uint64_t value) {
+        crypto::SHA256Builder b;
+        b.append(value);
+        leaves.push_back({k_with_prefix("k:", name), hash_bytes(b)});
+    };
+    const_leaf("block_subsidy",                block_subsidy_);
+    const_leaf("subsidy_pool_initial",         subsidy_pool_initial_);
+    const_leaf("subsidy_mode",                 subsidy_mode_);
+    const_leaf("lottery_jackpot_multiplier",   lottery_jackpot_multiplier_);
+    const_leaf("min_stake",                    min_stake_);
+    const_leaf("suspension_slash",             suspension_slash_);
+    const_leaf("unstake_delay",                unstake_delay_);
+    const_leaf("merge_threshold_blocks",       merge_threshold_blocks_);
+    const_leaf("revert_threshold_blocks",      revert_threshold_blocks_);
+    const_leaf("merge_grace_blocks",           merge_grace_blocks_);
+    const_leaf("shard_count",                  shard_count_);
+    const_leaf("my_shard_id",                  my_shard_id_);
+    // NC-8 profile gating: the crypto profile as a genesis-constant leaf, emitted
+    // ONLY when non-default (FIPS), so every MODERN chain (all pre-field chains)
+    // stays byte-identical. State-root-bound ⇒ light clients trustlessly bind
+    // the profile that selects the enote wiring (EncryptedNoteDeliveryDesign §5).
+    if (crypto_profile_ != CryptoProfile::MODERN)
+        const_leaf("crypto_profile", static_cast<uint64_t>(crypto_profile_));
+    // shard_salt is 32 bytes — own leaf form.
+    {
+        crypto::SHA256Builder b;
+        b.append(shard_salt_);
+        leaves.push_back({k_with_prefix("k:", "shard_salt"), hash_bytes(b)});
+    }
+    // A1 supply counters.
+    const_leaf("c:genesis_total",        genesis_total_);
+    const_leaf("c:accumulated_subsidy",  accumulated_subsidy_);
+    const_leaf("c:accumulated_slashed",  accumulated_slashed_);
+    const_leaf("c:accumulated_inbound",  accumulated_inbound_);
+    const_leaf("c:accumulated_outbound", accumulated_outbound_);
+    // §3.22: CONDITIONAL — emitted only when non-zero, so a shield-free chain's
+    // state root is byte-identical to a pre-§3.22 chain (unlike the always-present
+    // counters above). The confidential pool below is likewise empty on such chains.
+    if (accumulated_shielded_ != 0)
+        const_leaf("c:accumulated_shielded", accumulated_shielded_);
+
+    // §3.22 confidential commitment set ("cn:" + hex(33-byte commitment)):
+    // value = SHA256(commitment_bytes || height_LE). std::map iteration is sorted,
+    // so leaf order is deterministic. Empty (no leaves) on any shield-free chain.
+    for (auto& [key, height] : shielded_pool_) {
+        crypto::SHA256Builder b;
+        std::vector<uint8_t> cb = from_hex(key);
+        b.append(cb.data(), cb.size());
+        b.append(height);
+        leaves.push_back({k_with_prefix("cn:", key), hash_bytes(b)});
+    }
+
+    // NC-8 §5 (wiring inc.2, 2b): per-output encrypted-note delivery leaves
+    // ("en:" + hex(output commitment)): value = SHA256(commitment_bytes ||
+    // enote_wire_bytes), precomputed at apply and stored directly (binds the
+    // ciphertext to the note it delivers AND, via the leaf key, to that
+    // commitment). std::map iteration is sorted → deterministic leaf order.
+    // Populated ONLY on a MODERN chain (FIPS keeps the ciphertext payload-only,
+    // block-hash-bound); empty (no leaves) on any chain without an enote-bearing
+    // CONFIDENTIAL_TRANSFER → byte-identical to a pre-NC-8 chain.
+    for (auto& [key, value] : enote_commitments_) {
+        leaves.push_back({k_with_prefix("en:", key), value});
+    }
+
+    // A2 standing audit keys ("ak:" + addr): value = SHA256(pubkey_bytes).
+    // Emitted only while a key is SET (ROTATE_AUDIT_KEY clear removes the
+    // leaf), so an audit-free chain's state root is byte-identical.
+    for (auto& [addr, pk_hex] : audit_keys_) {
+        crypto::SHA256Builder b;
+        std::vector<uint8_t> pk = from_hex(pk_hex);
+        b.append(pk.data(), pk.size());
+        leaves.push_back({k_with_prefix("ak:", addr), hash_bytes(b)});
+    }
+    // A2 disclosure counters ("al:" + addr): value = SHA256(count_LE).
+    // Emitted only when > 0 (the map only ever holds incremented entries).
+    for (auto& [addr, count] : audit_log_count_) {
+        crypto::SHA256Builder b;
+        b.append(count);
+        leaves.push_back({k_with_prefix("al:", addr), hash_bytes(b)});
+    }
+
+    // NC-8 §5a standing recipient note keys ("nk:" + addr): value =
+    // SHA256(note_pk_bytes). Emitted only while a key is SET (REGISTER_NOTE_KEY
+    // clear removes the leaf), so a note-key-free chain's state root is
+    // byte-identical. Profile-agnostic (MODERN + FIPS alike).
+    for (auto& [addr, pk_hex] : note_keys_) {
+        crypto::SHA256Builder b;
+        std::vector<uint8_t> pk = from_hex(pk_hex);
+        b.append(pk.data(), pk.size());
+        leaves.push_back({k_with_prefix("nk:", addr), hash_bytes(b)});
+    }
+
+    return leaves;
+}
+
+Hash Chain::compute_state_root() const {
+    return crypto::merkle_root(build_state_leaves());
+}
+
+// v2.2 light-client RPC: produce an inclusion proof for the given
+// state key. Builds the full leaves vector, sorts it (merkle_proof
+// expects sorted input — the leaf index it takes is the sorted-by-
+// key position), finds the target key's sorted index, and calls
+// merkle_proof to produce the sibling-hash list.
+//
+// Returns nullopt if the key isn't in the tree. A light client that
+// receives nullopt can call this method against multiple peers and
+// rely on majority — for a key the network considers absent, all
+// honest peers return nullopt. (Note: this is "membership" — non-
+// membership proofs would require an SMT with key-path indexing,
+// which is a v2 protocol evolution; the current sorted-leaves
+// design doesn't natively support absence proofs.)
+//
+// The returned StateProof is sufficient input to merkle_verify:
+//   merkle_verify(root, key, value_hash, target_index, leaf_count, proof)
+// where `root` is fetched from a trusted block header (light client
+// has the header from the committee-signed chain).
+std::optional<Chain::StateProof> Chain::state_proof(
+        const std::vector<uint8_t>& key) const {
+    auto leaves = build_state_leaves();
+    // Sort by key — merkle_proof/merkle_root both pre-sort, so we
+    // need the sorted order to find the target's index and to feed
+    // into merkle_proof. Sort here once.
+    std::sort(leaves.begin(), leaves.end(),
+        [](const crypto::MerkleLeaf& a, const crypto::MerkleLeaf& b) {
+            return a.key < b.key;
+        });
+    auto it = std::lower_bound(leaves.begin(), leaves.end(), key,
+        [](const crypto::MerkleLeaf& l, const std::vector<uint8_t>& k) {
+            return l.key < k;
+        });
+    if (it == leaves.end() || it->key != key) return std::nullopt;
+    size_t target_index = static_cast<size_t>(it - leaves.begin());
+
+    StateProof p;
+    p.key          = key;
+    p.value_hash   = it->value_hash;
+    p.target_index = target_index;
+    p.leaf_count   = leaves.size();
+    // merkle_proof expects un-sorted leaves and sorts internally,
+    // but it's also fine to pass already-sorted leaves; sort is
+    // idempotent. Pass the sorted vector directly.
+    p.proof        = crypto::merkle_proof(leaves, target_index);
+    return p;
+}
+
+// Activate all staged changes with eff_height <= current_height. Called
+// at the start of apply_transactions so the new values are in effect
+// before the block's txs replay. Decoding is per-parameter; unknown
+// names are activated as no-ops (validator already enforces the
+// whitelist, so unknowns indicate a future-version chain — fail-soft
+// at apply, fail-loud at validate). All ranges processed iterate in
+// ascending key order via std::map.
+void Chain::activate_pending_params(uint64_t current_height) {
+    auto it = pending_param_changes_.begin();
+    while (it != pending_param_changes_.end() && it->first <= current_height) {
+        for (auto& [name, value] : it->second) {
+            // Numeric (uint64 LE) parameters that live on Chain.
+            auto parse_u64 = [&](uint64_t& dst) {
+                if (value.size() != 8) return false;
+                uint64_t v = 0;
+                for (int i = 0; i < 8; ++i) v |= uint64_t(value[i]) << (8 * i);
+                dst = v;
+                return true;
+            };
+            if (name == "MIN_STAKE")            { parse_u64(min_stake_); }
+            else if (name == "SUSPENSION_SLASH") { parse_u64(suspension_slash_); }
+            else if (name == "UNSTAKE_DELAY")    { parse_u64(unstake_delay_); }
+            // Names that don't have chain-instance storage but DO live
+            // on the validator are forwarded to the Node-installed hook
+            // (bft_escalation_threshold, param_keyholders, param_threshold).
+            // Timing fields (tx_commit_ms, block_sig_ms, abort_claim_ms)
+            // are still params.hpp constants; promoting them to per-Chain
+            // instance state is a follow-on — the hook receives the value
+            // so the Node may wire them later.
+            if (param_changed_hook_) param_changed_hook_(name, value);
+        }
+        it = pending_param_changes_.erase(it);
+    }
+}
+
+// A9 Phase 2D: composable-tx atomic-scope primitive. Captures state
+// via Phase 1's create_state_snapshot; runs fn; commits (drops the
+// snapshot) on fn returning true; rolls back (restores snapshot) on
+// fn returning false or throwing. See chain.hpp for the rationale
+// and v2.4+ caller pattern.
+//
+// Nesting: each call captures its own snapshot, so multiple
+// atomic_scope calls can be active on the call stack. Inner scope's
+// commit doesn't pop outer's snapshot; outer's rollback still
+// undoes everything since outer's entry. The snapshot stack lives
+// on the C++ call stack, no explicit chain-level scope manager
+// needed.
+//
+// Interaction with apply_transactions's Phase 1 try-catch: if
+// atomic_scope is used INSIDE an apply_transactions tx-loop body
+// (the v2.4 use case), there are two active snapshots — the outer
+// one taken at apply entry and the inner one taken at scope entry.
+// Memory cost is two copies of mutable state for the duration of
+// the inner scope. Phase 2A/2B's lazy-capture amortizes: the inner
+// scope only copies containers it actually touches.
+bool Chain::atomic_scope(std::function<bool(Chain&)> fn) {
+    StateSnapshot snapshot = create_state_snapshot();
+    // Track blocks_ size separately from StateSnapshot — Phase 1's
+    // snapshot doesn't cover blocks_ (apply_transactions never
+    // mutates blocks_; Chain::append does that AFTER apply returns).
+    // For atomic_scope's contract — "any state change during fn
+    // rolls back on discard" — we also need to undo blocks pushed
+    // via Chain::append calls inside fn.
+    size_t blocks_size_at_entry = blocks_.size();
+    try {
+        bool keep = fn(*this);
+        if (!keep) {
+            restore_state_snapshot(std::move(snapshot));
+            if (blocks_.size() > blocks_size_at_entry) {
+                blocks_.resize(blocks_size_at_entry);
+            if (tx_applied_.size() > blocks_size_at_entry) {
+                tx_applied_.resize(blocks_size_at_entry);
+            }
+            }
+            // A4: this rewind moved blocks_ out from under any snapshot an inner
+            // append retained; drop it so revert_head() can never restore a
+            // snapshot that no longer matches the head (fail-closed).
+            prev_head_snapshot_.reset();
+        }
+        return keep;
+    } catch (...) {
+        restore_state_snapshot(std::move(snapshot));
+        if (blocks_.size() > blocks_size_at_entry) {
+            blocks_.resize(blocks_size_at_entry);
+            if (tx_applied_.size() > blocks_size_at_entry) {
+                tx_applied_.resize(blocks_size_at_entry);
+            }
+        }
+        prev_head_snapshot_.reset();   // A4: see the !keep branch above
+        throw;
+    }
+}
+
+// ─── apply_transactions ──────────────────────────────────────────────────────
+
+uint64_t Chain::live_total_supply() const {
+    uint64_t s = 0;
+    for (auto& [_, a] : accounts_) s += a.balance;
+    for (auto& [_, st] : stakes_)  s += st.locked;
+    return s;
+}
+
+// A9 Phase 1: atomic state snapshot for rollback on apply failure.
+// A9 Phase 2A refinement: three high-cost-per-copy containers
+// (abort_records_, merge_state_, applied_inbound_receipts_) are now
+// captured LAZILY in std::optional fields — they start nullopt and
+// are populated on the first mutation per apply via ensure-lambdas
+// inside apply_transactions. For TRANSFER-only blocks (the common
+// case), these stays nullopt and no std::set / std::map copy
+// happens at all. The remaining containers stay eager — most
+// blocks touch them and lazy-snapshot adds ensure() call overhead
+// without saving anything.
+Chain::StateSnapshot Chain::create_state_snapshot() const {
+    StateSnapshot s;
+    s.accounts                   = accounts_;
+    // stakes, registrants, abort_records, merge_state,
+    // applied_inbound_receipts: deferred via std::optional; captured
+    // lazily on first mutation. See ensure-lambdas in apply_transactions.
+    s.pending_param_changes      = pending_param_changes_;
+    s.genesis_total              = genesis_total_;
+    s.accumulated_subsidy        = accumulated_subsidy_;
+    s.accumulated_slashed        = accumulated_slashed_;
+    s.accumulated_inbound        = accumulated_inbound_;
+    s.accumulated_outbound       = accumulated_outbound_;
+    s.accumulated_shielded       = accumulated_shielded_;   // §3.22 (shielded_pool lazy)
+    s.min_stake                  = min_stake_;
+    s.suspension_slash           = suspension_slash_;
+    s.unstake_delay              = unstake_delay_;
+    s.merge_threshold_blocks     = merge_threshold_blocks_;
+    s.revert_threshold_blocks    = revert_threshold_blocks_;
+    s.merge_grace_blocks         = merge_grace_blocks_;
+    s.block_subsidy              = block_subsidy_;
+    s.subsidy_pool_initial       = subsidy_pool_initial_;
+    s.subsidy_mode               = subsidy_mode_;
+    s.lottery_jackpot_multiplier = lottery_jackpot_multiplier_;
+    return s;
+}
+
+// Move-restore from snapshot. Called from apply_transactions's catch
+// block. After this returns, the chain's observable state is byte-
+// identical to before the failed apply call. param_changed_hook_ is
+// NOT restored — it's a hook installed by Node, not block-derived
+// state, and any callbacks already invoked during the failed apply
+// are inherently non-transactional anyway (they cross the
+// chain/validator boundary). Hooks fire only on successful activation
+// — see activate_pending_params, which the snapshot covers.
+void Chain::restore_state_snapshot(StateSnapshot&& s) {
+    accounts_                   = std::move(s.accounts);
+    // A9 Phase 2A/2B: only restore lazy-captured containers if they
+    // were actually mutated during apply. nullopt = container was
+    // never touched, base map is already correct.
+    if (s.stakes)
+        stakes_                 = std::move(*s.stakes);
+    if (s.registrants)
+        registrants_            = std::move(*s.registrants);
+    if (s.abort_records)
+        abort_records_          = std::move(*s.abort_records);
+    if (s.merge_state)
+        merge_state_            = std::move(*s.merge_state);
+    if (s.applied_inbound_receipts)
+        applied_inbound_receipts_ = std::move(*s.applied_inbound_receipts);
+    if (s.shard_tip_records)       // D3.2 (Some only once D3.5 mutates it in apply)
+        shard_tip_records_      = std::move(*s.shard_tip_records);
+    if (s.committee_checkpoints)   // D3.3a (Some only once D3.3b folds in apply)
+        committee_checkpoints_  = std::move(*s.committee_checkpoints);
+    if (s.dapp_registry)
+        dapp_registry_          = std::move(*s.dapp_registry);
+    if (s.shielded_pool)
+        shielded_pool_          = std::move(*s.shielded_pool);   // §3.22 (lazy)
+    if (s.enote_commitments)
+        enote_commitments_      = std::move(*s.enote_commitments); // NC-8 §5 (lazy)
+    if (s.audit_keys)
+        audit_keys_             = std::move(*s.audit_keys);      // A2 (lazy)
+    if (s.audit_log_count)
+        audit_log_count_        = std::move(*s.audit_log_count); // A2 (lazy)
+    if (s.note_keys)
+        note_keys_              = std::move(*s.note_keys);       // NC-8 §5a (lazy)
+    pending_param_changes_      = std::move(s.pending_param_changes);
+    genesis_total_              = s.genesis_total;
+    accumulated_subsidy_        = s.accumulated_subsidy;
+    accumulated_slashed_        = s.accumulated_slashed;
+    accumulated_inbound_        = s.accumulated_inbound;
+    accumulated_outbound_       = s.accumulated_outbound;
+    accumulated_shielded_       = s.accumulated_shielded;   // §3.22
+    min_stake_                  = s.min_stake;
+    suspension_slash_           = s.suspension_slash;
+    unstake_delay_              = s.unstake_delay;
+    merge_threshold_blocks_     = s.merge_threshold_blocks;
+    revert_threshold_blocks_    = s.revert_threshold_blocks;
+    merge_grace_blocks_         = s.merge_grace_blocks;
+    block_subsidy_              = s.block_subsidy;
+    subsidy_pool_initial_       = s.subsidy_pool_initial;
+    subsidy_mode_               = s.subsidy_mode;
+    lottery_jackpot_multiplier_ = s.lottery_jackpot_multiplier;
+}
+
+// D3.3b: freeze the eligible-validator pool as of `at_index`. Historically a
+// hoisted, byte-identical copy of NodeRegistry::build_from_chain's eligibility
+// predicate; since S-051 BOTH surfaces call the SAME shared definitions
+// (eligibility_floor.hpp: domain_eligible + eligibility_floor_lifted), so the
+// old "two bodies MUST stay byte-identical forever" drift vector no longer
+// exists — there is one body. Emits CommitteeMember{domain, ed_pub, region}
+// straight from the registrants_ map; std::map iteration is already
+// domain-sorted → the emitted vector is canonical without an extra sort.
+// S-051 Option B: a frozen checkpoint at an exhausted boundary includes the
+// floor-lifted domains identically to the live filter (k_block_sigs_ is the
+// genesis-pinned K, 0 = floor disabled on unwired tool paths).
+std::vector<Chain::CommitteeMember>
+Chain::freeze_epoch_committee(uint64_t at_index) const {
+    auto stake_of = [&](const std::string& d) { return stake(d); };
+    const auto lifted = eligibility_floor_lifted(
+        registrants_, abort_records_, stake_of, min_stake_, at_index,
+        k_block_sigs_);
+    std::vector<CommitteeMember> out;
+    for (const auto& [domain, r] : registrants_) {
+        if (!domain_eligible(domain, r, abort_records_, stake_of, min_stake_,
+                             at_index)
+            && lifted.count(domain) == 0)
+            continue;
+        out.push_back(CommitteeMember{domain, r.ed_pub, r.region});
+    }
+    return out;
+}
+
+std::vector<bool> Chain::apply_transactions(const Block& b) {
+    std::vector<bool> applied(b.transactions.size(), false);
+    // A9 Phase 1: snapshot at entry; restore on any throw before re-raising.
+    // Guarantees observers see either the full block applied or no
+    // change at all. Cost: one deep-copy of state maps per block (<1ms
+    // at 10k accounts). The block-vector itself is appended only after
+    // apply_transactions returns successfully (see Chain::append), so
+    // blocks_ atomicity is handled at the caller level.
+    //
+    // A9 Phase 2A: three high-cost containers (abort_records,
+    // merge_state, applied_inbound_receipts) are deferred — see
+    // create_state_snapshot. Each has an ensure-lambda below that
+    // captures the live container into the snapshot on first
+    // mutation. TRANSFER-only blocks bypass all three copies.
+    StateSnapshot __snapshot = create_state_snapshot();
+    auto __ensure_stakes = [&]() {
+        if (!__snapshot.stakes)
+            __snapshot.stakes = stakes_;
+    };
+    auto __ensure_registrants = [&]() {
+        if (!__snapshot.registrants)
+            __snapshot.registrants = registrants_;
+    };
+    auto __ensure_abort_records = [&]() {
+        if (!__snapshot.abort_records)
+            __snapshot.abort_records = abort_records_;
+    };
+    auto __ensure_merge_state = [&]() {
+        if (!__snapshot.merge_state)
+            __snapshot.merge_state = merge_state_;
+    };
+    auto __ensure_applied_inbound_receipts = [&]() {
+        if (!__snapshot.applied_inbound_receipts)
+            __snapshot.applied_inbound_receipts = applied_inbound_receipts_;
+    };
+    auto __ensure_dapp_registry = [&]() {
+        if (!__snapshot.dapp_registry)
+            __snapshot.dapp_registry = dapp_registry_;
+    };
+    auto __ensure_shielded_pool = [&]() {          // §3.22 (lazy)
+        if (!__snapshot.shielded_pool)
+            __snapshot.shielded_pool = shielded_pool_;
+    };
+    auto __ensure_enote_commitments = [&]() {      // NC-8 §5 (lazy)
+        if (!__snapshot.enote_commitments)
+            __snapshot.enote_commitments = enote_commitments_;
+    };
+    auto __ensure_audit_keys = [&]() {             // A2 (lazy)
+        if (!__snapshot.audit_keys)
+            __snapshot.audit_keys = audit_keys_;
+    };
+    auto __ensure_audit_log_count = [&]() {        // A2 (lazy)
+        if (!__snapshot.audit_log_count)
+            __snapshot.audit_log_count = audit_log_count_;
+    };
+    auto __ensure_note_keys = [&]() {              // NC-8 §5a (lazy)
+        if (!__snapshot.note_keys)
+            __snapshot.note_keys = note_keys_;
+    };
+    auto __ensure_committee_checkpoints = [&]() {  // D3.3b (lazy)
+        if (!__snapshot.committee_checkpoints)
+            __snapshot.committee_checkpoints = committee_checkpoints_;
+    };
+    auto __ensure_shard_tip_records = [&]() {  // D3.5b (lazy)
+        if (!__snapshot.shard_tip_records)
+            __snapshot.shard_tip_records = shard_tip_records_;
+    };
+    try {
+    // A5 Phase 2: activate any staged governance parameter changes whose
+    // effective_height <= this block's index BEFORE replaying the block.
+    // The new values are visible to all tx handlers and to the post-apply
+    // invariant checks below.
+    if (b.index > 0) activate_pending_params(b.index);
+
+    // Genesis: install the initial state directly. No tx semantics, no fees.
+    // The validator already accepts index-0 blocks unconditionally; here we
+    // just translate `initial_state` into accounts_/stakes_/registrants_.
+    if (b.index == 0) {
+        // A1: GENESIS_TOTAL = Σ initial_balance + Σ initial_stake
+        // (+ Zeroth pool / pseudo-account balances + initial unspent_subsidy
+        // — those state structures don't exist yet at v1.x; their
+        // contribution is 0. Once E1 lands, the pool's initial balance is
+        // added here too; the invariant formula is unchanged.)
+        uint64_t gtotal = 0;
+        for (auto& a : b.initial_state) {
+            accounts_[a.domain].balance = a.balance;
+            // accounts_[a.domain].next_nonce = 0  (default)
+            gtotal += a.balance;
+
+            PubKey zero_ed{};
+            if (a.ed_pub != zero_ed) {
+                RegistryEntry re;
+                re.ed_pub        = a.ed_pub;
+                re.registered_at = 0;
+                re.active_from   = 0;
+                re.inactive_from = UINT64_MAX;
+                re.region        = a.region; // rev.9 R1
+                __ensure_registrants();
+                registrants_[a.domain] = re;
+            }
+            if (a.stake > 0) {
+                __ensure_stakes();
+                stakes_[a.domain].locked        = a.stake;
+                stakes_[a.domain].unlock_height = UINT64_MAX;
+                gtotal += a.stake;
+            }
+        }
+        genesis_total_       = gtotal;
+        accumulated_subsidy_ = 0;
+        accumulated_slashed_ = 0;
+        accumulated_inbound_ = 0;
+        accumulated_outbound_= 0;
+        accumulated_shielded_= 0;   // §3.22 (genesis is always shield-free)
+        audit_keys_.clear();        // A2 (genesis is always audit-free)
+        audit_log_count_.clear();
+        note_keys_.clear();         // NC-8 §5a (genesis is always note-key-free)
+        // Genesis-time invariant trivially holds (live == genesis_total).
+        return applied;
+    }
+
+    uint64_t total_fees    = 0;
+    uint64_t height        = b.index;
+    // A1: per-block running deltas for the unitary-balance counters.
+    uint64_t block_outbound = 0;   // cross-shard TRANSFER amount that left this shard
+    uint64_t block_inbound  = 0;   // cross-shard receipt amount credited here
+    uint64_t block_slashed  = 0;   // frozen at 0: no apply path credits it since D13 (abort
+                                   // deduction retired) and D4 (no equivocation forfeit);
+                                   // kept so accumulated_slashed_ keeps its A1 ledger shape
+
+    auto charge_fee = [&](AccountState& acct, uint64_t fee) {
+        if (acct.balance < fee) return false;
+        // S-049: keep the fee-only debit path's total_fees accumulation on the
+        // same checked add as the value-moving cases (throw -> block rejected
+        // rather than a silently-wrapped creator payout). Byte-invariant for
+        // any block whose retained fees sum < 2^64.
+        if (!checked_add_u64(total_fees, fee, &total_fees)) return false;
+        acct.balance -= fee;
+        return true;
+    };
+
+    for (size_t tx_idx = 0; tx_idx < b.transactions.size(); ++tx_idx) {
+        const auto& tx = b.transactions[tx_idx];
+        AccountState& sender = accounts_[tx.from];
+
+        // Sequential nonce: skip txs that don't match. Validator should have
+        // rejected them; this is a safety net during apply.
+        if (tx.nonce != sender.next_nonce) continue;
+
+        switch (tx.type) {
+        case TxType::PQ_TRANSFER:   // §3.21: identical apply semantics to TRANSFER
+        case TxType::TRANSFER: {
+            // S-049: amount+fee must not overflow u64. Unchecked, an attacker
+            // picks amount ~ 2^64-fee so `cost` wraps to ~0, the balance gate
+            // passes on a near-zero debit, yet the recipient is credited the
+            // full amount below -- mint-from-nothing (CVE-2010-5139 class). The
+            // A1 supply assertion is blind to it (mod-2^64, injected delta is a
+            // multiple of 2^64). Skip on overflow -> no state change, matching
+            // the balance-too-low `continue` immediately after.
+            uint64_t cost;
+            if (!checked_add_u64(tx.amount, tx.fee, &cost)) continue;
+            if (sender.balance < cost) continue;
+            sender.balance -= cost;
+            // rev.9 B3: cross-shard TRANSFER debits sender locally; the
+            // credit is delivered to `to` via the receipt path on the
+            // destination shard (Stage B3.4). The block's
+            // cross_shard_receipts list (validator-checked) carries the
+            // outbound credit. amount + fee leave this shard's supply
+            // here; fee still accrues to creators on this side.
+            if (!is_cross_shard(tx.to)) {
+                // S-007: overflow check. Receiver's balance might already
+                // be near UINT64_MAX (long-lived deployments aggregating
+                // payouts); refuse to wrap.
+                auto& rcv = accounts_[tx.to].balance;
+                if (!checked_add_u64(rcv, tx.amount, &rcv)) {
+                    throw std::runtime_error(
+                        "S-007: TRANSFER credit would overflow recipient "
+                        "balance (to=" + tx.to + ")");
+                }
+            } else {
+                // A1: amount has left this shard's accounted supply.
+                // Fee stays here (accrues to creators below).
+                block_outbound += tx.amount;
+            }
+            if (!checked_add_u64(total_fees, tx.fee, &total_fees))
+                throw std::runtime_error("S-049: block fee accumulation "
+                                         "overflows u64");
+            sender.next_nonce++;
+            applied[tx_idx] = true;
+            break;
+        }
+
+        case TxType::SHIELD: {
+            // §3.22 confidential on-ramp: debit the PUBLIC amount A + fee from the
+            // transparent sender and add the commitment C to the confidential set.
+            // Belt-and-suspenders re-verify (the block validator is the
+            // authoritative accept-rule); skip on any failure, like TRANSFER does.
+            uint64_t A = tx.amount;
+            // S-049: A+fee overflow would wrap `cost` to ~0 and mint a phantom
+            // confidential note of value A (accumulated_shielded_ += A below),
+            // later withdrawn as a near-2^64 transparent balance via UNSHIELD.
+            // Skip on overflow (no state change).
+            uint64_t cost;
+            if (!checked_add_u64(A, tx.fee, &cost)) continue;
+            if (sender.balance < cost) continue;
+            if (tx.payload.size() != 98) continue;
+            if (determ_shield_verify(tx.payload.data(), tx.payload.size(), A) != 0) continue;
+            std::string ckey = to_hex(tx.payload.data(), 33);   // hex of the 33-byte commitment
+            __ensure_shielded_pool();
+            if (shielded_pool_.count(ckey)) continue;           // duplicate commitment
+            sender.balance -= cost;
+            if (!checked_add_u64(total_fees, tx.fee, &total_fees))
+                throw std::runtime_error("S-049: block fee accumulation "
+                                         "overflows u64");
+            shielded_pool_[ckey] = height;                      // add unspent note
+            accumulated_shielded_ += A;                         // A left the transparent live sum
+            sender.next_nonce++;
+            applied[tx_idx] = true;
+            break;
+        }
+
+        case TxType::UNSHIELD: {
+            // §3.22b confidential -> transparent withdraw. Spend an unspent note
+            // C (which IS its own nullifier — removed here so it can be spent at
+            // most once) and return its PUBLIC amount A to the transparent
+            // recipient tx.to, minus fee (fee accrues to creators). The proof is
+            // BOUND to (from,to,nonce,amount) so a captured withdraw proof cannot
+            // be replayed/redirected. Belt-and-suspenders re-verify (validator is
+            // the authoritative accept-rule); skip on any failure.
+            uint64_t A = tx.amount;
+            if (tx.payload.size() != 98) continue;
+            if (A < tx.fee) continue;                           // amount must cover the fee
+            // §3.22b is single-shard only (like DAPP_CALL in v2.19). A cross-shard
+            // credit here would land spendable value on THIS shard keyed by an
+            // off-shard address with NO outbound booking + NO receipt — a silent
+            // break of the K-shard aggregate supply identity that per-shard A1
+            // cannot catch. Reject (the note is NOT spent). Cross-shard confidential
+            // withdraw (receipt + block_outbound) is a separate, owner-gated step.
+            if (is_cross_shard(tx.to)) continue;
+            __ensure_shielded_pool();
+            std::string ckey = to_hex(tx.payload.data(), 33);
+            auto note = shielded_pool_.find(ckey);
+            if (note == shielded_pool_.end()) continue;         // not an unspent note (also blocks double-spend)
+            Hash ctx = unshield_spend_ctx_hash(tx.from, tx.to, tx.nonce, A);
+            if (determ_unshield_verify(tx.payload.data(), tx.payload.size(),
+                                       A, ctx.data()) != 0) continue;
+            // Pedersen binding guarantees A equals the amount C was SHIELDed
+            // with, and the SHIELD debit is S-049-checked so accumulated_shielded_
+            // is credited exactly A on the way in — hence accumulated_shielded_ >= A
+            // here and the subtraction cannot underflow. (Note: the A1 supply
+            // assertion is a mod-2^64 identity — it flags non-2^64-multiple drift
+            // but is NOT a general underflow catch; the binding + checked debit are
+            // the real guarantee, not A1.)
+            shielded_pool_.erase(note);
+            // NC-8 §5 (inc.2): a spent note's `en:` delivery leaf is stale — drop
+            // it so en: ⊆ cn: stays bounded (no-op on FIPS / enote-free notes).
+            if (enote_commitments_.count(ckey)) {
+                __ensure_enote_commitments();
+                enote_commitments_.erase(ckey);
+            }
+            accumulated_shielded_ -= A;
+            uint64_t credit = A - tx.fee;
+            auto& rcv = accounts_[tx.to].balance;
+            if (!checked_add_u64(rcv, credit, &rcv)) {
+                throw std::runtime_error(
+                    "S-007: UNSHIELD credit would overflow recipient balance (to="
+                    + tx.to + ")");
+            }
+            if (!checked_add_u64(total_fees, tx.fee, &total_fees))
+                throw std::runtime_error("S-049: block fee accumulation "
+                                         "overflows u64");
+            sender.next_nonce++;
+            applied[tx_idx] = true;
+            break;
+        }
+
+        case TxType::CONFIDENTIAL_TRANSFER: {
+            // §3.22c confidential -> confidential. payload = a DCT1 bundle proving
+            // range (each hidden output in [0,2^n)) AND balance (Σv_in = Σv_out +
+            // fee, fee PUBLIC). Consume the n_in NAMED input notes (their own
+            // nullifiers — removed) and add the m HIDDEN-amount output notes. The
+            // fee (public) leaves the confidential pool to creators. Pool -> pool:
+            // no transparent tx.to credit, so no cross-shard vector (unlike
+            // UNSHIELD). Belt-and-suspenders re-verify; skip on any failure.
+            const uint8_t* b = tx.payload.data();
+            size_t blen = tx.payload.size();
+            // NC-8 §5 (inc.2): split off an OPTIONAL trailing per-output enote
+            // region before the frozen bundle verifiers (which demand an EXACT
+            // length). The region is CONSENSUS-INERT — a malformed FRAME skips the
+            // tx (mirrors the validator), but ciphertext content is never inspected
+            // here. Absent region → bundle_len == blen → byte-identical to pre-NC-8.
+            size_t bundle_len = 0;
+            std::vector<CtxEnote> enotes;
+            if (ctx_split_enotes(b, blen, &bundle_len, &enotes) != 0) continue;
+            size_t n_in = 0, m = 0, nbits = 0; uint64_t bundle_fee = 0;
+            if (determ_ctx_bundle_header(b, bundle_len, &n_in, &m, &nbits, &bundle_fee) != 0) continue;
+            if (tx.fee != bundle_fee) continue;                 // public fee must match tx.fee
+            if (determ_ctx_bundle_verify(b, bundle_len) != 0) continue;   // range + balance
+            const uint8_t* Cin  = b + 15;
+            const uint8_t* Cout = b + 15 + n_in * 33;
+            __ensure_shielded_pool();
+            // All-or-nothing: gather keys with a dedup set BEFORE mutating. The
+            // dup-input check is CRITICAL — listing the same note twice would let
+            // the bundle claim 2*value and inflate. Every input must be unspent;
+            // every output must be fresh; no key may repeat across the whole set.
+            std::vector<std::string> in_keys, out_keys;
+            std::set<std::string> seen;
+            bool ok = true;
+            for (size_t i = 0; i < n_in && ok; ++i) {
+                std::string k = to_hex(Cin + i * 33, 33);
+                if (!shielded_pool_.count(k) || !seen.insert(k).second) ok = false;
+                else in_keys.push_back(k);
+            }
+            for (size_t j = 0; j < m && ok; ++j) {
+                std::string k = to_hex(Cout + j * 33, 33);
+                if (shielded_pool_.count(k) || !seen.insert(k).second) ok = false;
+                else out_keys.push_back(k);
+            }
+            if (!ok) continue;   // missing/duplicate input, or output collision
+            for (auto& k : in_keys)  shielded_pool_.erase(k);
+            for (auto& k : out_keys) shielded_pool_[k] = height;
+            // NC-8 §5 (inc.2): profile-keyed enote commit. A spent input's stale
+            // `en:` entry is always dropped (en: ⊆ cn: stays bounded). On a MODERN
+            // chain each delivered ciphertext becomes an `en:` state leaf keyed by
+            // its output commitment (light-client-provable) with value =
+            // SHA256(commitment_bytes || enote_wire_bytes). On a FIPS chain no
+            // leaf is written — the ciphertext rides the tx payload, block-hash-
+            // bound (2a). The enote is CONSENSUS-INERT: it never touched the
+            // balance/dedup math above and never gates acceptance.
+            for (auto& k : in_keys) {
+                if (enote_commitments_.count(k)) {
+                    __ensure_enote_commitments();
+                    enote_commitments_.erase(k);
+                }
+            }
+            if (crypto_profile_ == CryptoProfile::MODERN && !enotes.empty()) {
+                __ensure_enote_commitments();
+                for (auto& e : enotes) {
+                    const std::string& okey = out_keys[e.output_index]; // idx < m (validated)
+                    crypto::SHA256Builder hb;
+                    std::vector<uint8_t> cb = from_hex(okey);
+                    hb.append(cb.data(), cb.size());
+                    hb.append(e.bytes.data(), e.bytes.size());
+                    enote_commitments_[okey] = hb.finalize();
+                }
+            }
+            // Pedersen binding: Σv_in (== the consumed notes' shield values) =
+            // Σv_out + fee >= fee, and every consumed note was credited into
+            // accumulated_shielded_ at its S-049-checked SHIELD, so
+            // accumulated_shielded_ >= fee here and the subtraction cannot
+            // underflow. (A1 is a mod-2^64 identity, not a general underflow
+            // catch — the binding + checked debits are the guarantee.)
+            accumulated_shielded_ -= bundle_fee;
+            if (!checked_add_u64(total_fees, tx.fee, &total_fees))
+                throw std::runtime_error("S-049: block fee accumulation "
+                                         "overflows u64");
+            sender.next_nonce++;
+            applied[tx_idx] = true;
+            break;
+        }
+
+        case TxType::ROTATE_AUDIT_KEY: {
+            // A2: set (payload = 32-byte pubkey) or clear (payload empty) the
+            // account's standing audit key. Fee-only; no value moves. The
+            // validator is the authoritative shape gate (amount==0, to empty,
+            // payload length); this is the belt-and-suspenders re-check.
+            if (!tx.payload.empty()
+                && tx.payload.size() != AUDIT_KEY_PAYLOAD_SIZE) continue;
+            if (tx.amount != 0 || !tx.to.empty()) continue;
+            if (!charge_fee(sender, tx.fee)) continue;
+            __ensure_audit_keys();
+            if (tx.payload.empty()) audit_keys_.erase(tx.from);
+            else audit_keys_[tx.from] = to_hex(tx.payload.data(),
+                                               tx.payload.size());
+            sender.next_nonce++;
+            applied[tx_idx] = true;
+            break;
+        }
+
+        case TxType::LOG_AUDIT_ACCESS: {
+            // A2: on-chain disclosure record. The tx in chain history IS the
+            // record (epoch || auditor_pk || context_hash, owner-signed);
+            // state only tracks the per-account count so light clients can
+            // trustlessly read "N disclosures" from the al: leaf.
+            if (tx.payload.size() != AUDIT_LOG_PAYLOAD_SIZE) continue;
+            if (tx.amount != 0 || !tx.to.empty()) continue;
+            if (!charge_fee(sender, tx.fee)) continue;
+            __ensure_audit_log_count();
+            audit_log_count_[tx.from]++;
+            sender.next_nonce++;
+            applied[tx_idx] = true;
+            break;
+        }
+
+        case TxType::REGISTER_NOTE_KEY: {
+            // NC-8 §5a: set (payload = 33-byte note_pk) or clear (payload empty)
+            // the account's standing recipient note key. Fee-only; no value
+            // moves. Consensus-inert delivery metadata: the point is NOT
+            // decompressed/validated (a garbage 33-byte value simply never opens
+            // an enote), exactly like the enote ciphertext region. The validator
+            // is the authoritative shape gate; this is the belt-and-suspenders
+            // re-check.
+            if (!tx.payload.empty()
+                && tx.payload.size() != NOTE_KEY_PAYLOAD_SIZE) continue;
+            if (tx.amount != 0 || !tx.to.empty()) continue;
+            if (!charge_fee(sender, tx.fee)) continue;
+            __ensure_note_keys();
+            if (tx.payload.empty()) note_keys_.erase(tx.from);
+            else note_keys_[tx.from] = to_hex(tx.payload.data(),
+                                              tx.payload.size());
+            sender.next_nonce++;
+            applied[tx_idx] = true;
+            break;
+        }
+
+        case TxType::REGISTER: {
+            // rev.9 R1 wire format:
+            //   [pubkey: 32B][region_len: u8][region: utf8]
+            // Legacy (pre-R1) payload of just the 32-byte pubkey is
+            // accepted: region defaults to empty (= global pool).
+            // Validator already enforced normalization + size bounds;
+            // apply only re-extracts the region for storage.
+            if (tx.payload.size() < REGISTER_PAYLOAD_PUBKEY_SIZE) continue;
+            std::string region;
+            if (tx.payload.size() > REGISTER_PAYLOAD_PUBKEY_SIZE) {
+                size_t rlen = tx.payload[REGISTER_PAYLOAD_PUBKEY_SIZE];
+                if (tx.payload.size() != REGISTER_PAYLOAD_PUBKEY_SIZE + 1 + rlen) continue;
+                region.assign(reinterpret_cast<const char*>(
+                                  tx.payload.data() + REGISTER_PAYLOAD_PUBKEY_SIZE + 1),
+                              rlen);
+            }
+            if (!charge_fee(sender, tx.fee)) continue;
+
+            // E1: detect first-time registration BEFORE we touch
+            // registrants_[tx.from] (operator[] would create an entry,
+            // making it indistinguishable from a re-registration). NEF
+            // fires only when this is genuinely new. Since V-REG-1
+            // (2026-09-15) the verifier rejects any REGISTER for a domain
+            // already in this map, so the re-registration branch below is
+            // unreachable through consensus and retained as belt-and-
+            // suspenders only (apply is not the rule; the verifier is).
+            const bool first_time_register =
+                (registrants_.find(tx.from) == registrants_.end());
+
+            RegistryEntry e;
+            std::copy_n(tx.payload.begin(), 32, e.ed_pub.begin());
+            e.registered_at = height;
+            e.active_from   = height + derive_registration_delay(b.cumulative_rand, tx.hash);
+            e.inactive_from = UINT64_MAX;
+            e.region        = std::move(region);
+            __ensure_registrants();
+            registrants_[tx.from] = e;
+
+            // Stake_table entry exists even with 0 locked; ensures unlock_height
+            // tracking is consistent. Locked is moved by STAKE/UNSTAKE.
+            __ensure_stakes();
+            auto& st = stakes_[tx.from];
+            st.unlock_height = UINT64_MAX;
+
+            // E1 Negative Entry Fee. On the FIRST registration of a domain
+            // (not re-registrations / key rotations), if the Zeroth pool has
+            // a non-zero balance, half of it is transferred to the new
+            // registrant. Geometric exhaustion: pool halves per first-time
+            // REGISTER, asymptotes to 0. Pool-empty case (balance==0 ⇒
+            // nef==0) is a silent no-op. The pool's all-zero key is a
+            // SMALL-ORDER point (forgeable, S-068); only the validator's E1
+            // guard — outer tx and COMPOSABLE_BATCH inner (S-071) — keeps
+            // any other path from debiting it. A1 invariant trivially
+            // holds: nef is balance transfer (pool -> new domain), not
+            // a mint or burn.
+            if (first_time_register) {
+                auto pool_it = accounts_.find(ZEROTH_ADDRESS);
+                if (pool_it != accounts_.end() && pool_it->second.balance > 0
+                    && tx.from != ZEROTH_ADDRESS) {
+                    uint64_t nef = pool_it->second.balance / 2;
+                    if (nef > 0) {
+                        pool_it->second.balance       -= nef;
+                        accounts_[tx.from].balance    += nef;
+                    }
+                }
+            }
+
+            sender.next_nonce++;
+            applied[tx_idx] = true;
+            break;
+        }
+
+        case TxType::DEREGISTER: {
+            if (!charge_fee(sender, tx.fee)) continue;
+            auto rit = registrants_.find(tx.from);
+            if (rit == registrants_.end()) { sender.next_nonce++; break; }
+
+            uint64_t inactive_from = height + derive_registration_delay(b.cumulative_rand, tx.hash);
+            __ensure_registrants();
+            rit->second.inactive_from = inactive_from;
+
+            auto sit = stakes_.find(tx.from);
+            if (sit != stakes_.end()) {
+                __ensure_stakes();
+                sit->second.unlock_height = inactive_from + unstake_delay_;
+            }
+
+            sender.next_nonce++;
+            applied[tx_idx] = true;
+            break;
+        }
+
+        case TxType::STAKE: {
+            if (tx.payload.size() != 8) continue;
+            uint64_t amount = 0;
+            for (int i = 0; i < 8; ++i)
+                amount |= uint64_t(tx.payload[i]) << (8 * i);
+            // S-049: amount+fee overflow would wrap `cost` to ~0 and mint free
+            // stake (locked consensus weight) from a zero balance -- worse than
+            // a plain transfer, since stake is committee power. Skip on overflow.
+            uint64_t cost;
+            if (!checked_add_u64(amount, tx.fee, &cost)) continue;
+            if (sender.balance < cost) continue;
+            sender.balance -= cost;
+            __ensure_stakes();
+            stakes_[tx.from].locked += amount;
+            if (!checked_add_u64(total_fees, tx.fee, &total_fees))
+                throw std::runtime_error("S-049: block fee accumulation "
+                                         "overflows u64");
+            sender.next_nonce++;
+            applied[tx_idx] = true;
+            break;
+        }
+
+        case TxType::UNSTAKE: {
+            if (tx.payload.size() != 8) continue;
+            uint64_t amount = 0;
+            for (int i = 0; i < 8; ++i)
+                amount |= uint64_t(tx.payload[i]) << (8 * i);
+            if (!charge_fee(sender, tx.fee)) continue;
+            auto sit = stakes_.find(tx.from);
+            if (sit == stakes_.end() || sit->second.locked < amount ||
+                height < sit->second.unlock_height) {
+                // Refund fee on failed UNSTAKE so honest users aren't penalized
+                // for a too-early request that the validator didn't catch.
+                sender.balance += tx.fee;
+                total_fees     -= tx.fee;
+                sender.next_nonce++;
+                break;
+            }
+            __ensure_stakes();
+            sit->second.locked -= amount;
+            sender.balance     += amount;
+            sender.next_nonce++;
+            applied[tx_idx] = true;
+            break;
+        }
+        // A5 PARAM_CHANGE: validator has already verified payload shape,
+        // whitelist, and multisig threshold. Re-parse just the (name,
+        // value, effective_height) header here and stage the change.
+        // Signatures aren't re-checked at apply time (deterministic
+        // replay assumption — they were verified at validate time).
+        case TxType::PARAM_CHANGE: {
+            if (!charge_fee(sender, tx.fee)) continue;
+            const auto& p = tx.payload;
+            size_t off = 0;
+            // Defensive shape checks — apply-side reject = treat as
+            // malformed and skip without staging, but fee is already
+            // consumed (paid for inclusion + multisig verification).
+            if (p.size() >= 1) {
+                size_t nlen = p[off++];
+                if (p.size() >= off + nlen + 2) {
+                    std::string name(p.begin() + off, p.begin() + off + nlen);
+                    off += nlen;
+                    uint16_t vlen = uint16_t(p[off]) | (uint16_t(p[off+1]) << 8);
+                    off += 2;
+                    if (p.size() >= off + vlen + 8) {
+                        std::vector<uint8_t> value(p.begin() + off,
+                                                     p.begin() + off + vlen);
+                        off += vlen;
+                        uint64_t eff = 0;
+                        for (int i = 0; i < 8; ++i)
+                            eff |= uint64_t(p[off + i]) << (8 * i);
+                        stage_param_change(eff, std::move(name),
+                                              std::move(value));
+                    }
+                }
+            }
+            sender.next_nonce++;
+            applied[tx_idx] = true;
+            break;
+        }
+        // R4 MERGE_EVENT (Phase 2): validator shape-checked the
+        // canonical 25-byte payload + mode-gated. Apply consumes the
+        // fee + nonce, then mutates merge_state_ on BEGIN/END.
+        //
+        // BEGIN: inserts (shard_id → partner_id) into the map. Skipped
+        //        if shard_id is already merged (idempotent on duplicate
+        //        BEGIN — a future commit hardens this with explicit
+        //        rejection on duplicate at validate time).
+        // END:   erases shard_id from the map. Skipped if shard_id
+        //        wasn't in the map (defensive — a duplicate END is a
+        //        no-op).
+        //
+        // Modular-partner check (partner == (shard+1) mod num_shards)
+        // executes here because Chain knows shard_count_. Failure
+        // skips the mutation but consumes fee/nonce — the validator
+        // accepts the tx as shape-valid; the apply-time predicate
+        // catches the cross-num-shards invariant.
+        //
+        // The actual committee stress branch + partner_subset_hash
+        // + witness-window validation are downstream (R4 Phase 3+).
+        // v2.4 + D2: composable-tx batch. Payload is the canonical binary
+        // batch encoding (decode_batch_payload — the ONE shared helper with
+        // the validator accept rule; the pre-D2 JSON array was deleted
+        // pre-genesis). Each inner is independently signed (validated
+        // upstream). Outer fee is charged whether inner txs succeed or fail
+        // (block-space billing — same model as gas in EVMs). Inner txs run
+        // inside chain.atomic_scope; any inner failure rolls back ALL inner
+        // mutations atomically. Outer nonce advances once regardless.
+        case TxType::COMPOSABLE_BATCH: {
+            if (!charge_fee(sender, tx.fee)) continue;
+            sender.next_nonce++;
+
+            std::vector<Transaction> inner_txs;
+            try {
+                inner_txs = decode_batch_payload(tx.payload);
+            } catch (...) {
+                // Malformed payload: outer fee + nonce already consumed;
+                // inner txs don't apply. Defensive — validator should
+                // have rejected at shape-validation; the apply-side
+                // catch keeps the chain replayable if a malformed batch
+                // somehow lands.
+                break;
+            }
+            if (inner_txs.empty() || inner_txs.size() > MAX_COMPOSABLE_INNER) {
+                break;
+            }
+
+            // Apply all inner txs atomically. v2.4 supports only TRANSFER
+            // inner-tx type; other types are rejected and trigger
+            // whole-batch rollback. This bounds the v2.4 surface to the
+            // dominant use cases (atomic swaps, bundled transfers); v2.4+
+            // can extend the inner-tx whitelist as semantics for STAKE/
+            // UNSTAKE/REGISTER inside a batch are designed (e.g., nonce
+            // ordering across the registry namespace).
+            //
+            // Cross-shard inner TRANSFERs are also rejected in v2.4 —
+            // cross-shard atomic semantics belong to v2.5 (2PC). This
+            // batch primitive is single-shard.
+            bool ok = atomic_scope([&](Chain& c) -> bool {
+                for (auto& inner : inner_txs) {
+                    // Inner-type whitelist
+                    if (inner.type != TxType::TRANSFER) return false;
+                    // Inner fee must be 0 — outer pays
+                    if (inner.fee != 0) return false;
+                    // No pq_auth on inners (validator/apply symmetry —
+                    // PQ inner txs are not in the v2.4 whitelist)
+                    if (!inner.pq_auth.empty()) return false;
+                    // No cross-shard inner txs in v2.4
+                    if (c.is_cross_shard(inner.to)) return false;
+                    // E1 (S-071): the Zeroth pool never spends (validator/apply symmetry)
+                    if (inner.from == ZEROTH_ADDRESS) return false;
+                    // D10 / S-072: an anonymous sender key that has small order never spends (validator/apply symmetry)
+                    if (is_anon_address(inner.from)) {
+                        auto ipk = parse_anon_pubkey(inner.from);
+                        if (determ_ed25519_point_has_small_order(ipk.data()) != 0) return false;
+                    }
+                    // Inner sender's nonce must match its current chain nonce
+                    AccountState& isender = c.accounts_[inner.from];
+                    if (inner.nonce != isender.next_nonce) return false;
+                    if (isender.balance < inner.amount) return false;
+                    // Apply: debit inner.from, credit inner.to, advance nonce
+                    isender.balance -= inner.amount;
+                    uint64_t& irecv = c.accounts_[inner.to].balance;
+                    if (!checked_add_u64(irecv, inner.amount, &irecv)) {
+                        // S-007: refuse to wrap recipient balance.
+                        return false;
+                    }
+                    isender.next_nonce++;
+                }
+                return true;
+            });
+            if (ok) applied[tx_idx] = true;
+            break;
+        }
+
+        case TxType::MERGE_EVENT: {
+            if (!charge_fee(sender, tx.fee)) continue;
+            auto ev = MergeEvent::decode(tx.payload);
+            if (ev && shard_count_ > 1
+                && ev->partner_id == ((ev->shard_id + 1) % shard_count_)) {
+                if (ev->event_type == MergeEvent::BEGIN) {
+                    MergePartnerInfo info;
+                    info.partner_id     = ev->partner_id;
+                    info.refugee_region = ev->merging_shard_region;
+                    __ensure_merge_state();
+                    merge_state_.insert({ev->shard_id, std::move(info)});
+                } else {  // END
+                    auto it = merge_state_.find(ev->shard_id);
+                    if (it != merge_state_.end()
+                        && it->second.partner_id == ev->partner_id) {
+                        __ensure_merge_state();
+                        merge_state_.erase(it);
+                    }
+                }
+            }
+            sender.next_nonce++;
+            break;
+        }
+        // v2.18 Theme 7: DApp registration / update / deactivation.
+        // tx.from must be a registered Determ domain (validator-checked);
+        // here we just decode + apply. Payload encoding documented in
+        // block.hpp DAPP_REGISTER comment. On op=0 (create/update),
+        // upsert dapp_registry_[tx.from]; on op=1 (deactivate), set
+        // inactive_from = height + DAPP_GRACE_BLOCKS. Defensive on
+        // malformed payload: charge fee + advance nonce, skip the
+        // mutation (matches validator-side reject so honest replay
+        // stays consistent if a malformed tx ever slips through).
+        case TxType::DAPP_REGISTER: {
+            if (!charge_fee(sender, tx.fee)) continue;
+            sender.next_nonce++;
+            // Decode payload
+            if (tx.payload.empty()) break;
+            uint8_t op = tx.payload[0];
+            if (op == 1) {
+                // Deactivate
+                auto it = dapp_registry_.find(tx.from);
+                if (it == dapp_registry_.end()) break;
+                __ensure_dapp_registry();
+                dapp_registry_[tx.from].inactive_from =
+                    height + DAPP_GRACE_BLOCKS;
+                break;
+            }
+            if (op != 0) break;  // unknown op — defensive no-op
+            // op=0: create/update. Decode the rest of the payload.
+            size_t p = 1;
+            auto need = [&](size_t n) { return p + n <= tx.payload.size(); };
+            if (!need(32)) break;
+            DAppEntry e;
+            std::copy_n(tx.payload.begin() + p, 32, e.service_pubkey.begin());
+            p += 32;
+            if (!need(1)) break;
+            uint8_t url_len = tx.payload[p++];
+            if (!need(url_len)) break;
+            e.endpoint_url.assign(
+                reinterpret_cast<const char*>(tx.payload.data() + p), url_len);
+            p += url_len;
+            if (!need(1)) break;
+            uint8_t topic_count = tx.payload[p++];
+            if (topic_count > MAX_DAPP_TOPICS) break;
+            for (uint8_t i = 0; i < topic_count; ++i) {
+                if (!need(1)) { topic_count = 0; break; }
+                uint8_t tl = tx.payload[p++];
+                if (tl > MAX_DAPP_TOPIC_LEN) { topic_count = 0; break; }
+                if (!need(tl))               { topic_count = 0; break; }
+                e.topics.emplace_back(
+                    reinterpret_cast<const char*>(tx.payload.data() + p), tl);
+                p += tl;
+            }
+            if (topic_count == 0 && !e.topics.empty()) {
+                // Partial decode failure — abort upsert.
+                break;
+            }
+            if (!need(1)) break;
+            e.retention = tx.payload[p++];
+            if (!need(2)) break;
+            uint16_t metalen = uint16_t(tx.payload[p]) |
+                               (uint16_t(tx.payload[p + 1]) << 8);
+            p += 2;
+            if (metalen > MAX_DAPP_METADATA) break;
+            if (!need(metalen)) break;
+            e.metadata.assign(tx.payload.begin() + p,
+                              tx.payload.begin() + p + metalen);
+            // Preserve registered_at on update; refresh active_from /
+            // clear inactive_from. New entries get registered_at = height.
+            __ensure_dapp_registry();
+            auto existing = dapp_registry_.find(tx.from);
+            if (existing != dapp_registry_.end()) {
+                e.registered_at = existing->second.registered_at;
+            } else {
+                e.registered_at = height;
+            }
+            e.active_from   = height;
+            e.inactive_from = UINT64_MAX;
+            dapp_registry_[tx.from] = std::move(e);
+            applied[tx_idx] = true;
+            break;
+        }
+        // v2.19 Theme 7 Phase 7.2: DApp message delivery. Outer tx is
+        // signed by a Determ user (registered or anon); recipient is
+        // the DApp's owning domain. Payload is opaque to chain. Apply
+        // path mirrors TRANSFER's debit/credit for tx.amount; the
+        // payload sits in the block, indexed by tx_root, consumed
+        // off-chain by DApp nodes filtering on tx.to.
+        //
+        // Defensive checks here mirror validator gates so honest
+        // replay stays consistent even if a malformed tx slipped
+        // through validation: missing/inactive DApp, unknown topic,
+        // oversized payload all silently no-op (charge fee, advance
+        // nonce, skip credit). A well-formed tx that fails ONLY
+        // because the sender lacks balance ALSO no-ops the credit
+        // (same behavior as TRANSFER's `if (sender.balance < cost)
+        // continue;` line).
+        case TxType::DAPP_CALL: {
+            // Look up DApp; reject if missing or inactive.
+            auto dit = dapp_registry_.find(tx.to);
+            if (dit == dapp_registry_.end()) {
+                if (!charge_fee(sender, tx.fee)) continue;
+                sender.next_nonce++;
+                break;
+            }
+            const DAppEntry& dapp = dit->second;
+            if (dapp.inactive_from <= height) {
+                if (!charge_fee(sender, tx.fee)) continue;
+                sender.next_nonce++;
+                break;
+            }
+            // Decode payload for topic check (chain validates the
+            // routing tag but doesn't interpret the ciphertext).
+            std::string topic;
+            if (tx.payload.size() < 1) {
+                // Truly empty payload — defensive no-op
+                if (!charge_fee(sender, tx.fee)) continue;
+                sender.next_nonce++;
+                break;
+            }
+            uint8_t tl = tx.payload[0];
+            if (1 + size_t(tl) > tx.payload.size()) {
+                // Malformed: topic_len overruns
+                if (!charge_fee(sender, tx.fee)) continue;
+                sender.next_nonce++;
+                break;
+            }
+            topic.assign(
+                reinterpret_cast<const char*>(tx.payload.data() + 1), tl);
+            // Topic must be empty or in DApp's registered topics.
+            if (!topic.empty()) {
+                bool found = false;
+                for (auto& t : dapp.topics) {
+                    if (t == topic) { found = true; break; }
+                }
+                if (!found) {
+                    if (!charge_fee(sender, tx.fee)) continue;
+                    sender.next_nonce++;
+                    break;
+                }
+            }
+            // ciphertext_len + bounds check (we don't decrypt; just
+            // verify the framing is well-formed before counting
+            // payload-size budget).
+            size_t p = 1 + size_t(tl);
+            if (p + 4 > tx.payload.size()) {
+                if (!charge_fee(sender, tx.fee)) continue;
+                sender.next_nonce++;
+                break;
+            }
+            uint32_t ct_len = uint32_t(tx.payload[p])
+                            | (uint32_t(tx.payload[p + 1]) << 8)
+                            | (uint32_t(tx.payload[p + 2]) << 16)
+                            | (uint32_t(tx.payload[p + 3]) << 24);
+            p += 4;
+            if (ct_len > MAX_DAPP_CALL_PAYLOAD) {
+                if (!charge_fee(sender, tx.fee)) continue;
+                sender.next_nonce++;
+                break;
+            }
+            if (p + ct_len != tx.payload.size()) {
+                if (!charge_fee(sender, tx.fee)) continue;
+                sender.next_nonce++;
+                break;
+            }
+            // v2.19 single-shard only: cross-shard DAPP_CALL is
+            // Phase 7.6 follow-on (requires beacon-relay extension
+            // to carry payload bytes across shards). Reject here so
+            // honest mempool never carries cross-shard DAPP_CALL.
+            if (is_cross_shard(tx.to)) {
+                if (!charge_fee(sender, tx.fee)) continue;
+                sender.next_nonce++;
+                break;
+            }
+            // All structural checks pass — apply the debit/credit/
+            // nonce. Same semantics as TRANSFER's same-shard leg.
+            // S-049: amount+fee overflow -> skip (no mint). See TRANSFER above.
+            uint64_t cost;
+            if (!checked_add_u64(tx.amount, tx.fee, &cost)) continue;
+            if (sender.balance < cost) continue;  // skip whole tx
+            sender.balance -= cost;
+            auto& rcv = accounts_[tx.to].balance;
+            if (!checked_add_u64(rcv, tx.amount, &rcv)) {
+                throw std::runtime_error(
+                    "S-007: DAPP_CALL credit would overflow recipient "
+                    "balance (to=" + tx.to + ")");
+            }
+            if (!checked_add_u64(total_fees, tx.fee, &total_fees))
+                throw std::runtime_error("S-049: block fee accumulation "
+                                         "overflows u64");
+            sender.next_nonce++;
+            applied[tx_idx] = true;
+            break;
+        }
+        // rev.9 R1: REGION_CHANGE is rejected by the validator; an
+        // unrecognized type at apply is a defensive no-op (skip the
+        // tx, do not touch state, do not advance nonce — this matches
+        // the validator's reject path and keeps replay deterministic
+        // even if a malformed block somehow slips through).
+        default: continue;
+        }
+    }
+
+    // Distribute fees + block subsidy equally among creators; dust goes
+    // to creator[0]. Block subsidy is genesis-pinned; 0 = no subsidy.
+    //
+    // E4 finite subsidy fund: subsidy_pool_initial_ == 0 keeps the
+    // historical perpetual-subsidy behavior. When set, total cumulative
+    // subsidy is hard-capped at the pool value; this block's effective
+    // subsidy = min(block_subsidy_, remaining). Once the pool drains,
+    // subsidy_this_block == 0 and the chain runs on transaction fees
+    // alone.
+    //
+    // E3 lottery mode: when subsidy_mode_ == 1, replace the FLAT per-
+    // block subsidy with a two-point draw seeded by this block's
+    // `cumulative_rand`. Probability 1/M of paying block_subsidy_ * M
+    // (jackpot block), probability (M-1)/M of paying 0. Expected per-
+    // block value equals FLAT subsidy. The draw is deterministic given
+    // the block — every honest node computes the same payout.
+    uint64_t base_subsidy = block_subsidy_;
+    if (subsidy_mode_ == 1 && lottery_jackpot_multiplier_ >= 2) {
+        // Read 8 bytes of cumulative_rand as the lottery seed. The
+        // commit-reveal protocol guarantees no committee member could
+        // have predicted cumulative_rand at Phase-1 decision time. The
+        // LAST Phase-2 revealer does see it before revealing and can
+        // reject the sample by withholding (a Phase-2 abort costs only its
+        // seat at this height — S-077); it cannot choose the replacement.
+        uint64_t lottery = 0;
+        for (int i = 0; i < 8; ++i) {
+            lottery = (lottery << 8) | b.cumulative_rand[i];
+        }
+        if (lottery % lottery_jackpot_multiplier_ == 0) {
+            base_subsidy = block_subsidy_ * lottery_jackpot_multiplier_;
+        } else {
+            base_subsidy = 0;
+        }
+    }
+    uint64_t subsidy_this_block = base_subsidy;
+    if (subsidy_pool_initial_ != 0) {
+        uint64_t remaining = subsidy_pool_initial_ > accumulated_subsidy_
+            ? subsidy_pool_initial_ - accumulated_subsidy_ : 0;
+        subsidy_this_block = std::min(base_subsidy, remaining);
+    }
+    // S-007: overflow-checked addition. total_fees and subsidy_this_block
+    // are each individually bounded (fees by senders' balances, subsidy
+    // by genesis cap / pool); the sum is bounded for realistic genesis
+    // values but a fabricated genesis with adversarial block_subsidy
+    // could push it past UINT64_MAX. Hard-fail in that case rather than
+    // wrap.
+    uint64_t total_distributed = 0;
+    if (!checked_add_u64(total_fees, subsidy_this_block, &total_distributed)) {
+        throw std::runtime_error(
+            "S-007: total_distributed (fees + subsidy) overflowed u64 "
+            "(fees=" + std::to_string(total_fees)
+          + " subsidy=" + std::to_string(subsidy_this_block) + ")");
+    }
+    if (total_distributed > 0 && !b.creators.empty()) {
+        size_t   m           = b.creators.size();
+        uint64_t per_creator = total_distributed / m;
+        uint64_t remainder   = total_distributed % m;
+        for (auto& domain : b.creators) {
+            auto& bal = accounts_[domain].balance;
+            if (!checked_add_u64(bal, per_creator, &bal)) {
+                throw std::runtime_error(
+                    "S-007: per-creator credit would overflow creator "
+                    "balance (creator=" + domain + ")");
+            }
+        }
+        // Dust (division remainder) to creator[0]. Same overflow check.
+        auto& bal0 = accounts_[b.creators[0]].balance;
+        if (!checked_add_u64(bal0, remainder, &bal0)) {
+            throw std::runtime_error(
+                "S-007: dust credit would overflow creator[0] balance "
+                "(creator=" + b.creators[0] + ")");
+        }
+    }
+
+    // b.abort_events: a Phase-1 (round=1) AbortEvent baked into this block
+    // RECORDS the suspension and moves NO stake. The record is the S-032
+    // abort_records_ cache (count + last_block) that NodeRegistry::
+    // build_from_chain and Chain::freeze_epoch_committee read through
+    // eligibility_floor.hpp to compute the suspension window. Only
+    // Phase-1 aborts are recorded, mirroring registry.cpp's suspension
+    // policy: Phase-2 timing-skew aborts on healthy creators are neither
+    // recorded nor suspended.
+    //   The former min(suspension_slash_, locked) stake deduction was
+    // RETIRED 2026-09-16 (owner decision D13, DECISION-LOG 2026-09-16
+    // "OWNER DECISIONS" §C): against the default min_stake = 1000 ONE abort
+    // left a floor-staked validator at 990 < min_stake, and S-051 lifts
+    // suspensions, never floor breaches — a liveness defect (SECURITY.md
+    // S-087). The deduction fell on the accused, not the claimants, and
+    // had no role in the S-011 bound. suspension_slash_ stays as an INERT
+    // parameter (genesis-hash-covered field, `k:` state-root leaf, snapshot
+    // field, PARAM_CHANGE key; removing it is a genesis-schema change for a
+    // later increment); block_slashed / accumulated_slashed_ keep their
+    // shape and simply never grow. Gate: `determ test-abort-event-apply`
+    // (the record lands, nothing moves, a domain staked exactly at
+    // min_stake is eligible again after its window, A1).
+    for (auto& ae : b.abort_events) {
+        if (ae.round != 1) continue;
+        __ensure_abort_records();
+        auto& ar = abort_records_[ae.aborting_node];
+        ar.count++;
+        ar.last_block = b.index;
+    }
+
+    // b.equivocation_events: an EquivocationEvent is an on-chain EVIDENCE
+    // RECORD (verified by the validator, V11) and carries NO L1 consequence
+    // — apply reads nothing from it: no stake forfeiture, no registry
+    // deactivation, no abort-record increment. Owner decision 2026-09-16
+    // (DECISION-LOG D4, O-1 option (b)): L1 stake is never slashable for
+    // equivocation; the record is the input to the L2 policy (D22). The
+    // former full-forfeit + deregister branch cost an HONEST validator its
+    // stake on a valve/re-round same-height pair (log 2026-08-12) and made
+    // the R-8 digest demotion unsound (ordering result 7570989). Gate:
+    // `determ test-equivocation-apply` (neutrality, A1, positive control).
+
+    // rev.9 B3.4: deliver inbound cross-shard receipts. Each entry
+    // credits `to` with `amount` (sender debit + fee already happened
+    // on the source shard). Idempotent on (src_shard, tx_hash); a
+    // duplicate would be rejected by the validator before reaching
+    // here, but the guard makes apply safe under chain replay.
+    for (auto& r : b.inbound_receipts) {
+        auto key = std::make_pair(r.src_shard, r.tx_hash);
+        if (applied_inbound_receipts_.count(key)) continue;
+        // S-007: overflow-checked credit on the cross-shard inbound path.
+        auto& rcv = accounts_[r.to].balance;
+        if (!checked_add_u64(rcv, r.amount, &rcv)) {
+            throw std::runtime_error(
+                "S-007: inbound receipt credit would overflow recipient "
+                "balance (to=" + r.to + ")");
+        }
+        __ensure_applied_inbound_receipts();
+        applied_inbound_receipts_.insert(key);
+        // block_inbound is a per-block u64 counter — also check for
+        // overflow into the per-block sum.
+        if (!checked_add_u64(block_inbound, r.amount, &block_inbound)) {
+            throw std::runtime_error(
+                "S-007: per-block inbound sum overflowed u64");
+        }
+    }
+
+    // A1: book the per-block deltas, then assert the unitary-balance
+    // invariant. subsidy_this_block is minted to creators iff the
+    // distribution branch above actually paid them out (creators non-
+    // empty AND total_distributed > 0). Tracking the *actually-paid*
+    // amount (not block_subsidy_ literal) is what makes E4's finite-
+    // pool path A1-consistent: once the pool drains, subsidy_this_block
+    // == 0 and no new mint happens, so the invariant still holds.
+    if (total_distributed > 0 && !b.creators.empty()) {
+        accumulated_subsidy_ += subsidy_this_block;
+    }
+    accumulated_inbound_  += block_inbound;
+    accumulated_outbound_ += block_outbound;
+    accumulated_slashed_  += block_slashed;
+
+    uint64_t expected = expected_total();
+    uint64_t actual   = live_total_supply();
+    if (actual != expected) {
+        // Hot-path string formatting only fires on bug, never in steady
+        // state. Throwing surfaces the bug to the apply-path caller (Node /
+        // validator / load) loudly rather than silently corrupting state.
+        char buf[384];
+        int64_t delta = (int64_t)actual - (int64_t)expected;
+        // §3.22: expected_total() folds six operands (see chain.hpp:590-597);
+        // itemize all six so the printed breakdown reconciles to `expected` on
+        // a shielded chain (accumulated_shielded_ is subtractive, like slashed/
+        // outbound). Diagnostic-only — fires solely on a supply-invariant bug.
+        std::snprintf(buf, sizeof(buf),
+            "unitary-balance invariant violated at block %llu: "
+            "expected=%llu actual=%llu delta=%lld "
+            "(genesis=%llu +subsidy=%llu +inbound=%llu -slashed=%llu -outbound=%llu -shielded=%llu)",
+            (unsigned long long)b.index,
+            (unsigned long long)expected,
+            (unsigned long long)actual,
+            (long long)delta,
+            (unsigned long long)genesis_total_,
+            (unsigned long long)accumulated_subsidy_,
+            (unsigned long long)accumulated_inbound_,
+            (unsigned long long)accumulated_slashed_,
+            (unsigned long long)accumulated_outbound_,
+            (unsigned long long)accumulated_shielded_);
+        throw std::runtime_error(buf);
+    }
+
+    // D3.5b: fold THIS block's shard-tip-record set into the `t:` state
+    // namespace (D3.2 ring/leaf/snapshot substrate). CONTENT-DRIVEN — unlike the
+    // cc: fold there is NO shard_count_ gate: an empty vector emits zero
+    // add_shard_tip_record calls ⇒ zero `t:` leaves, and only a BEACON producer
+    // under EXTENDED ever populates b.shard_tip_records (D3.5c), so every SINGLE/
+    // CURRENT/non-beacon block stays byte-identical. MUST run BEFORE the S-033
+    // recompute just below so compute_state_root() sees the new `t:` leaves and
+    // binds them into this block's declared state_root. A pure function of
+    // b.shard_tip_records + committed state (add_shard_tip_record is deterministic
+    // and idempotent under the per-shard ring — it overwrites the (shard,height)
+    // key), so live-apply, gossip-apply, and Chain::load replay all fold
+    // identically; an A4 revert_head across the fold restores the pre-fold map
+    // from __snapshot (captured by __ensure_shard_tip_records) and a re-append
+    // re-folds the same records. Placed before the cc: fold purely for grouping;
+    // the two folds are independent (neither reads the other's map).
+    if (!b.shard_tip_records.empty()) {
+        __ensure_shard_tip_records();
+        for (auto& rec : b.shard_tip_records)
+            add_shard_tip_record(rec);
+    }
+
+    // D3.3b Site A: epoch-rotation committee checkpoint fold-in. When THIS
+    // block is the last of an epoch (its index is the rand-anchor
+    // E·epoch_blocks − 1, i.e. (index+1) % epoch_blocks == 0), freeze epoch E's
+    // eligible pool into the `cc:` state namespace. MUST run BEFORE the S-033
+    // recompute just below so compute_state_root() sees the new cc: leaf and
+    // binds it into this block's declared state_root. EXTENDED-only
+    // (shard_count_ > 1): SINGLE chains never fold ⇒ zero cc: leaves ⇒
+    // byte-identical state_root (the shipped D3.3a invariant). A pure function
+    // of b.index + committed state (no wall-clock, no node state) so live-apply,
+    // gossip-apply, and Chain::load replay all fold identically; an A4
+    // revert_head across the boundary restores the pre-fold map from
+    // __snapshot (captured by __ensure_committee_checkpoints) and a re-append
+    // re-folds the same checkpoint (add_committee_checkpoint overwrites ⇒
+    // idempotent). Epoch 0 is intentionally NOT folded: the genesis ctor runs
+    // before the node sets epoch_blocks_/shard_count_, so a genesis fold would
+    // diverge bootstrap-vs-reload; the first checkpoint is epoch 1 at block
+    // epoch_blocks−1. An absent epoch-0 checkpoint is fail-closed at the D3.6
+    // admission gate (an epoch-0 distress just can't be authenticated), never a
+    // fork.
+    if (shard_count_ > 1 && epoch_blocks_ > 0
+        && (b.index + 1) % epoch_blocks_ == 0) {
+        __ensure_committee_checkpoints();
+        EpochIndex E = (b.index + 1) / epoch_blocks_;
+        EpochCommitteeCheckpoint cp;
+        cp.epoch_rand = b.cumulative_rand;
+        cp.members    = freeze_epoch_committee(b.index);
+        add_committee_checkpoint(E, std::move(cp));
+    }
+
+    // S-033 / v2.1 foundation: state-root verification. Block may carry a
+    // commitment to state-after-apply. If non-zero, re-derive locally
+    // and reject on mismatch. Pre-S-033 blocks carry zero state_root
+    // and skip this check (preserving byte-identical hashes + backward
+    // compatibility). Once a producer starts emitting state_root, every
+    // node applying must agree byte-for-byte — divergence here is a real
+    // consensus break (different state under same digest), which is
+    // exactly the kind of failure S-030 D1 (validate-vs-apply divergence)
+    // would otherwise produce silently.
+    {
+        Hash zero{};
+        if (b.state_root != zero) {
+            Hash computed = compute_state_root();
+            if (computed != b.state_root) {
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                    "state_root mismatch at block %llu: block declares "
+                    "%02x%02x%02x%02x... but computed %02x%02x%02x%02x... "
+                    "(S-033)",
+                    (unsigned long long)b.index,
+                    b.state_root[0], b.state_root[1], b.state_root[2], b.state_root[3],
+                    computed[0], computed[1], computed[2], computed[3]);
+                throw std::runtime_error(buf);
+            }
+        }
+    }
+    // A9 Phase 2C: publish the new committed view of accounts_ so
+    // lock-free readers see this block's updates. Must happen AFTER
+    // all in-block mutations and AFTER the state_root check (which
+    // can still throw and roll back). The std::make_shared copies the
+    // current accounts_ map; the std::atomic_store atomically swaps
+    // the published pointer. Any reader holding the prior view via
+    // an already-loaded shared_ptr keeps reading from it until they
+    // release; new readers see the new view.
+    //
+    // Cost: one map deep-copy per successful apply. This is similar
+    // cost to Phase 1's snapshot but pays for the lock-free read path
+    // rather than for rollback. Combined with Phase 2A/2B's lazy
+    // snapshot, the steady-state per-block cost on TRANSFER-only
+    // blocks is:
+    //   - One eager snapshot copy of accounts_ (Phase 1)
+    //   - One lock-free-view publish copy of accounts_ (Phase 2C)
+    //   - No copies of stakes/registrants/abort_records/merge_state/
+    //     applied_inbound_receipts (Phase 2A/2B lazy-skip)
+    // The two accounts_ copies are unavoidable absent a more invasive
+    // overlay refactor; they're paid in exchange for atomicity (Phase 1)
+    // and concurrent reads (Phase 2C) respectively.
+    // A9 Phase 2C: publish the new committed state view. Bundle all
+    // three lock-free-readable containers into a single shared_ptr
+    // so multi-container queries get cross-container atomicity (all
+    // fields read from the same commit, no straddling). Single
+    // make_shared + single atomic_store per commit; three map copies
+    // happen inside the make_shared. The bundle's contents are const,
+    // so readers can't accidentally mutate the shared snapshot.
+    publish_committed_view();   // A4: factored out; reused by revert_head()
+    } catch (...) {
+        // A9 Phase 1: any throw from the apply body leaves the chain
+        // exactly as it was at entry. Restore in-place, then re-raise
+        // so the caller (Chain::append, then up through the validator
+        // / producer path) still sees the failure. Without this catch,
+        // a mid-apply throw (invariant assertion, arithmetic overflow,
+        // bug) would leave state partially mutated — the next apply
+        // call would operate on inconsistent data and silently corrupt
+        // the chain. committed_accounts_view_ is unchanged on rollback
+        // because the atomic_store at the success path didn't execute.
+        restore_state_snapshot(std::move(__snapshot));
+        throw;
+    }
+    // A4 / S-048: the apply committed. __snapshot holds exactly the state
+    // before THIS block (the A9 faithful full-rollback image — accounts eager,
+    // changed containers lazily captured, everything else unchanged), so it IS
+    // the H-1 state. Retain it as the single revertible pre-head snapshot for a
+    // possible depth-1 head reorg; this overwrites any prior retained snapshot
+    // (only the most-recent head is revertible). Cheap: a move, no copy.
+    prev_head_snapshot_ = std::move(__snapshot);
+    return applied;
+}
+
+// ─── A4 / S-048: lock-free view publish + depth-1 head reorg ──────────────────
+
+// Build + atomic_store the CommittedStateBundle read by the *_lockfree
+// accessors. Factored verbatim out of apply_transactions's commit path (so that
+// path is byte-identical) and reused by revert_head() so the published view
+// never lags the actual head after a reorg.
+void Chain::publish_committed_view() {
+    auto __bundle = std::make_shared<CommittedStateBundle>();
+    __bundle->accounts      = accounts_;
+    __bundle->stakes        = stakes_;
+    __bundle->registrants   = registrants_;
+    __bundle->dapp_registry = dapp_registry_;
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4996)
+#endif
+    std::atomic_store(&committed_state_view_,
+        std::shared_ptr<const CommittedStateBundle>(std::move(__bundle)));
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+}
+
+// Depth-1 head reorg (BoundedReorgDesign.md). Undo EXACTLY the current head:
+// restore the retained pre-head (H-1) state and drop the head block, then
+// republish the committed view. Fail-closed on both preconditions.
+void Chain::revert_head() {
+    if (blocks_.size() < 2)
+        throw std::runtime_error(
+            "revert_head: refusing to revert genesis (depth-1 finality floor)");
+    if (!prev_head_snapshot_)
+        throw std::runtime_error(
+            "revert_head: no retained pre-head snapshot (depth-1: already "
+            "reverted, or head not applied via apply_transactions)");
+    // Restore H-1 state, then CONSUME the snapshot: a second revert without an
+    // intervening apply finds none and is refused — this is the depth-1 bound.
+    restore_state_snapshot(std::move(*prev_head_snapshot_));
+    prev_head_snapshot_.reset();
+    blocks_.pop_back();
+    if (!tx_applied_.empty()) tx_applied_.pop_back();
+    // A4.2 (adversarial-review finding 8): keep the append-only block store
+    // consistent after a reorg. persisted_count_ counts blocks written to the
+    // store; left > blocks_.size() the next save_incremental writes NOTHING
+    // (its loop is [persisted_count_, size)) while the manifest names the new
+    // head — a restart would then load the STALE reverted block and throw the
+    // head_hash-mismatch guard. Clamping forces save_incremental to REWRITE the
+    // tail file for the block that next occupies this index (the reorg winner).
+    // Save-thread-confined field, but revert runs under the node's unique
+    // state_mutex_, mutually exclusive with the save worker's shared_lock.
+    if (persisted_count_ > blocks_.size())
+        persisted_count_ = blocks_.size();
+    publish_committed_view();
+}
+
+// ─── Fork resolution ─────────────────────────────────────────────────────────
+//
+// rev.9 follow-on (addressing S-029): when two blocks compete at the same
+// height (e.g., BFT-mode multi-proposer or honest mempool divergence per
+// S-030), prefer the one with the heaviest signature set — the block that
+// more committee members ratified is the more legitimate one. More
+// signatures = more honest participation = more trustworthy.
+//
+// Order of preference:
+//   1. Heaviest sig count (more non-zero `creator_block_sigs` entries).
+//   2. Fewer abort_events (less round-1 disruption).
+//   3. Smallest block hash (deterministic tiebreaker).
+const Block& Chain::resolve_fork(const Block& a, const Block& b) {
+    auto sig_count = [](const Block& blk) {
+        Signature zero{};
+        size_t n = 0;
+        for (auto& s : blk.creator_block_sigs)
+            if (s != zero) ++n;
+        return n;
+    };
+
+    size_t na = sig_count(a), nb = sig_count(b);
+    if (na != nb) return na > nb ? a : b;       // heaviest sig set wins
+
+    if (a.abort_events.size() != b.abort_events.size())
+        return a.abort_events.size() < b.abort_events.size() ? a : b;
+
+    // Tie-break on smallest block hash (deterministic, agrees across peers).
+    Hash ha = a.compute_hash();
+    Hash hb = b.compute_hash();
+    for (size_t i = 0; i < 32; ++i)
+        if (ha[i] != hb[i]) return ha[i] < hb[i] ? a : b;
+    return a; // identical
+}
+
+// ─── Snapshot ────────────────────────────────────────────────────────────────
+
+json Chain::serialize_state(uint32_t header_count) const {
+    json snap;
+    snap["version"]       = 1;
+    snap["block_index"]   = blocks_.empty() ? uint64_t{0}
+                                              : blocks_.back().index;
+    snap["head_hash"]     = blocks_.empty()
+                              ? std::string{}
+                              : to_hex(blocks_.back().compute_hash());
+
+    json accs = json::array();
+    for (auto& [d, a] : accounts_) {
+        accs.push_back({
+            {"domain",     d},
+            {"balance",    a.balance},
+            {"next_nonce", a.next_nonce},
+        });
+    }
+    snap["accounts"] = accs;
+
+    json stk = json::array();
+    for (auto& [d, s] : stakes_) {
+        stk.push_back({
+            {"domain",        d},
+            {"locked",        s.locked},
+            {"unlock_height", s.unlock_height},
+        });
+    }
+    snap["stakes"] = stk;
+
+    json regs = json::array();
+    for (auto& [d, r] : registrants_) {
+        regs.push_back({
+            {"domain",        d},
+            {"ed_pub",        to_hex(r.ed_pub)},
+            {"registered_at", r.registered_at},
+            {"active_from",   r.active_from},
+            {"inactive_from", r.inactive_from},
+            // rev.9 R1: include region in snapshots so a restored chain
+            // preserves region-based eligibility.
+            {"region",        r.region},
+        });
+    }
+    snap["registrants"] = regs;
+
+    json applied = json::array();
+    for (auto& [src, tx_hash] : applied_inbound_receipts_) {
+        applied.push_back({
+            {"src_shard", src},
+            {"tx_hash",   to_hex(tx_hash)},
+        });
+    }
+    snap["applied_inbound_receipts"] = applied;
+
+    // Genesis-pinned constants the restorer needs to apply subsequent
+    // blocks correctly (creator credit, validator-eligibility gate,
+    // address routing).
+    snap["block_subsidy"]                = block_subsidy_;
+    snap["subsidy_pool_initial"]         = subsidy_pool_initial_;
+    snap["subsidy_mode"]                 = subsidy_mode_;
+    snap["lottery_jackpot_multiplier"]   = lottery_jackpot_multiplier_;
+    snap["min_stake"]     = min_stake_;
+    // NC-8 profile gating: emit the crypto profile ONLY when non-default (FIPS),
+    // so a MODERN chain's snapshot stays byte-identical to pre-field snapshots.
+    if (crypto_profile_ != CryptoProfile::MODERN)
+        snap["crypto_profile"] = static_cast<uint64_t>(crypto_profile_);
+    // A5 Phase 3: per-Chain values promoted from params.hpp constants.
+    // Snapshot fields preserve pre-A5 defaults when absent.
+    snap["suspension_slash"] = suspension_slash_;
+    snap["unstake_delay"]    = unstake_delay_;
+    // R7 merge-detection thresholds. These contribute state_root leaves
+    // via build_state_leaves (k: namespace) but were omitted here before
+    // — a non-default-merge-threshold chain would lose them on restore
+    // and recompute a divergent state_root, tripping the S-033 gate
+    // (S-037-class gap; closed mirroring the dapp_registry / S-037 fix).
+    snap["merge_threshold_blocks"]  = merge_threshold_blocks_;
+    snap["revert_threshold_blocks"] = revert_threshold_blocks_;
+    snap["merge_grace_blocks"]      = merge_grace_blocks_;
+    // D3.3b: genesis-pinned epoch length. Emitted ONLY when non-zero — it is
+    // not a state-root leaf, so a CURRENT/SINGLE chain (epoch_blocks_ == 0,
+    // as every pre-D3.3b test chain is) serializes byte-identically to before
+    // (existing snapshot goldens unchanged). A live EXTENDED node carries the
+    // genesis value here so restore re-pins it before subsequent boundary
+    // blocks fold their cc: checkpoints.
+    if (epoch_blocks_ != 0)
+        snap["epoch_blocks"] = epoch_blocks_;
+    // S-051: genesis-pinned committee size K (the eligibility-floor threshold).
+    // Same non-leaf, emit-only-when-nonzero discipline as epoch_blocks above:
+    // every pre-S-051 / non-floor chain (k_block_sigs_ == 0) serializes
+    // byte-identically (snapshot goldens unchanged). Carried so a
+    // snapshot-bootstrapped EXTENDED node re-pins K before its next boundary
+    // fold WITHOUT depending on the node-layer convergence setter — parity with
+    // epoch_blocks, which is serialized for exactly this restore-before-fold
+    // reason. (The node path still config-pins K after restore, genesis
+    // authoritative; this makes restore_from_snapshot self-sufficient for tool
+    // callers and defense-in-depth for the fold.)
+    if (k_block_sigs_ != 0)
+        snap["k_block_sigs"] = k_block_sigs_;
+    snap["shard_count"]   = shard_count_;
+    snap["shard_salt"]    = to_hex(shard_salt_);
+    snap["shard_id"]      = my_shard_id_;
+
+    // A1: persist the unitary-balance counters so a snapshot-bootstrapped
+    // chain can keep asserting from the first post-restore block. Without
+    // these, expected_total() would be 0 on a restored chain and the very
+    // first apply would trip the invariant.
+    snap["genesis_total"]        = genesis_total_;
+    snap["accumulated_subsidy"]  = accumulated_subsidy_;
+    snap["accumulated_slashed"]  = accumulated_slashed_;
+    snap["accumulated_inbound"]  = accumulated_inbound_;
+    snap["accumulated_outbound"] = accumulated_outbound_;
+    // §3.22: emit ONLY when non-zero/non-empty so a shield-free chain's snapshot
+    // JSON is byte-identical to a pre-§3.22 one.
+    if (accumulated_shielded_ != 0) snap["accumulated_shielded"] = accumulated_shielded_;
+    if (!shielded_pool_.empty()) {
+        json cn = json::array();
+        for (auto& [k, h] : shielded_pool_) cn.push_back({{"c", k}, {"h", h}});
+        snap["shielded_pool"] = cn;
+    }
+    // NC-8 §5 (inc.2): per-output enote delivery commitments. Serialized only
+    // when non-empty (a FIPS or enote-free chain omits the key entirely → the
+    // snapshot JSON is byte-identical). v = hex of the 32-byte en: leaf value.
+    if (!enote_commitments_.empty()) {
+        json en = json::array();
+        for (auto& [k, v] : enote_commitments_)
+            en.push_back({{"c", k}, {"v", to_hex(v.data(), v.size())}});
+        snap["enote_commitments"] = en;
+    }
+
+    // A2: same conditional-emission discipline — an audit-free chain's
+    // snapshot JSON stays byte-identical to a pre-A2 one.
+    if (!audit_keys_.empty()) {
+        json ak = json::array();
+        for (auto& [a, pk] : audit_keys_) ak.push_back({{"a", a}, {"pk", pk}});
+        snap["audit_keys"] = ak;
+    }
+    if (!audit_log_count_.empty()) {
+        json al = json::array();
+        for (auto& [a, n] : audit_log_count_) al.push_back({{"a", a}, {"n", n}});
+        snap["audit_log_counts"] = al;
+    }
+    // NC-8 §5a: same conditional-emission discipline — a note-key-free chain's
+    // snapshot JSON stays byte-identical to a pre-§5a one.
+    if (!note_keys_.empty()) {
+        json nk = json::array();
+        for (auto& [a, pk] : note_keys_) nk.push_back({{"a", a}, {"pk", pk}});
+        snap["note_keys"] = nk;
+    }
+
+    // S-032 cache: persist the Phase-1 abort accumulator so a
+    // snapshot-bootstrapped node doesn't have to rebuild it from the log.
+    json abort_arr = json::array();
+    for (auto& [domain, ar] : abort_records_) {
+        abort_arr.push_back({
+            {"domain",     domain},
+            {"count",      ar.count},
+            {"last_block", ar.last_block},
+        });
+    }
+    snap["abort_records"] = abort_arr;
+
+    // A5 Phase 2: persist pending PARAM_CHANGE entries so a snapshot-
+    // bootstrapped chain activates them at the same heights an originally-
+    // replayed chain would.
+    // R4 Phase 2: persist merge state so a snapshot-bootstrapped node
+    // resumes mid-merge correctly.
+    json merge_arr = json::array();
+    for (auto& [s, info] : merge_state_) {
+        merge_arr.push_back({
+            {"shard_id",       s},
+            {"partner_id",     info.partner_id},
+            {"refugee_region", info.refugee_region},
+        });
+    }
+    snap["merge_state"] = merge_arr;
+
+    // D3.2: persist the `t:` SHARD_TIP distress-record ring so a
+    // snapshot-bootstrapped node INHERITS the committed records — the property
+    // the S-036 closure depends on (a MERGE_EVENT admission gate must see the
+    // same records on archive and snapshot nodes). Omitted entirely when empty.
+    if (!shard_tip_records_.empty()) {
+        json tip_arr = json::array();
+        for (auto& [key_pair, rec] : shard_tip_records_) {
+            tip_arr.push_back({
+                {"source_shard_id",    rec.source_shard_id},
+                {"height",             rec.height},
+                {"eligible_count",     rec.eligible_count},
+                {"region",             rec.region},
+                {"committee_sig_root", to_hex(rec.committee_sig_root)},
+            });
+        }
+        snap["shard_tip_records"] = tip_arr;
+    }
+
+    // D3.3a: persist the `cc:` epoch committee-checkpoint ring so a
+    // snapshot-bootstrapped node inherits the frozen committee sets it needs to
+    // re-derive past shard committees with zero replay. Omitted when empty
+    // (every CURRENT/SINGLE chain) ⇒ no snapshot change.
+    if (!committee_checkpoints_.empty()) {
+        json cc_arr = json::array();
+        for (auto& [epoch, cp] : committee_checkpoints_) {
+            json members = json::array();
+            for (auto& m : cp.members)
+                members.push_back({
+                    {"domain", m.domain},
+                    {"ed_pub", to_hex(m.ed_pub)},
+                    {"region", m.region},
+                });
+            cc_arr.push_back({
+                {"epoch",      epoch},
+                {"epoch_rand", to_hex(cp.epoch_rand)},
+                {"members",    members},
+            });
+        }
+        snap["committee_checkpoints"] = cc_arr;
+    }
+
+    // S-037 closure: dapp_registry_ contributes to state_root via the
+    // `d:` namespace (build_state_leaves) but was previously absent from
+    // the JSON snapshot. Result: a DApp-active chain failed the S-033
+    // state_root gate on restore. Persist every field that contributes
+    // to the d:-namespace value-hash so the restored chain's
+    // compute_state_root() matches the original tail header.
+    json dapps = json::array();
+    for (auto& [domain, e] : dapp_registry_) {
+        json topics = json::array();
+        for (auto& t : e.topics) topics.push_back(t);
+        dapps.push_back({
+            {"domain",         domain},
+            {"service_pubkey", to_hex(e.service_pubkey)},
+            {"endpoint_url",   e.endpoint_url},
+            {"topics",         topics},
+            {"retention",      e.retention},
+            {"metadata",       to_hex(e.metadata.data(), e.metadata.size())},
+            {"registered_at",  e.registered_at},
+            {"active_from",    e.active_from},
+            {"inactive_from",  e.inactive_from},
+        });
+    }
+    snap["dapp_registry"] = dapps;
+
+    json pending = json::array();
+    for (auto& [eff, entries] : pending_param_changes_) {
+        json bucket = json::array();
+        for (auto& [name, value] : entries) {
+            bucket.push_back({
+                {"name",  name},
+                {"value", to_hex(value.data(), value.size())},
+            });
+        }
+        pending.push_back({
+            {"effective_height", eff},
+            {"entries",          bucket},
+        });
+    }
+    snap["pending_param_changes"] = pending;
+
+    // Tail headers for chain continuity. Restorer keeps them so they
+    // can verify incoming block's prev_hash chains correctly. Default
+    // is 16 — enough for typical sync overlap.
+    // RpcIngressGateAudit §3 SNAP-header-count-uncapped: clamp header_count to
+    // the 256-page anti-DoS cap the sibling handlers already enforce
+    // (on_get_chain, rpc_headers, chain_summary). serialize_state backs ONLY the
+    // two EXTERNAL snapshot-request paths (on_snapshot_request gossip +
+    // rpc_snapshot RPC) — full-chain disk persistence uses Chain::save's own path
+    // — so an unbounded client header_count >= height would otherwise serialize
+    // the ENTIRE chain (to_json per block) under one snapshot request: a
+    // per-request-work DoS. The default request is 16 (~16x below the cap), so
+    // this never truncates a legitimate snapshot; only an abusive count is bounded.
+    // (kSnapshotHeaderMax is the class constant — chain.hpp — shared with the
+    // DSN1 encoder/decoder and the SNAPSHOT_RESPONSE wire codec.)
+    json hdrs = json::array();
+    if (!blocks_.empty() && header_count > 0) {
+        if (header_count > kSnapshotHeaderMax) header_count = kSnapshotHeaderMax;
+        size_t total = blocks_.size();
+        size_t start = (total > header_count) ? total - header_count : 0;
+        for (size_t i = start; i < total; ++i) {
+            hdrs.push_back(blocks_[i].to_json());
+        }
+    }
+    snap["headers"] = hdrs;
+
+    return snap;
+}
+
+Chain Chain::restore_from_snapshot(const json& snap, bool require_supply_invariant) {
+    if (!snap.is_object())
+        throw std::runtime_error("snapshot is not a JSON object");
+    int v = snap.value("version", 0);
+    if (v != 1)
+        throw std::runtime_error(
+            "unsupported snapshot version: " + std::to_string(v));
+
+    Chain c;
+    c.block_subsidy_ = snap.value("block_subsidy", uint64_t{0});
+    c.subsidy_pool_initial_ = snap.value("subsidy_pool_initial", uint64_t{0});
+    c.subsidy_mode_         = snap.value("subsidy_mode",         uint8_t{0});
+    c.lottery_jackpot_multiplier_ =
+        snap.value("lottery_jackpot_multiplier", uint32_t{0});
+    c.min_stake_     = snap.value("min_stake",     uint64_t{1000});
+    // NC-8 profile gating: absent (default 0 = MODERN) on every pre-field snapshot.
+    c.crypto_profile_ = static_cast<CryptoProfile>(snap.value("crypto_profile", uint64_t{0}));
+    c.suspension_slash_ = snap.value("suspension_slash", uint64_t{10});
+    c.unstake_delay_    = snap.value("unstake_delay",    uint64_t{1000});
+    // R7 merge-detection thresholds (S-037-class closure). Restore from
+    // the snapshot with a fallback to the GenesisConfig defaults
+    // (100 / 200 / 10) for backward-compat with pre-fix snapshots that
+    // lack these keys — matches the member initializers in chain.hpp.
+    c.merge_threshold_blocks_  = snap.value("merge_threshold_blocks",  uint32_t{100});
+    c.revert_threshold_blocks_ = snap.value("revert_threshold_blocks", uint32_t{200});
+    c.merge_grace_blocks_      = snap.value("merge_grace_blocks",      uint32_t{10});
+    // D3.3b: genesis-pinned epoch length; absent (default 0) on every pre-D3.3b
+    // and CURRENT/SINGLE snapshot, so restore is byte-invariant for them. Set
+    // before the tail-block replay so a snapshot-bootstrapped EXTENDED node
+    // folds subsequent boundary blocks at the same boundary the producer used.
+    c.epoch_blocks_  = snap.value("epoch_blocks", uint32_t{0});
+    // S-051: genesis-pinned K, same restore-before-replay discipline as
+    // epoch_blocks above (absent ⇒ default 0 = floor disabled, byte-invariant
+    // for every pre-S-051 snapshot). A snapshot-bootstrapped EXTENDED node thus
+    // re-pins K before any tail-block boundary fold; the node layer additionally
+    // config-pins it at the chain_loaded convergence label (genesis authoritative).
+    c.k_block_sigs_  = snap.value("k_block_sigs", uint32_t{0});
+    c.shard_count_   = snap.value("shard_count",   uint32_t{1});
+    c.my_shard_id_   = snap.value("shard_id",      ShardId{0});
+    c.shard_salt_    = from_hex_arr<32>(snap.value("shard_salt",
+                                                      std::string(64, '0')));
+    // A1: restore unitary-balance counters. Older snapshots (pre-A1)
+    // omit these fields; the value() defaults give a graceful degraded
+    // state (genesis_total = live sum, no historic deltas) so old
+    // snapshots still load. The invariant on subsequent blocks will be
+    // checked using whatever genesis_total ends up loaded — for legacy
+    // snapshots that's the live total at restore time, which trivially
+    // satisfies the invariant immediately and tracks all subsequent
+    // mutations correctly.
+    c.accumulated_subsidy_  = snap.value("accumulated_subsidy",  uint64_t{0});
+    c.accumulated_slashed_  = snap.value("accumulated_slashed",  uint64_t{0});
+    c.accumulated_inbound_  = snap.value("accumulated_inbound",  uint64_t{0});
+    c.accumulated_outbound_ = snap.value("accumulated_outbound", uint64_t{0});
+    c.accumulated_shielded_ = snap.value("accumulated_shielded", uint64_t{0});   // §3.22
+    if (snap.contains("shielded_pool") && snap["shielded_pool"].is_array())
+        for (auto& e : snap["shielded_pool"])
+            c.shielded_pool_[e.value("c", std::string{})] = e.value("h", uint64_t{0});
+    if (snap.contains("enote_commitments") && snap["enote_commitments"].is_array())   // NC-8 §5
+        for (auto& e : snap["enote_commitments"])
+            c.enote_commitments_[e.value("c", std::string{})] =
+                from_hex_arr<32>(e.value("v", std::string{}));
+    if (snap.contains("audit_keys") && snap["audit_keys"].is_array())        // A2
+        for (auto& e : snap["audit_keys"])
+            c.audit_keys_[e.value("a", std::string{})] = e.value("pk", std::string{});
+    if (snap.contains("audit_log_counts") && snap["audit_log_counts"].is_array())
+        for (auto& e : snap["audit_log_counts"])
+            c.audit_log_count_[e.value("a", std::string{})] = e.value("n", uint64_t{0});
+    if (snap.contains("note_keys") && snap["note_keys"].is_array())          // NC-8 §5a
+        for (auto& e : snap["note_keys"])
+            c.note_keys_[e.value("a", std::string{})] = e.value("pk", std::string{});
+    // genesis_total deferred until after accounts/stakes load so legacy
+    // snapshots (without the field) can fall back to live sum.
+
+    // S-018 defense-in-depth: each optional snapshot collection
+    // uses json_require_array inside its contains() guard. Missing
+    // field = empty default (preserves backward-compat with legacy
+    // snapshots that omit optional fields); wrong-type field
+    // (peer sent scalar instead of array) throws a clean S-018
+    // diagnostic instead of an opaque nlohmann mid-iteration error.
+    // Snapshots arrive via SNAPSHOT_RESPONSE gossip (16 MB cap, an
+    // attack-relevant channel) and via operator-pinned files on
+    // disk.
+    if (snap.contains("accounts")) {
+        for (auto& a : json_require_array(snap, "accounts")) {
+            AccountState s;
+            s.balance    = a.value("balance",    uint64_t{0});
+            s.next_nonce = a.value("next_nonce", uint64_t{0});
+            c.accounts_[a.value("domain", std::string{})] = s;
+        }
+    }
+    if (snap.contains("stakes")) {
+        for (auto& s : json_require_array(snap, "stakes")) {
+            StakeEntry e;
+            e.locked        = s.value("locked",        uint64_t{0});
+            e.unlock_height = s.value("unlock_height", UINT64_MAX);
+            c.stakes_[s.value("domain", std::string{})] = e;
+        }
+    }
+    if (snap.contains("registrants")) {
+        for (auto& r : json_require_array(snap, "registrants")) {
+            RegistryEntry e;
+            e.ed_pub        = from_hex_arr<32>(r.value("ed_pub",
+                                                          std::string(64, '0')));
+            e.registered_at = r.value("registered_at", uint64_t{0});
+            e.active_from   = r.value("active_from",   uint64_t{0});
+            e.inactive_from = r.value("inactive_from", UINT64_MAX);
+            // rev.9 R1: optional region tag in snapshots. Absent =
+            // empty (legacy snapshot, pre-R1 behavior preserved).
+            e.region        = r.value("region",        std::string{});
+            c.registrants_[r.value("domain", std::string{})] = e;
+        }
+    }
+    if (snap.contains("applied_inbound_receipts")) {
+        for (auto& a : json_require_array(snap, "applied_inbound_receipts")) {
+            ShardId src    = a.value("src_shard", ShardId{0});
+            Hash    txhash = from_hex_arr<32>(
+                                a.value("tx_hash", std::string(64, '0')));
+            c.applied_inbound_receipts_.insert({src, txhash});
+        }
+    }
+    if (snap.contains("merge_state")) {
+        for (auto& m : json_require_array(snap, "merge_state")) {
+            ShardId s = m.value("shard_id",   ShardId{0});
+            Chain::MergePartnerInfo info;
+            info.partner_id     = m.value("partner_id", ShardId{0});
+            info.refugee_region = m.value("refugee_region",
+                                            std::string{});
+            c.merge_state_.insert({s, std::move(info)});
+        }
+    }
+    // D3.2: restore the `t:` SHARD_TIP distress-record ring so a
+    // snapshot-bootstrapped node inherits the committed records (via
+    // add_shard_tip_record, which re-applies the ring bound — a no-op here
+    // since the serialized set already respects it).
+    if (snap.contains("shard_tip_records")) {
+        for (auto& r : json_require_array(snap, "shard_tip_records")) {
+            ShardTipRecord rec;
+            rec.source_shard_id    = r.value("source_shard_id", ShardId{0});
+            rec.height             = r.value("height", uint64_t{0});
+            rec.eligible_count     = r.value("eligible_count", uint32_t{0});
+            rec.region             = r.value("region", std::string{});
+            rec.committee_sig_root = from_hex_arr<32>(
+                r.value("committee_sig_root", std::string(64, '0')));
+            c.add_shard_tip_record(rec);
+        }
+    }
+    // D3.3a: restore the `cc:` epoch committee-checkpoint ring (snapshot
+    // inheritance — via add_committee_checkpoint, which canonicalizes + re-bounds).
+    if (snap.contains("committee_checkpoints")) {
+        for (auto& cp : json_require_array(snap, "committee_checkpoints")) {
+            EpochIndex epoch = cp.value("epoch", EpochIndex{0});
+            Chain::EpochCommitteeCheckpoint ecc;
+            ecc.epoch_rand = from_hex_arr<32>(
+                cp.value("epoch_rand", std::string(64, '0')));
+            if (cp.contains("members")) {
+                for (auto& m : json_require_array(cp, "members")) {
+                    Chain::CommitteeMember cm;
+                    cm.domain = m.value("domain", std::string{});
+                    cm.ed_pub = from_hex_arr<32>(
+                        m.value("ed_pub", std::string(64, '0')));
+                    cm.region = m.value("region", std::string{});
+                    ecc.members.push_back(std::move(cm));
+                }
+            }
+            c.add_committee_checkpoint(epoch, std::move(ecc));
+        }
+    }
+    // S-032: restore the Phase-1 abort accumulator. Older snapshots
+    // (pre-S-032) omit the field; the value() default leaves the
+    // cache empty, which is fine — build_from_chain reads an empty
+    // cache as "no suspensions on file," and any post-restore aborts
+    // will increment the cache normally.
+    if (snap.contains("abort_records")) {
+        for (auto& a : json_require_array(snap, "abort_records")) {
+            std::string domain = a.value("domain", std::string{});
+            Chain::AbortRecord ar;
+            ar.count      = a.value("count",      uint64_t{0});
+            ar.last_block = a.value("last_block", uint64_t{0});
+            c.abort_records_[domain] = ar;
+        }
+    }
+    // S-037 closure: restore the v2.18 DApp registry. Pre-v2.18 snapshots
+    // omit the field; the missing-field guard leaves c.dapp_registry_
+    // empty (matches a fresh-chain restore — no DApps registered).
+    // Post-fix, the loaded entries reproduce the exact d:-namespace
+    // leaves that build_state_leaves emitted on the source side, so
+    // compute_state_root() over the restored chain matches the tail
+    // header's stored state_root (the S-033 gate now accepts DApp-active
+    // snapshots).
+    if (snap.contains("dapp_registry")) {
+        for (auto& d : json_require_array(snap, "dapp_registry")) {
+            DAppEntry e;
+            e.service_pubkey = from_hex_arr<32>(d.value("service_pubkey",
+                                                          std::string(64, '0')));
+            e.endpoint_url   = d.value("endpoint_url",  std::string{});
+            for (auto& t : d.value("topics", json::array())) {
+                if (t.is_string()) e.topics.push_back(t.get<std::string>());
+            }
+            e.retention      = d.value("retention",     uint8_t{0});
+            e.metadata       = from_hex(d.value("metadata", std::string{}));
+            e.registered_at  = d.value("registered_at", uint64_t{0});
+            e.active_from    = d.value("active_from",   uint64_t{0});
+            e.inactive_from  = d.value("inactive_from", UINT64_MAX);
+            c.dapp_registry_[d.value("domain", std::string{})] = std::move(e);
+        }
+    }
+    if (snap.contains("pending_param_changes")) {
+        for (auto& b : json_require_array(snap, "pending_param_changes")) {
+            uint64_t eff = b.value("effective_height", uint64_t{0});
+            for (auto& e : b.value("entries", json::array())) {
+                std::string name = e.value("name", std::string{});
+                std::vector<uint8_t> value = from_hex(
+                    e.value("value", std::string{}));
+                c.pending_param_changes_[eff].emplace_back(
+                    std::move(name), std::move(value));
+            }
+        }
+    }
+    if (snap.contains("headers")) {
+        for (auto& bj : json_require_array(snap, "headers")) {
+            c.blocks_.push_back(Block::from_json(bj));
+        }
+    }
+    c.tx_applied_.resize(c.blocks_.size());
+    for (size_t i = 0; i < c.blocks_.size(); ++i) {
+        c.tx_applied_[i].resize(c.blocks_[i].transactions.size(), false);
+    }
+
+    // Sanity: the head's hash should match the snapshot's stated
+    // head_hash. Reject inconsistent snapshots loudly.
+    std::string head_hash_claim = snap.value("head_hash", std::string{});
+    if (!c.blocks_.empty() && !head_hash_claim.empty()) {
+        std::string actual = to_hex(c.blocks_.back().compute_hash());
+        if (actual != head_hash_claim)
+            throw std::runtime_error(
+                "snapshot head_hash mismatch: actual " + actual
+              + " vs claimed " + head_hash_claim);
+    }
+
+    // A1: pick up genesis_total from snapshot if present; otherwise back-
+    // solve from the loaded state so the invariant is satisfied at
+    // restore time (live = genesis + subsidy + inbound - slashed - outbound).
+    if (snap.contains("genesis_total")) {
+        c.genesis_total_ = snap.value("genesis_total", uint64_t{0});
+    } else {
+        uint64_t live = c.live_total_supply();
+        uint64_t deltas_pos = c.accumulated_subsidy_ + c.accumulated_inbound_;
+        // §3.22: accumulated_shielded_ is a NEGATIVE term of the 6-term
+        // expected_total() (value moved into the confidential pool leaves the
+        // transparent live sum), so it belongs with slashed+outbound here. The
+        // back-solve must be the EXACT inverse of expected_total(); otherwise the
+        // restored genesis_total_ is under-computed by exactly accumulated_shielded_
+        // and the A1 re-check (require_supply_invariant at :2693, or the first
+        // post-restore apply at :1868) fails CLOSED on a VALID snapshot. It is
+        // restored at :2443 above, so it is already populated here. Byte-neutral on
+        // every honest fieldless snapshot: serialize writes genesis_total
+        // UNCONDITIONALLY (:2212), so the fieldless branch implies a pre-§3.22
+        // snapshot => accumulated_shielded_==0 => +0. This term only matters if the
+        // snapshot format ever makes the fieldless branch reachable with shielded>0.
+        uint64_t deltas_neg = c.accumulated_slashed_ + c.accumulated_outbound_
+                            + c.accumulated_shielded_;
+        // Solve: genesis = live + deltas_neg - deltas_pos. Wraparound is
+        // impossible on a well-formed snapshot since live - deltas_pos +
+        // deltas_neg should yield a valid uint64 by construction.
+        c.genesis_total_ = live + deltas_neg - deltas_pos;
+    }
+
+    // S-033 follow-on: verify the loaded state matches the head block's
+    // declared state_root. This is the snapshot-side analogue of the
+    // apply-side check at line ~900 — without it, the fast-bootstrap
+    // path trusts the snapshot source unconditionally, and a hostile
+    // operator could ship a snapshot whose accounts/stakes diverge from
+    // what the chain ever committed to. This is a SELF-CONSISTENCY check
+    // under the weak-subjectivity bootstrap model (the operator opts into a
+    // snapshot source by setting snapshot_path): it catches accidental
+    // corruption and naive tampering, but a supplier the operator trusts can
+    // still recompute a self-consistent state_root — restore does NOT verify
+    // the head block's committee signature (that guard lives on the live
+    // apply / fork-choice path, not here). See SnapshotRestoreGateAudit.md.
+    //
+    // Pre-S-033 chains carry zero state_root in their headers (the
+    // producer wrote nothing); we skip verification on those for
+    // backward compatibility. A snapshot whose tail came from a post-
+    // S-033 producer will have non-zero state_root and is verified.
+    if (!c.blocks_.empty()) {
+        Hash claimed = c.blocks_.back().state_root;
+        Hash zero{};
+        if (claimed != zero) {
+            Hash computed = c.compute_state_root();
+            if (computed != claimed) {
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                    "snapshot state_root mismatch at head block %llu: "
+                    "head declares %02x%02x%02x%02x... but loaded state "
+                    "computes %02x%02x%02x%02x... — snapshot is "
+                    "inconsistent or tampered (S-033)",
+                    (unsigned long long)c.blocks_.back().index,
+                    claimed[0], claimed[1], claimed[2], claimed[3],
+                    computed[0], computed[1], computed[2], computed[3]);
+                throw std::runtime_error(buf);
+            }
+        }
+    }
+
+    // SnapshotRestoreGateAudit A1-revalidate (OPT-IN node-adoption policy):
+    // re-assert the unitary-balance identity that apply_transactions enforces on
+    // EVERY block (chain.cpp ~1866: expected_total() == live_total_supply()), once,
+    // over the fully-loaded snapshot state. The head_hash/state_root self-checks
+    // above bind each leaf VALUE but NOT the accounting IDENTITY among them, so a
+    // genesis_total (2628) or accumulated_* counter that is internally
+    // self-consistent yet supply-INCONSISTENT loads clean here and then throws
+    // "unitary-balance invariant violated" on the FIRST post-restore apply —
+    // permanently wedging the node at the restored height. Node adoption
+    // (node.cpp) passes require_supply_invariant=true so a corrupt/tampered
+    // operator snapshot is rejected cleanly at LOAD instead of bricking the node.
+    // Gated on the flag (default false) so the deserializer stays GENERAL for
+    // tools + round-trip tests, which legitimately serialize synthetic
+    // (non-A1-consistent) fixtures. Same identity the apply path runs; no
+    // accept-rule / trust-model change; inert for honest snapshots and for the
+    // fieldless branch above, which back-solves genesis_total into equality.
+    if (require_supply_invariant) {
+        uint64_t expected = c.expected_total();
+        uint64_t live     = c.live_total_supply();
+        if (expected != live) {
+            char buf[224];
+            std::snprintf(buf, sizeof(buf),
+                "snapshot supply-invariant inconsistent (A1): expected_total=%llu "
+                "!= live_total_supply=%llu — counters/balances do not satisfy the "
+                "unitary-balance identity; snapshot is inconsistent or tampered",
+                (unsigned long long)expected, (unsigned long long)live);
+            throw std::runtime_error(buf);
+        }
+    }
+
+    // A9 Phase 2C: publish loaded state as the bundled lock-free view
+    // so the *_lockfree() accessors and committed_state_view() return
+    // snapshot-bootstrapped values immediately after restore (no
+    // intervening apply_transactions on this path).
+    auto __bundle = std::make_shared<CommittedStateBundle>();
+    __bundle->accounts      = c.accounts_;
+    __bundle->stakes        = c.stakes_;
+    __bundle->registrants   = c.registrants_;
+    __bundle->dapp_registry = c.dapp_registry_;
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4996)
+#endif
+    std::atomic_store(&c.committed_state_view_,
+        std::shared_ptr<const CommittedStateBundle>(std::move(__bundle)));
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
+    return c;
+}
+
+// ─── DSN1: the canonical binary snapshot container ───────────────────────────
+// D2 inc8. Field-for-field mirror of serialize_state / restore_from_snapshot
+// above, with the SAME post-load gates (head_hash claim, S-033 state_root, A1
+// revalidate). All integers little-endian; lpN = an N-bit LE length prefix
+// followed by that many bytes. Counts are bounds-checked against the remaining
+// byte budget BEFORE any allocation (bf_* discipline), and decode is
+// EXACT-consumption in both directions.
+//
+//   magic 4 = 'D','S','N','1' | version u32 = 1
+//   block_index u64 | head_hash 32 raw (zero when empty)
+//   block_subsidy u64 | subsidy_pool_initial u64 | subsidy_mode u8
+//   lottery_jackpot_multiplier u32
+//   min_stake u64 | crypto_profile u8 | suspension_slash u64 | unstake_delay u64
+//   merge_threshold_blocks u32 | revert_threshold_blocks u32 | merge_grace_blocks u32
+//   epoch_blocks u32 | k_block_sigs u32 | shard_count u32 | shard_id u32
+//   shard_salt 32 raw
+//   genesis_total u64 | accumulated_subsidy u64 | accumulated_slashed u64
+//   accumulated_inbound u64 | accumulated_outbound u64 | accumulated_shielded u64
+//   accounts / stakes / registrants / applied_inbound_receipts / merge_state /
+//   shard_tip_records / committee_checkpoints / abort_records / dapp_registry /
+//   pending_param_changes / shielded_pool / enote_commitments / audit_keys /
+//   audit_log_counts / note_keys / headers      (each a u32 count + entries)
+//
+// Unlike the JSON view, EVERY field is emitted unconditionally: the JSON
+// conditional-emission tricks exist only to keep pre-existing text goldens
+// byte-identical, and there is no such legacy for the binary container. One
+// fixed layout, one canonical encoding. genesis_total is therefore always
+// present, so the JSON path's back-solve has no binary counterpart.
+//
+// All state containers are std::map / std::set, so iteration order is
+// deterministic and encode is byte-deterministic with no extra sorting.
+namespace {
+constexpr char kSnapMagic[4] = {'D','S','N','1'};
+
+void sn_u8 (std::vector<uint8_t>& o, uint8_t v)  { o.push_back(v); }
+void sn_u16(std::vector<uint8_t>& o, uint16_t v) {
+    o.push_back(uint8_t(v & 0xFF)); o.push_back(uint8_t((v >> 8) & 0xFF));
+}
+void sn_u32(std::vector<uint8_t>& o, uint32_t v) {
+    for (int i = 0; i < 4; ++i) o.push_back(uint8_t((v >> (8 * i)) & 0xFF));
+}
+void sn_u64(std::vector<uint8_t>& o, uint64_t v) {
+    for (int i = 0; i < 8; ++i) o.push_back(uint8_t((v >> (8 * i)) & 0xFF));
+}
+void sn_raw(std::vector<uint8_t>& o, const uint8_t* p, size_t n) {
+    o.insert(o.end(), p, p + n);
+}
+void sn_lp16(std::vector<uint8_t>& o, const std::string& s, const char* what) {
+    if (s.size() > 0xFFFF) throw std::runtime_error(
+        std::string("snapshot encode: ") + what + " exceeds 65535 bytes");
+    sn_u16(o, uint16_t(s.size()));
+    o.insert(o.end(), s.begin(), s.end());
+}
+void sn_lp8(std::vector<uint8_t>& o, const std::string& s, const char* what) {
+    if (s.size() > 0xFF) throw std::runtime_error(
+        std::string("snapshot encode: ") + what + " exceeds 255 bytes");
+    sn_u8(o, uint8_t(s.size()));
+    o.insert(o.end(), s.begin(), s.end());
+}
+void sn_count(std::vector<uint8_t>& o, size_t n, const char* what) {
+    if (n > 0xFFFFFFFFull) throw std::runtime_error(
+        std::string("snapshot encode: ") + what + " count exceeds u32");
+    sn_u32(o, uint32_t(n));
+}
+// Encode a hex-keyed 33-byte commitment as raw bytes. One canonical form:
+// a key that is not exactly 66 lowercase hex chars is a corrupt in-memory
+// state and must not be silently re-shaped into the container.
+void sn_comm(std::vector<uint8_t>& o, const std::string& hex_key) {
+    std::vector<uint8_t> raw = from_hex(hex_key);
+    if (raw.size() != 33 || hex_key.size() != 66)
+        throw std::runtime_error(
+            "snapshot encode: commitment key is not 66 hex chars: " + hex_key);
+    sn_raw(o, raw.data(), raw.size());
+}
+
+struct SnRd {
+    const uint8_t* p; size_t n; size_t i{0};
+    void need(size_t k, const char* what) const {
+        if (n - i < k) throw std::runtime_error(
+            std::string("snapshot decode: truncated at ") + what);
+    }
+    uint8_t  u8 (const char* w) { need(1, w); return p[i++]; }
+    uint16_t u16(const char* w) { need(2, w); uint16_t v = uint16_t(p[i]) | uint16_t(uint16_t(p[i+1]) << 8); i += 2; return v; }
+    uint32_t u32(const char* w) { need(4, w); uint32_t v = 0; for (int k = 0; k < 4; ++k) v |= uint32_t(p[i+k]) << (8*k); i += 4; return v; }
+    uint64_t u64(const char* w) { need(8, w); uint64_t v = 0; for (int k = 0; k < 8; ++k) v |= uint64_t(p[i+k]) << (8*k); i += 8; return v; }
+    std::string lp16(const char* w) { uint16_t L = u16(w); need(L, w);
+        std::string s(reinterpret_cast<const char*>(p + i), L); i += L; return s; }
+    std::string lp8 (const char* w) { uint8_t L = u8(w); need(L, w);
+        std::string s(reinterpret_cast<const char*>(p + i), L); i += L; return s; }
+    void raw(uint8_t* out, size_t k, const char* w) { need(k, w);
+        std::memcpy(out, p + i, k); i += k; }
+    std::vector<uint8_t> rawv(size_t k, const char* w) { need(k, w);
+        std::vector<uint8_t> v(p + i, p + i + k); i += k; return v; }
+    // Every count is bounded against the REMAINING bytes using the smallest
+    // possible per-entry size, so a hostile count can never drive an
+    // over-reserve before the first truncation check fires.
+    uint32_t count(const char* w, size_t min_entry_bytes) {
+        uint32_t k = u32(w);
+        if (min_entry_bytes > 0
+            && static_cast<uint64_t>(k) * min_entry_bytes > (n - i))
+            throw std::runtime_error(
+                std::string("snapshot decode: ") + w + " count "
+                + std::to_string(k) + " exceeds remaining bytes");
+        return k;
+    }
+    std::string comm(const char* w) { uint8_t b[33]; raw(b, 33, w);
+        return to_hex(b, 33); }
+};
+} // namespace
+
+std::vector<uint8_t> Chain::encode_state(uint32_t header_count) const {
+    std::vector<uint8_t> o;
+    sn_raw(o, reinterpret_cast<const uint8_t*>(kSnapMagic), 4);
+    sn_u32(o, 1);                                        // version
+    sn_u64(o, blocks_.empty() ? uint64_t{0} : blocks_.back().index);
+    {
+        const Hash h = blocks_.empty() ? Hash{} : blocks_.back().compute_hash();
+        sn_raw(o, h.data(), h.size());
+    }
+    sn_u64(o, block_subsidy_);
+    sn_u64(o, subsidy_pool_initial_);
+    sn_u8 (o, subsidy_mode_);
+    sn_u32(o, lottery_jackpot_multiplier_);
+    sn_u64(o, min_stake_);
+    sn_u8 (o, static_cast<uint8_t>(crypto_profile_));
+    sn_u64(o, suspension_slash_);
+    sn_u64(o, unstake_delay_);
+    sn_u32(o, merge_threshold_blocks_);
+    sn_u32(o, revert_threshold_blocks_);
+    sn_u32(o, merge_grace_blocks_);
+    sn_u32(o, epoch_blocks_);
+    sn_u32(o, k_block_sigs_);
+    sn_u32(o, shard_count_);
+    sn_u32(o, my_shard_id_);
+    sn_raw(o, shard_salt_.data(), shard_salt_.size());
+    sn_u64(o, genesis_total_);
+    sn_u64(o, accumulated_subsidy_);
+    sn_u64(o, accumulated_slashed_);
+    sn_u64(o, accumulated_inbound_);
+    sn_u64(o, accumulated_outbound_);
+    sn_u64(o, accumulated_shielded_);
+
+    sn_count(o, accounts_.size(), "accounts");
+    for (auto& [d, a] : accounts_) {
+        sn_lp16(o, d, "account.domain");
+        sn_u64(o, a.balance);
+        sn_u64(o, a.next_nonce);
+    }
+    sn_count(o, stakes_.size(), "stakes");
+    for (auto& [d, s] : stakes_) {
+        sn_lp16(o, d, "stake.domain");
+        sn_u64(o, s.locked);
+        sn_u64(o, s.unlock_height);
+    }
+    sn_count(o, registrants_.size(), "registrants");
+    for (auto& [d, r] : registrants_) {
+        sn_lp16(o, d, "registrant.domain");
+        sn_raw(o, r.ed_pub.data(), r.ed_pub.size());
+        sn_u64(o, r.registered_at);
+        sn_u64(o, r.active_from);
+        sn_u64(o, r.inactive_from);
+        sn_lp8(o, r.region, "registrant.region");
+    }
+    sn_count(o, applied_inbound_receipts_.size(), "applied_inbound_receipts");
+    for (auto& [src, txh] : applied_inbound_receipts_) {
+        sn_u32(o, src);
+        sn_raw(o, txh.data(), txh.size());
+    }
+    sn_count(o, merge_state_.size(), "merge_state");
+    for (auto& [s, info] : merge_state_) {
+        sn_u32(o, s);
+        sn_u32(o, info.partner_id);
+        sn_lp8(o, info.refugee_region, "merge_state.refugee_region");
+    }
+    sn_count(o, shard_tip_records_.size(), "shard_tip_records");
+    for (auto& [key_pair, rec] : shard_tip_records_) {
+        (void)key_pair;
+        sn_u32(o, rec.source_shard_id);
+        sn_u64(o, rec.height);
+        sn_u32(o, rec.eligible_count);
+        sn_lp8(o, rec.region, "shard_tip_record.region");
+        sn_raw(o, rec.committee_sig_root.data(), rec.committee_sig_root.size());
+    }
+    sn_count(o, committee_checkpoints_.size(), "committee_checkpoints");
+    for (auto& [epoch, cp] : committee_checkpoints_) {
+        sn_u64(o, epoch);
+        sn_raw(o, cp.epoch_rand.data(), cp.epoch_rand.size());
+        sn_count(o, cp.members.size(), "committee_checkpoint.members");
+        for (auto& m : cp.members) {
+            sn_lp16(o, m.domain, "committee_member.domain");
+            sn_raw(o, m.ed_pub.data(), m.ed_pub.size());
+            sn_lp8(o, m.region, "committee_member.region");
+        }
+    }
+    sn_count(o, abort_records_.size(), "abort_records");
+    for (auto& [d, ar] : abort_records_) {
+        sn_lp16(o, d, "abort_record.domain");
+        sn_u64(o, ar.count);
+        sn_u64(o, ar.last_block);
+    }
+    sn_count(o, dapp_registry_.size(), "dapp_registry");
+    for (auto& [d, e] : dapp_registry_) {
+        sn_lp16(o, d, "dapp.domain");
+        sn_raw(o, e.service_pubkey.data(), e.service_pubkey.size());
+        sn_lp16(o, e.endpoint_url, "dapp.endpoint_url");
+        if (e.topics.size() > 0xFFFF)
+            throw std::runtime_error("snapshot encode: dapp.topics exceeds 65535");
+        sn_u16(o, uint16_t(e.topics.size()));
+        for (auto& t : e.topics) sn_lp16(o, t, "dapp.topic");
+        sn_u8(o, e.retention);
+        sn_lp16(o, std::string(e.metadata.begin(), e.metadata.end()),
+                "dapp.metadata");
+        sn_u64(o, e.registered_at);
+        sn_u64(o, e.active_from);
+        sn_u64(o, e.inactive_from);
+    }
+    sn_count(o, pending_param_changes_.size(), "pending_param_changes");
+    for (auto& [eff, entries] : pending_param_changes_) {
+        sn_u64(o, eff);
+        if (entries.size() > 0xFFFF)
+            throw std::runtime_error(
+                "snapshot encode: pending_param_changes bucket exceeds 65535");
+        sn_u16(o, uint16_t(entries.size()));
+        for (auto& [name, value] : entries) {
+            sn_lp16(o, name, "param_change.name");
+            sn_lp16(o, std::string(value.begin(), value.end()),
+                    "param_change.value");
+        }
+    }
+    sn_count(o, shielded_pool_.size(), "shielded_pool");
+    for (auto& [k, h] : shielded_pool_) { sn_comm(o, k); sn_u64(o, h); }
+    sn_count(o, enote_commitments_.size(), "enote_commitments");
+    for (auto& [k, v] : enote_commitments_) {
+        sn_comm(o, k);
+        sn_raw(o, v.data(), v.size());
+    }
+    sn_count(o, audit_keys_.size(), "audit_keys");
+    for (auto& [a, pk] : audit_keys_) {
+        sn_lp16(o, a, "audit_key.addr"); sn_lp16(o, pk, "audit_key.pk");
+    }
+    sn_count(o, audit_log_count_.size(), "audit_log_counts");
+    for (auto& [a, cnt] : audit_log_count_) {
+        sn_lp16(o, a, "audit_log_count.addr"); sn_u64(o, cnt);
+    }
+    sn_count(o, note_keys_.size(), "note_keys");
+    for (auto& [a, pk] : note_keys_) {
+        sn_lp16(o, a, "note_key.addr"); sn_lp16(o, pk, "note_key.pk");
+    }
+
+    // Tail headers, with the SAME 256-page anti-DoS clamp serialize_state
+    // applies (RpcIngressGateAudit §3; kSnapshotHeaderMax, chain.hpp).
+    std::vector<size_t> hdr_idx;
+    if (!blocks_.empty() && header_count > 0) {
+        if (header_count > kSnapshotHeaderMax) header_count = kSnapshotHeaderMax;
+        size_t total = blocks_.size();
+        size_t start = (total > header_count) ? total - header_count : 0;
+        for (size_t i = start; i < total; ++i) hdr_idx.push_back(i);
+    }
+    sn_count(o, hdr_idx.size(), "headers");
+    for (size_t i : hdr_idx) {
+        std::vector<uint8_t> frame;
+        blocks_[i].encode_frame(frame);
+        sn_count(o, frame.size(), "header.frame_len");
+        sn_raw(o, frame.data(), frame.size());
+    }
+    return o;
+}
+
+Chain Chain::decode_state(const uint8_t* data, size_t len,
+                            bool require_supply_invariant) {
+    if (len < 8 || std::memcmp(data, kSnapMagic, 4) != 0)
+        throw std::runtime_error("snapshot decode: bad magic (expected DSN1)");
+    SnRd r{data, len, 4};
+    const uint32_t version = r.u32("version");
+    if (version != 1)
+        throw std::runtime_error(
+            "unsupported snapshot version: " + std::to_string(version));
+
+    Chain c;
+    const uint64_t block_index_claim = r.u64("block_index");
+    Hash head_hash_claim{};
+    r.raw(head_hash_claim.data(), head_hash_claim.size(), "head_hash");
+    c.block_subsidy_        = r.u64("block_subsidy");
+    c.subsidy_pool_initial_ = r.u64("subsidy_pool_initial");
+    c.subsidy_mode_         = r.u8 ("subsidy_mode");
+    c.lottery_jackpot_multiplier_ = r.u32("lottery_jackpot_multiplier");
+    c.min_stake_            = r.u64("min_stake");
+    {
+        uint8_t cp = r.u8("crypto_profile");
+        if (cp > 1) throw std::runtime_error(
+            "snapshot decode: unknown crypto_profile " + std::to_string(cp));
+        c.crypto_profile_ = static_cast<CryptoProfile>(cp);
+    }
+    c.suspension_slash_        = r.u64("suspension_slash");
+    c.unstake_delay_           = r.u64("unstake_delay");
+    c.merge_threshold_blocks_  = r.u32("merge_threshold_blocks");
+    c.revert_threshold_blocks_ = r.u32("revert_threshold_blocks");
+    c.merge_grace_blocks_      = r.u32("merge_grace_blocks");
+    c.epoch_blocks_            = r.u32("epoch_blocks");
+    c.k_block_sigs_            = r.u32("k_block_sigs");
+    c.shard_count_             = r.u32("shard_count");
+    c.my_shard_id_             = r.u32("shard_id");
+    r.raw(c.shard_salt_.data(), c.shard_salt_.size(), "shard_salt");
+    c.genesis_total_        = r.u64("genesis_total");
+    c.accumulated_subsidy_  = r.u64("accumulated_subsidy");
+    c.accumulated_slashed_  = r.u64("accumulated_slashed");
+    c.accumulated_inbound_  = r.u64("accumulated_inbound");
+    c.accumulated_outbound_ = r.u64("accumulated_outbound");
+    c.accumulated_shielded_ = r.u64("accumulated_shielded");
+
+    {   // accounts: >= 2 (lp16 len) + 16
+        uint32_t n = r.count("accounts", 18);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string d = r.lp16("account.domain");
+            AccountState s;
+            s.balance    = r.u64("account.balance");
+            s.next_nonce = r.u64("account.next_nonce");
+            c.accounts_[std::move(d)] = s;
+        }
+    }
+    {   uint32_t n = r.count("stakes", 18);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string d = r.lp16("stake.domain");
+            StakeEntry e;
+            e.locked        = r.u64("stake.locked");
+            e.unlock_height = r.u64("stake.unlock_height");
+            c.stakes_[std::move(d)] = e;
+        }
+    }
+    {   uint32_t n = r.count("registrants", 59);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string d = r.lp16("registrant.domain");
+            RegistryEntry e;
+            r.raw(e.ed_pub.data(), e.ed_pub.size(), "registrant.ed_pub");
+            e.registered_at = r.u64("registrant.registered_at");
+            e.active_from   = r.u64("registrant.active_from");
+            e.inactive_from = r.u64("registrant.inactive_from");
+            e.region        = r.lp8("registrant.region");
+            c.registrants_[std::move(d)] = std::move(e);
+        }
+    }
+    {   uint32_t n = r.count("applied_inbound_receipts", 36);
+        for (uint32_t i = 0; i < n; ++i) {
+            ShardId src = r.u32("applied_receipt.src_shard");
+            Hash txh{};
+            r.raw(txh.data(), txh.size(), "applied_receipt.tx_hash");
+            c.applied_inbound_receipts_.insert({src, txh});
+        }
+    }
+    {   uint32_t n = r.count("merge_state", 9);
+        for (uint32_t i = 0; i < n; ++i) {
+            ShardId s = r.u32("merge_state.shard_id");
+            Chain::MergePartnerInfo info;
+            info.partner_id     = r.u32("merge_state.partner_id");
+            info.refugee_region = r.lp8("merge_state.refugee_region");
+            c.merge_state_.insert({s, std::move(info)});
+        }
+    }
+    {   uint32_t n = r.count("shard_tip_records", 49);
+        for (uint32_t i = 0; i < n; ++i) {
+            ShardTipRecord rec;
+            rec.source_shard_id = r.u32("shard_tip.source_shard_id");
+            rec.height          = r.u64("shard_tip.height");
+            rec.eligible_count  = r.u32("shard_tip.eligible_count");
+            rec.region          = r.lp8("shard_tip.region");
+            r.raw(rec.committee_sig_root.data(),
+                  rec.committee_sig_root.size(), "shard_tip.committee_sig_root");
+            c.add_shard_tip_record(rec);
+        }
+    }
+    {   uint32_t n = r.count("committee_checkpoints", 44);
+        for (uint32_t i = 0; i < n; ++i) {
+            EpochIndex epoch = r.u64("checkpoint.epoch");
+            Chain::EpochCommitteeCheckpoint ecc;
+            r.raw(ecc.epoch_rand.data(), ecc.epoch_rand.size(),
+                  "checkpoint.epoch_rand");
+            uint32_t mn = r.count("checkpoint.members", 35);
+            for (uint32_t k = 0; k < mn; ++k) {
+                Chain::CommitteeMember cm;
+                cm.domain = r.lp16("committee_member.domain");
+                r.raw(cm.ed_pub.data(), cm.ed_pub.size(),
+                      "committee_member.ed_pub");
+                cm.region = r.lp8("committee_member.region");
+                ecc.members.push_back(std::move(cm));
+            }
+            c.add_committee_checkpoint(epoch, std::move(ecc));
+        }
+    }
+    {   uint32_t n = r.count("abort_records", 18);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string d = r.lp16("abort_record.domain");
+            Chain::AbortRecord ar;
+            ar.count      = r.u64("abort_record.count");
+            ar.last_block = r.u64("abort_record.last_block");
+            c.abort_records_[std::move(d)] = ar;
+        }
+    }
+    {   uint32_t n = r.count("dapp_registry", 61);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string d = r.lp16("dapp.domain");
+            DAppEntry e;
+            r.raw(e.service_pubkey.data(), e.service_pubkey.size(),
+                  "dapp.service_pubkey");
+            e.endpoint_url = r.lp16("dapp.endpoint_url");
+            uint16_t tn = r.u16("dapp.topics.count");
+            for (uint16_t t = 0; t < tn; ++t)
+                e.topics.push_back(r.lp16("dapp.topic"));
+            e.retention = r.u8("dapp.retention");
+            { std::string md = r.lp16("dapp.metadata");
+              e.metadata.assign(md.begin(), md.end()); }
+            e.registered_at = r.u64("dapp.registered_at");
+            e.active_from   = r.u64("dapp.active_from");
+            e.inactive_from = r.u64("dapp.inactive_from");
+            c.dapp_registry_[std::move(d)] = std::move(e);
+        }
+    }
+    {   uint32_t n = r.count("pending_param_changes", 10);
+        for (uint32_t i = 0; i < n; ++i) {
+            uint64_t eff = r.u64("param_change.effective_height");
+            uint16_t en  = r.u16("param_change.entries.count");
+            for (uint16_t k = 0; k < en; ++k) {
+                std::string name = r.lp16("param_change.name");
+                std::string val  = r.lp16("param_change.value");
+                c.pending_param_changes_[eff].emplace_back(
+                    std::move(name),
+                    std::vector<uint8_t>(val.begin(), val.end()));
+            }
+        }
+    }
+    {   uint32_t n = r.count("shielded_pool", 41);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string k = r.comm("shielded_pool.commitment");
+            c.shielded_pool_[std::move(k)] = r.u64("shielded_pool.height");
+        }
+    }
+    {   uint32_t n = r.count("enote_commitments", 65);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string k = r.comm("enote.commitment");
+            Hash v{};
+            r.raw(v.data(), v.size(), "enote.value");
+            c.enote_commitments_[std::move(k)] = v;
+        }
+    }
+    {   uint32_t n = r.count("audit_keys", 4);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string a  = r.lp16("audit_key.addr");
+            std::string pk = r.lp16("audit_key.pk");
+            c.audit_keys_[std::move(a)] = std::move(pk);
+        }
+    }
+    {   uint32_t n = r.count("audit_log_counts", 10);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string a = r.lp16("audit_log_count.addr");
+            c.audit_log_count_[std::move(a)] = r.u64("audit_log_count.n");
+        }
+    }
+    {   uint32_t n = r.count("note_keys", 4);
+        for (uint32_t i = 0; i < n; ++i) {
+            std::string a  = r.lp16("note_key.addr");
+            std::string pk = r.lp16("note_key.pk");
+            c.note_keys_[std::move(a)] = std::move(pk);
+        }
+    }
+    {   uint32_t n = r.count("headers", 4);
+        // D2 inc7c: the tail-header page cap is enforced on DECODE too, before
+        // any header frame is parsed. Every encoder clamps to kSnapshotHeaderMax,
+        // so no file or wire frame a conforming producer ever wrote is affected;
+        // what it closes is a hostile 16 MB SNAPSHOT_RESPONSE carrying tens of
+        // thousands of minimal header frames (the byte-budget bound alone would
+        // admit ~50k of them).
+        if (n > kSnapshotHeaderMax)
+            throw std::runtime_error(
+                "snapshot decode: headers count " + std::to_string(n)
+                + " exceeds the tail-header cap " + std::to_string(kSnapshotHeaderMax));
+        for (uint32_t i = 0; i < n; ++i) {
+            uint32_t flen = r.u32("header.frame_len");
+            r.need(flen, "header.frame");
+            c.blocks_.push_back(Block::decode_frame(data + r.i, flen));
+            r.i += flen;
+        }
+    }
+    c.tx_applied_.resize(c.blocks_.size());
+    for (size_t i = 0; i < c.blocks_.size(); ++i) {
+        c.tx_applied_[i].resize(c.blocks_[i].transactions.size(), false);
+    }
+
+    // EXACT consumption both directions: a trailing byte is as fatal as a
+    // missing one.
+    if (r.i != len)
+        throw std::runtime_error(
+            "snapshot decode: " + std::to_string(len - r.i)
+            + " trailing byte(s) after the DSN1 frame");
+
+    // ── The SAME post-load gates restore_from_snapshot runs ──────────────
+    // (1) head_hash claim. The binary form always carries the field, so the
+    //     "claim absent" branch of the JSON path has no counterpart here: a
+    //     non-empty header list MUST match, and an empty one MUST claim zero.
+    if (!c.blocks_.empty()) {
+        const Hash actual = c.blocks_.back().compute_hash();
+        if (actual != head_hash_claim)
+            throw std::runtime_error(
+                "snapshot head_hash mismatch: actual " + to_hex(actual)
+              + " vs claimed " + to_hex(head_hash_claim));
+        if (c.blocks_.back().index != block_index_claim)
+            throw std::runtime_error(
+                "snapshot block_index mismatch: actual "
+              + std::to_string(c.blocks_.back().index)
+              + " vs claimed " + std::to_string(block_index_claim));
+    } else if (head_hash_claim != Hash{}) {
+        throw std::runtime_error(
+            "snapshot head_hash is set but the snapshot carries no headers");
+    }
+
+    // (2) S-033 state_root self-consistency. Pre-S-033 tails carry a zero
+    //     state_root (the producer wrote nothing) and are skipped, exactly
+    //     as on the JSON path.
+    if (!c.blocks_.empty()) {
+        const Hash claimed = c.blocks_.back().state_root;
+        if (claimed != Hash{}) {
+            const Hash computed = c.compute_state_root();
+            if (computed != claimed) {
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                    "snapshot state_root mismatch at head block %llu: "
+                    "head declares %02x%02x%02x%02x... but loaded state "
+                    "computes %02x%02x%02x%02x... — snapshot is "
+                    "inconsistent or tampered (S-033)",
+                    (unsigned long long)c.blocks_.back().index,
+                    claimed[0], claimed[1], claimed[2], claimed[3],
+                    computed[0], computed[1], computed[2], computed[3]);
+                throw std::runtime_error(buf);
+            }
+        }
+    }
+
+    // (3) SnapshotRestoreGateAudit A1-revalidate (opt-in node-adoption policy).
+    if (require_supply_invariant) {
+        uint64_t expected = c.expected_total();
+        uint64_t live     = c.live_total_supply();
+        if (expected != live) {
+            char buf[224];
+            std::snprintf(buf, sizeof(buf),
+                "snapshot supply-invariant inconsistent (A1): expected_total=%llu "
+                "!= live_total_supply=%llu — counters/balances do not satisfy the "
+                "unitary-balance identity; snapshot is inconsistent or tampered",
+                (unsigned long long)expected, (unsigned long long)live);
+            throw std::runtime_error(buf);
+        }
+    }
+
+    // A9 Phase 2C: publish the loaded state as the lock-free committed view,
+    // same as restore_from_snapshot.
+    auto __bundle = std::make_shared<CommittedStateBundle>();
+    __bundle->accounts      = c.accounts_;
+    __bundle->stakes        = c.stakes_;
+    __bundle->registrants   = c.registrants_;
+    __bundle->dapp_registry = c.dapp_registry_;
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4996)
+#endif
+    std::atomic_store(&c.committed_state_view_,
+        std::shared_ptr<const CommittedStateBundle>(std::move(__bundle)));
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+    return c;
+}
+
+// ─── Persistence ─────────────────────────────────────────────────────────────
+
+namespace {
+// B1 chain-storage-v1 helpers: atomic small-file write (tmp+rename
+// discipline) + the store/manifest path derivation. The manifest and
+// per-block files live BESIDE <path>, never AT it.
+//
+// D2 inc8: the store is BINARY-ONLY. <path> itself (the former legacy
+// full chain.json) is neither written nor read by this class any more —
+// the manifest + per-block frames are the ONE at-rest chain
+// representation. Offline text consumers use `determ chain-export --json`,
+// a pull-based non-authoritative VIEW (DECISION-LOG D2).
+// A4.5 crash-consistency TEST SEAM. -1 (default) disables it: production
+// pays only a single relaxed atomic load per file write that is always -1,
+// so the on-disk bytes and behaviour are unchanged. When set >= 0 (only by
+// the test-only setter below), write_file_atomic throws just before its Nth
+// call from now (0 = before the very next write), letting
+// test-chain-reorg-save-crash simulate a process crash at each atomic file
+// boundary of a reorg save and assert the store still loads consistently.
+std::atomic<int> g_save_crash_countdown{-1};
+
+void write_file_atomic(const fs::path& target, const std::string& content) {
+    {
+        int cd = g_save_crash_countdown.load(std::memory_order_relaxed);
+        if (cd >= 0) {
+            if (cd == 0)
+                throw std::runtime_error(
+                    "A4.5-test: simulated crash before write of " + target.string());
+            g_save_crash_countdown.store(cd - 1, std::memory_order_relaxed);
+        }
+    }
+    fs::create_directories(target.parent_path());
+    fs::path tmp = target;
+    tmp += ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) throw std::runtime_error(
+            "chain store: cannot write tmp file: " + tmp.string());
+        f << content;
+        f.flush();
+        if (!f) throw std::runtime_error(
+            "chain store: failed to flush tmp file: " + tmp.string());
+    }
+    std::error_code ec;
+    fs::rename(tmp, target, ec);
+    if (ec) throw std::runtime_error("chain store: cannot rename "
+        + tmp.string() + " → " + target.string() + ": " + ec.message());
+}
+fs::path store_dir_for(const std::string& path)    { return fs::path(path + ".blocks"); }
+fs::path manifest_path_for(const std::string& path){ return fs::path(path + ".manifest.bin"); }
+fs::path block_path_for(const fs::path& dir, uint64_t i) {
+    return dir / (std::to_string(i) + ".blk");
+}
+
+// ── D2 inc8 store record codecs ──────────────────────────────────────────
+// Manifest 'DMF1' — a FIXED 44-byte record:
+//   [0]  magic 4 = 'D','M','F','1'
+//   [4]  height    u64 LE
+//   [12] head_hash 32 raw bytes (all-zero iff height == 0)
+// Per-block file 'DBK1' — magic 4 then a Block::encode_frame frame that
+// extends to EOF. No length prefix: the file size delimits the frame and
+// decode_frame's exact-consumption rejects both truncation and padding.
+constexpr size_t kManifestBytes = 44;
+constexpr char   kManifestMagic[4] = {'D','M','F','1'};
+constexpr char   kBlockMagic[4]    = {'D','B','K','1'};
+
+std::string encode_manifest(uint64_t height, const Hash& head_hash) {
+    std::string out;
+    out.reserve(kManifestBytes);
+    out.append(kManifestMagic, 4);
+    for (int i = 0; i < 8; ++i)
+        out.push_back(static_cast<char>((height >> (8 * i)) & 0xFF));
+    out.append(reinterpret_cast<const char*>(head_hash.data()), head_hash.size());
+    return out;
+}
+
+struct ManifestRec { uint64_t height; Hash head_hash; };
+
+ManifestRec decode_manifest(const std::string& bytes, const std::string& where) {
+    // Exact length BOTH directions (2803a13 discipline): 43 and 45 are both
+    // rejected, so a mutant relaxing this to `>=` or to a prefix read reds.
+    if (bytes.size() != kManifestBytes)
+        throw std::runtime_error(
+            "chain store: manifest must be exactly 44 bytes, got "
+            + std::to_string(bytes.size()) + " in " + where);
+    if (std::memcmp(bytes.data(), kManifestMagic, 4) != 0)
+        throw std::runtime_error(
+            "chain store: bad manifest magic (expected DMF1) in " + where);
+    ManifestRec r{};
+    r.height = 0;
+    for (int i = 0; i < 8; ++i)
+        r.height |= static_cast<uint64_t>(
+            static_cast<uint8_t>(bytes[4 + i])) << (8 * i);
+    std::memcpy(r.head_hash.data(), bytes.data() + 12, 32);
+    const bool zero_hash = std::all_of(r.head_hash.begin(), r.head_hash.end(),
+                                       [](uint8_t b){ return b == 0; });
+    if (r.height == 0 && !zero_hash)
+        throw std::runtime_error(
+            "chain store: manifest height is zero but head_hash is set in " + where);
+    if (r.height != 0 && zero_hash)
+        throw std::runtime_error(
+            "chain store: manifest non-zero height but zero head_hash in " + where);
+    return r;
+}
+
+std::string read_whole_file(const fs::path& p, const std::string& what) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f) throw std::runtime_error(what + ": cannot open " + p.string());
+    std::string data((std::istreambuf_iterator<char>(f)),
+                      std::istreambuf_iterator<char>());
+    if (f.bad()) throw std::runtime_error(what + ": read error on " + p.string());
+    return data;
+}
+} // namespace
+
+// A4.5 crash-consistency test seam setter (declared in chain.hpp). Not used
+// on any production path — only test-chain-reorg-save-crash arms it. The
+// anon-namespace counter has internal linkage but is visible to this same
+// translation unit, so this externally-linked function can drive it.
+namespace testonly {
+void set_save_crash_countdown(int n) {
+    g_save_crash_countdown.store(n, std::memory_order_relaxed);
+}
+} // namespace testonly
+
+void Chain::save_incremental(const std::string& path) const {
+    // O(new blocks) per call: write only blocks_[persisted_count_, size)
+    // as one-file-per-block, then the tiny manifest LAST (atomic), so the
+    // store is always either the previous consistent (manifest, blocks)
+    // pair or the new one. Block files beyond the manifest height that a
+    // crash strands are harmless: load() reads exactly manifest.height
+    // files, and the next save overwrites them atomically.
+    const fs::path dir = store_dir_for(path);
+
+    // A4.5 (reorg-during-save crash-consistency). Normally the block writes
+    // below are strictly append-only (indices >= the manifest's height), so
+    // a crash mid-loop only strands harmless higher-index files and the
+    // manifest still consistently names the old head. A head reorg breaks
+    // that: revert_head() clamped persisted_count_ below the on-disk manifest
+    // height, so the loop is about to overwrite an IN-RANGE tail file (the
+    // one the current manifest's head_hash covers) with the reorg winner. A
+    // crash between that overwrite and the final manifest rewrite would leave
+    // manifest{height N, head=OLD} beside <N-1>.json=WINNER, and load()
+    // rejects the head_hash mismatch as tampering — a fail-closed brick.
+    // Guard: when the manifest is ahead of persisted_count_, first shrink it
+    // to persisted_count_ (dropping the reference to the file about to be
+    // rewritten). After the shrink, every block file the manifest names is
+    // unchanged on disk (index persisted_count_-1 is the finality floor H-1,
+    // never reverted under the depth-1 bound), so a crash in any subsequent
+    // window reloads a consistent shorter chain and re-syncs the head.
+    if (persisted_manifest_height_ > persisted_count_) {
+        const Hash shrunk_head = persisted_count_ == 0
+                                 ? Hash{}
+                                 : blocks_[persisted_count_ - 1].compute_hash();
+        write_file_atomic(manifest_path_for(path),
+                          encode_manifest(persisted_count_, shrunk_head));
+        persisted_manifest_height_ = persisted_count_;
+    }
+
+    for (size_t i = persisted_count_; i < blocks_.size(); ++i) {
+        std::vector<uint8_t> frame;
+        blocks_[i].encode_frame(frame);
+        std::string rec;
+        rec.reserve(4 + frame.size());
+        rec.append(kBlockMagic, 4);
+        rec.append(reinterpret_cast<const char*>(frame.data()), frame.size());
+        write_file_atomic(block_path_for(dir, i), rec);
+    }
+    // Same S-021 gate as before the container swap: the head digest
+    // transitively covers every prior block via the prev_hash chain +
+    // committee signatures; load() recomputes and rejects a mismatch.
+    const Hash head = blocks_.empty() ? Hash{} : blocks_.back().compute_hash();
+    write_file_atomic(manifest_path_for(path),
+                      encode_manifest(blocks_.size(), head));
+    persisted_count_ = blocks_.size();
+    persisted_manifest_height_ = blocks_.size();
+}
+
+void Chain::set_params(const Params& p) {
+    block_subsidy_              = p.block_subsidy;
+    subsidy_pool_initial_       = p.subsidy_pool_initial;
+    subsidy_mode_               = p.subsidy_mode;
+    lottery_jackpot_multiplier_ = p.lottery_jackpot_multiplier;
+    min_stake_                  = p.min_stake;
+    crypto_profile_             = p.crypto_profile;
+    suspension_slash_           = p.suspension_slash;
+    unstake_delay_              = p.unstake_delay;
+    merge_threshold_blocks_     = p.merge_threshold_blocks;
+    revert_threshold_blocks_    = p.revert_threshold_blocks;
+    merge_grace_blocks_         = p.merge_grace_blocks;
+    shard_count_                = p.shard_count;
+    shard_salt_                 = p.shard_salt;
+    my_shard_id_                = p.my_shard_id;
+    epoch_blocks_               = p.epoch_blocks;
+    k_block_sigs_               = p.k_block_sigs;
+}
+
+Chain Chain::load(const std::string& path,
+                    uint64_t block_subsidy,
+                    uint32_t shard_count,
+                    const Hash& shard_salt,
+                    ShardId my_shard_id,
+                    uint32_t epoch_blocks,
+                    uint32_t k_block_sigs) {
+    // Selftest convenience: the six explicit fields, everything else default.
+    Params p;
+    p.block_subsidy = block_subsidy;
+    p.shard_count   = shard_count;
+    p.shard_salt    = shard_salt;
+    p.my_shard_id   = my_shard_id;
+    p.epoch_blocks  = epoch_blocks;
+    p.k_block_sigs  = k_block_sigs;
+    return load(path, p);
+}
+
+Chain Chain::load(const std::string& path, const Params& p) {
+    // B1 chain-storage-v1 / D2 inc8: the binary block store is the ONLY
+    // at-rest chain representation. A present-but-unreadable store is a
+    // HARD error, fail-closed (S-021 stance). There is NO text fallback:
+    // <path> itself is never read — a chain.json sitting beside the store
+    // is inert data, and a store-less directory loads as an EMPTY chain
+    // (gate test-chain-store CS-8). Recovery from a genuinely destroyed
+    // store is resync from peers or a snapshot, not a hand-edited file.
+    const fs::path mpath = manifest_path_for(path);
+    if (fs::exists(mpath)) {
+        const ManifestRec mrec =
+            decode_manifest(read_whole_file(mpath, "chain store: manifest"),
+                            mpath.string());
+        const uint64_t height = mrec.height;
+
+        // S-078: seed EVERY genesis-pinned parameter BEFORE the replay. The
+        // replay below recomputes each block's state_root, and fourteen of
+        // these fields are `k:` leaves (block_subsidy, the three subsidy
+        // fields, min_stake, suspension_slash, unstake_delay, the three
+        // merge thresholds, shard_count, shard_salt, my_shard_id, and
+        // crypto_profile when FIPS); epoch_blocks / k_block_sigs steer the
+        // D3.3b fold-in and the S-051 floor verdict. Any of them left at its
+        // default here where the producer had a non-default value makes the
+        // first replayed block with a declared state_root throw S-033 — the
+        // node's post-load setters ran too late for this loop. Gate:
+        // test-chain-load-genesis-params (per-parameter positive controls).
+        Chain c;
+        c.set_params(p);
+
+        const fs::path dir = store_dir_for(path);
+        Hash prev_hash{};
+        for (uint64_t i = 0; i < height; ++i) {
+            const fs::path bpath = block_path_for(dir, i);
+            if (!fs::exists(bpath)) throw std::runtime_error(
+                "chain store: manifest height " + std::to_string(height)
+                + " but block file missing/unreadable: " + bpath.string());
+            const std::string data =
+                read_whole_file(bpath, "chain store: block file");
+            if (data.size() < 5 || std::memcmp(data.data(), kBlockMagic, 4) != 0)
+                throw std::runtime_error(
+                    "chain store: bad block magic (expected DBK1) in "
+                    + bpath.string());
+            // decode_frame is EXACT-consumption (BF-12 hostile-bytes gated):
+            // it rejects a truncated frame AND any trailing byte, so the
+            // file size alone delimits the record — no length prefix needed.
+            Block b = Block::decode_frame(
+                reinterpret_cast<const uint8_t*>(data.data()) + 4,
+                data.size() - 4);
+            // S-084: verify block index and hash chain link.
+            if (b.index != i) {
+                throw std::runtime_error(
+                    "chain store: block index mismatch in " + bpath.string()
+                    + "; expected " + std::to_string(i) + " got " + std::to_string(b.index));
+            }
+            if (i == 0) {
+                if (b.prev_hash != Hash{}) {
+                    throw std::runtime_error(
+                        "chain store: genesis block prev_hash non-zero in " + bpath.string());
+                }
+            } else {
+                if (b.prev_hash != prev_hash) {
+                    throw std::runtime_error(
+                        "chain store: block " + std::to_string(i) + " prev_hash mismatch in " + bpath.string()
+                        + "; expected " + to_hex(prev_hash) + " got " + to_hex(b.prev_hash));
+                }
+            }
+            prev_hash = b.compute_hash();
+            auto applied = c.apply_transactions(b);
+            c.tx_applied_.push_back(std::move(applied));
+            c.blocks_.push_back(std::move(b));
+        }
+        // The store is already on disk up to `height` — the next
+        // save_incremental writes only genuinely new blocks.
+        c.persisted_count_ = c.blocks_.size();
+        // A4.5: the on-disk manifest names exactly this height, so the
+        // shrink-first guard is a no-op until a reorg clamps persisted_count_.
+        c.persisted_manifest_height_ = c.blocks_.size();
+
+        // S-021 head gate, unchanged by the container swap: the recomputed
+        // head digest transitively covers every prior block. decode_manifest
+        // already enforced (height==0) <=> (head_hash all-zero), so a
+        // non-empty height always carries a real digest to compare.
+        if (height != 0) {
+            if (c.blocks_.empty())
+                throw std::runtime_error(
+                    "chain store: head_hash set but height is zero");
+            const Hash actual = c.blocks_.back().compute_hash();
+            if (actual != mrec.head_hash)
+                throw std::runtime_error(
+                    "chain store: head_hash mismatch (tampering or corruption?); "
+                    "stored=" + to_hex(mrec.head_hash)
+                    + " computed=" + to_hex(actual));
+        }
+        return c;
+    }
+
+    // No manifest => no store => EMPTY chain, so the caller (Node) can decide
+    // whether to bootstrap from a GenesisConfig or a snapshot. D2 inc8: this
+    // is deliberately NOT a text fallback — a legacy chain.json sitting at
+    // <path> is ignored entirely (gate CS-8). Don't synthesize a legacy
+    // zeros-genesis here either: that would later collide with a pinned
+    // genesis_hash in the operator config.
+    Chain c;
+    c.set_params(p);   // same seeding as the replay path (no replay ran yet)
+    return c;
+}
+
+nlohmann::json Chain::export_store_json(const std::string& path) {
+    // D2 inc8 offline VIEW. The at-rest chain is binary-only; this is the ONE
+    // place that renders it as text, and the text is explicitly
+    // non-authoritative (DECISION-LOG D2 permits human-readable views off the
+    // storage/wire path). Shape is the historical wrapped form
+    // {head_hash: "<hex>", blocks: [...]} so offline consumers migrate
+    // mechanically from parsing an at-rest chain.json to piping this command.
+    //
+    // Decode-only: no apply_transactions replay — an export is a view, not a
+    // validator, and replay would need the genesis-pinned constants the
+    // exporter does not have. The S-021 head gate still runs, so a tampered
+    // store cannot be exported as if it were clean.
+    //
+    // Mid-run safety: the manifest is written atomically LAST and names only
+    // fully-written block files — the same guarantee Chain::load relies on.
+    const fs::path mpath = manifest_path_for(path);
+    json out;
+    out["head_hash"] = std::string{};
+    out["blocks"]    = json::array();
+    if (!fs::exists(mpath)) return out;   // no store => empty, mirrors load()
+
+    const ManifestRec mrec =
+        decode_manifest(read_whole_file(mpath, "chain store: manifest"),
+                        mpath.string());
+    const fs::path dir = store_dir_for(path);
+    Hash last_hash{};
+    for (uint64_t i = 0; i < mrec.height; ++i) {
+        const fs::path bpath = block_path_for(dir, i);
+        if (!fs::exists(bpath)) throw std::runtime_error(
+            "chain store: manifest height " + std::to_string(mrec.height)
+            + " but block file missing/unreadable: " + bpath.string());
+        const std::string data = read_whole_file(bpath, "chain store: block file");
+        if (data.size() < 5 || std::memcmp(data.data(), kBlockMagic, 4) != 0)
+            throw std::runtime_error(
+                "chain store: bad block magic (expected DBK1) in " + bpath.string());
+        Block b = Block::decode_frame(
+            reinterpret_cast<const uint8_t*>(data.data()) + 4, data.size() - 4);
+        // S-084: verify block index and hash chain link.
+        if (b.index != i) {
+            throw std::runtime_error(
+                "chain store: block index mismatch in " + bpath.string()
+                + "; expected " + std::to_string(i) + " got " + std::to_string(b.index));
+        }
+        if (i == 0) {
+            if (b.prev_hash != Hash{}) {
+                throw std::runtime_error(
+                    "chain store: genesis block prev_hash non-zero in " + bpath.string());
+            }
+        } else {
+            if (b.prev_hash != last_hash) {
+                throw std::runtime_error(
+                    "chain store: block " + std::to_string(i) + " prev_hash mismatch in " + bpath.string()
+                    + "; expected " + to_hex(last_hash) + " got " + to_hex(b.prev_hash));
+            }
+        }
+        last_hash = b.compute_hash();
+        out["blocks"].push_back(b.to_json());
+    }
+    if (mrec.height != 0) {
+        if (last_hash != mrec.head_hash)
+            throw std::runtime_error(
+                "chain store: head_hash mismatch (tampering or corruption?); "
+                "stored=" + to_hex(mrec.head_hash) + " computed=" + to_hex(last_hash));
+        out["head_hash"] = to_hex(last_hash);
+    }
+    return out;
+}
+
+} // namespace determ::chain

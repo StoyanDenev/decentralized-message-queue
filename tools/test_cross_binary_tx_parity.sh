@@ -140,8 +140,9 @@ parity_check() {
     # (2) determ tx-hash --in (chain-canonical Transaction::compute_hash).
     local determ_hash determ_rc
     set +e
-    determ_hash=$("$DETERM" tx-hash --in "$txjson" 2>/dev/null | tr -d '\r\n')
+    determ_hash=$("$DETERM" tx-hash --in "$txjson" 2>/dev/null)
     determ_rc=$?
+    determ_hash=$(printf '%s' "$determ_hash" | tr -d '\r\n')
     set -e
     assert_eq "$determ_rc" "0" "[$label] determ tx-hash exits 0"
 
@@ -149,8 +150,9 @@ parity_check() {
     #     Ed25519 verify of the light sig under A's pubkey).
     local wallet_json wallet_rc wallet_hash wallet_csb wallet_valid
     set +e
-    wallet_json=$("$DETERM_WALLET" tx-sign-verify --tx "$txjson" --pubkey "$PUB_A" --json 2>/dev/null | tr -d '\r')
+    wallet_json=$("$DETERM_WALLET" tx-sign-verify --tx "$txjson" --pubkey "$PUB_A" --json 2>/dev/null)
     wallet_rc=$?
+    wallet_json=$(printf '%s' "$wallet_json" | tr -d '\r')
     set -e
     assert_eq "$wallet_rc" "0" "[$label] wallet tx-sign-verify exits 0 (light sig valid under wallet's signing_bytes)"
     wallet_hash=$(echo "$wallet_json"  | $PY -c "import json,sys; print(json.load(sys.stdin)['tx_hash_hex'])")
@@ -219,20 +221,6 @@ if [ -s "$TMP/unstake.json" ]; then
     parity_check "UNSTAKE" "$TMP/unstake.json"
 else
     echo "  FAIL: light sign-tx produced no UNSTAKE envelope"
-    fail_count=$((fail_count + 1))
-fi
-
-echo
-echo "=== D23 / R-17 (S-103) parity (genesis_hash + shard_id bound) ==="
-GH="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-"$DETERM_LIGHT" sign-tx --keyfile "$TMP/key_a.json" --type TRANSFER \
-    --to "$ADDR_B" --amount 250 --fee 1 --nonce 4 \
-    --genesis-hash "$GH" --shard-id 7 \
-    --out "$TMP/d23_bound.json" >/dev/null 2>&1
-if [ -s "$TMP/d23_bound.json" ]; then
-    parity_check "D23-BOUND" "$TMP/d23_bound.json"
-else
-    echo "  FAIL: light sign-tx produced no D23 bound envelope"
     fail_count=$((fail_count + 1))
 fi
 

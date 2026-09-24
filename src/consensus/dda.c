@@ -116,7 +116,6 @@ bool dda_commit_block(dda_tracker_t *tracker, uint64_t timestamp_ms,
     }
     if (tracker->count > 0) {
         size_t newest_idx = (tracker->head + DDA_TIMESTAMP_CAPACITY - 1) % DDA_TIMESTAMP_CAPACITY;
-        (void)newest_idx;
         if (timestamp_ms <= tracker->block_timestamps[newest_idx]) {
             return false;
         }
@@ -158,7 +157,7 @@ int consensus_block_header_encode(uint8_t *out_buf, size_t buf_cap,
 int consensus_block_header_decode(const uint8_t *data, size_t len,
                                   consensus_block_header_t *header) {
     if (!data || !header) return -1;
-    if (len < CONSENSUS_BLOCK_HEADER_SIZE) return -2;
+    if (len != CONSENSUS_BLOCK_HEADER_SIZE) return -2; /* short or trailing bytes */
 
     header->block_index    = be_get_u64(data + 0);
     header->timestamp_ms   = be_get_u64(data + 8);

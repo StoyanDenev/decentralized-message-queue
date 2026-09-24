@@ -90,12 +90,30 @@ Read this before writing code or docs. On any decision conflict, docs/proofs/DEC
   per-view-key act in the designed v2.22/v2.24 mechanism. Any doc asserting
   unqualified PFS alongside view-key disclosure is wrong (same entry).
 
-## CURRENT FRONT — read before selecting any work (owner directives 2026-07-28 and 2026-09-16)
+## CURRENT FRONT — read before selecting any work (owner directives 2026-07-28, 2026-09-16 and 2026-09-23)
+STATE 2026-09-23 (owner decisions, DECISION-LOG 2026-09-23 — read that entry first). Between
+2026-09-20 and 2026-09-22 two other AI agents worked on the tree (Google Antigravity; ChatGPT
+Codex through PR #1). The post-merge commits that deleted the C++ tree, added "formal proofs"
+for unimplemented mechanisms and loosened the doc guards were reverted (the tree was restored
+to the last all-green CI state c54c37a7), and the unsound C++ increments were reverted with
+their rows back to DECIDED, NOT LANDED: D5a, D6, D9's block-byte cap, D23 (+ the bundled
+S-101), D15, S-075, S-097 with the anonymous-CT ingress half of D14, and S-080/S-085. Kept and
+LANDED 2026-09-20: O-1 step 3b (cap 16 + in-block duplicate rejection; value not approved under
+D24), D10 (S-072), D7 (S-067 partial — unlocked value stranded), D9's empty-pq_auth rule,
+S-082 (partial), S-084, S-098, S-099, S-100, S-063/D18a (partial), S-091 DNK1 (partial). New:
+S-117 (signing_bytes not injective with a NUL in `to`; High, OPEN, owner decision). FB1
+(tla/Consensus.tla) is the K-of-K model again; the C99 local attempt is modeled as FB74. The
+C99 migration (owner goal: migrate to C99; ADR-004 K=2 PoSW is the accepted direction, not
+implemented) proceeds port-then-retire per docs/C99-MINIX-PORT.md §0. CI (2026-09-23): TLC
+runs over every configured model (`ci_local.sh --tla`, the `tla` job — step 12's TLA half);
+the C99 targets build with GCC and Clang and run under ASan + UBSan with GCC (`--c99-sanitize`);
+a missing doc guard, FAST wrapper or TLC toolchain, or a wrapper exiting non-zero, fails. The status text
+below predates this entry where it disagrees with it.
 ACTIVE FRONT (owner, DECISION-LOG 2026-09-16 D1 — supersedes the 2026-07-28 "D2 now" line
 for ORDERING; D2 itself stays authorized): SAFETY FIRST, D2 WIRE REMAINDER IN PARALLEL. Work is
 selected from the IMPLEMENTATION SEQUENCE in DECISION-LOG 2026-09-16 §E, in that order:
 (1) apply exports 0001-0015; (2) the record; (3) the O-1 chain (forfeiture removal alone —
-LANDED 2026-09-16, export 0016 -> evidence cap + in-block dedup (3b, STILL OPEN) -> abort-deduction
+LANDED 2026-09-16, export 0016 -> evidence cap + in-block dedup (3b, LANDED 2026-09-20, e3670683 — see STATE 2026-09-23) -> abort-deduction
 retirement — LANDED 2026-09-16, D13, S-087 closed -> re-derivations — LANDED 2026-09-17 (3c),
 S-095 closed, S-006/S-011/S-013/S-029 restated, BFTSafety B2 deleted + T-5.1 withdrawn, all 58
 banners removed; S-102 ADJUDICATED +
@@ -142,7 +160,9 @@ net perf on the JSON envelope). Per sequence-before-harden, migrate first.
      derive-equality replaces the S-028 address cross-check; ZERO src/ edits.
      REMAINDER: DETERM-ACCOUNT-V1 stays src-owned JSON/text until its src-side increment;
      the light export-headers archive waits on the binary header frame.
-     PROGRESS 2026-09-20: S-091 / D2 (src-side node identity keyfile encryption) LANDED:
+     PROGRESS 2026-09-20: S-091 / D2 (src-side node identity keyfile encryption) LANDED (S-091 stays
+     PARTIAL: plaintext is still the default and `init --passphrase-from` on an existing dir
+     switches identity — review 2026-09-23 CXB-7):
      `save_node_key` / `load_node_key` support canonical DNK1 binary container wrapping
      DWE2 (Argon2id + AES-256-GCM) with pubkey AAD binding, 0600 mode, `--passphrase` and
      `--passphrase-from` in `determ init` and `determ start`, `DETERM_PASSPHRASE` fallback,
@@ -394,7 +414,9 @@ m_creators: no accept rule reads M (DECISION-LOG 2026-08-14 ddfe877).
   the block's bytes, or none — DECISION-LOG 2026-08-13); [D13 abort-deduction retirement —
   LANDED 2026-09-16, DECISION-LOG entry "D13 LANDED"; T-A1 of AbortEventApply.md is historical];
   [3c THE RE-DERIVATIONS — LANDED 2026-09-17, DECISION-LOG entry "O-1 step 3c"; all 58
-  banners removed, no banner removed without a re-derivation.] So STILL TO LAND is 3b alone.
+  banners removed, no banner removed without a re-derivation.] 3b LANDED 2026-09-20 (e3670683; no
+  landing entry, value 16 not owner-approved under D24, duplicate = byte-identical record hash,
+  canonical order producer-only — SECURITY.md S-006 note, review CXA-12).
   WHAT 3c SETTLED, and what it did NOT:
     S-006 stays ✅ Mitigated on a restated closure — detection + on-chain record + L2 input
       (D22). It is NOT reopened: the defect was that the second contrib's signature vanished
@@ -607,7 +629,7 @@ measured evidence and approved by the owner at review (D24):
 NODE-/CLIENT-LOCAL BACKLOG (D19a, no accept-rule change; each its own gate + review), by
 severity: S-078 (LANDED 2026-09-16 — Chain::load seeds every genesis parameter before the
 replay via Chain::Params; gate test-chain-load-genesis-params), S-079, S-080, S-085, S-082, S-097, S-100, S-084, S-098, S-099, S-070, S-075,
-S-091 (with the D2 src-side keyfile increment), S-063 (LANDED 2026-09-20 — delivery layer apply reporting and value gating, D18a; gate test-dapp-delivery-apply-status). S-102 was
+S-091 (PARTIAL 2026-09-20 — DNK1 encryption available, plaintext still the default), S-063 (PARTIAL 2026-09-20 — delivery layer apply reporting and value gating, D18a; gate test-dapp-delivery-apply-status; snapshot-bootstrapped nodes misreport retained-tail calls as SKIPPED). 2026-09-20 attempts at S-075, S-080, S-085, S-097 were REVERTED 2026-09-23; S-082 (partial), S-084, S-098, S-099, S-100 LANDED 2026-09-20. S-102 was
 ADJUDICATED + CLOSED 2026-09-16 (step 3, before R-8): reachable at HEAD by a relayer's zero-key
 state_root relabel of the head (outside the digest and every validator rule); the depth-1 reorg
 is now atomic over an apply throw (node.cpp maybe_reorg_to_locked; gate test-node-reorg-guard,

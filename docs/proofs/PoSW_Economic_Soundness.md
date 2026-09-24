@@ -1,17 +1,39 @@
-> **TIER: FORMAL PROOF.** Authoritative consensus and security specification. Roadmap index: docs/ROADMAP.md
+> **TIER: FUTURE — design note, NOT a proof; demoted 2026-09-23 by owner decision.** Describes the proposed ADR-004/ADR-005 direction; no shipped code implements it. Roadmap index: docs/ROADMAP.md
 
 # PoSW Economic Soundness: VDF Cost-to-Forge & The Irrationality of 1-Bit Bias
 
 **Document ID:** FA-PoSW-02  
-**Status:** ACTIVE FORMAL PROOF (supersedes legacy Zero-Bit Bias / Time-Lock Claims per Decision Log 2026-09-22)  
+**Status:** DESIGN NOTE (future tier). Not a proof, not authoritative; it does not supersede any FA/FB proof or DECISION-LOG entry.
 **Date:** 2026-09-22  
-**Author:** Principal Cryptography Researcher & Formal Verification Architect  
+**Author:** agent-generated on 2026-09-22 (commit 247113c5); no independent review.
 **Grounding:**
 - Decision Log 2026-09-22: Formal Retraction of "Zero-Bit Bias" Claims
 - `docs/proofs/K2_VDF_Soundness.md` (§2 R1, R2, R3 refutations)
 - `docs/decisions/ADR-004-Fault-Model.md` (PoSW Cumulative Work Model)
 - `docs/proofs/PoSW_Nakamoto_Safety.md` (Sequential Speed Ratio $\rho$)
 - `docs/proofs/Preliminaries.md` (Base Cryptographic Assumptions A1-A4)
+
+
+## Review status (2026-09-23) — read this first
+
+This file was committed as an authoritative "formal proof". Review found that
+its conclusion depends on mechanisms that do not exist:
+
+- **No fallback or replacement rule exists.** The orphaning argument (§3.2, §4
+  Case 2) assumes honest nodes "elect the fallback pair" or re-round after a
+  timeout and extend a competing block. The shipped C99 attempt aborts and has
+  no election or replacement ([K2_VDF_Soundness.md](K2_VDF_Soundness.md),
+  [K2LocalAttempt.tla](tla/K2LocalAttempt.tla)). ADR-005 records that a local
+  timeout is not a replacement authorization.
+- **Grinding does not require delay.** A pair that controls both secrets can
+  evaluate M candidate seeds in parallel on M cores. Each evaluation takes the
+  same time as the honest one, so the pair can publish its preferred candidate
+  on schedule. Case 1's requirement "finish within W_reveal" does not describe
+  that attack, and P_orphan → 1 does not follow.
+- **Depends on unproven bounds.** The "ρ < 1.45" bound is PoSW_Nakamoto_Safety
+  Lemma 2.1, which is itself unproven (see that file).
+- **Payoffs are assumed.** The subsidy, fee and bias values of §5 are not tied
+  to any shipped economic rule.
 
 ---
 

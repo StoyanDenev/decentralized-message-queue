@@ -2,7 +2,9 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
- * Experimental repeated-work evaluator (C99; verification by reevaluation)
+ * Experimental repeated-work evaluator (C99): AES-256 over a 64 KiB arena and
+ * SHA-256, verified only by re-evaluation. No sequential-hardness,
+ * memory-hardness or ASIC-resistance claim is made (see vdf.h).
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -47,8 +49,8 @@ static uint64_t vdf_get_monotonic_ns(void) {
 }
 
 /*
- * Initialize and seed the VDF engine.
- * Expands the input seed/payload into the 64KB memory arena using sequential AES-256 chaining.
+ * Initialize and seed the evaluator.
+ * Expands the input seed/payload into the 64 KiB arena by chained AES-256.
  */
 int vdf_init(vdf_context_t *ctx, const uint8_t *seed, size_t seed_len, uint64_t iterations) {
     if (!ctx || (!seed && seed_len > 0)) {
@@ -78,9 +80,8 @@ int vdf_init(vdf_context_t *ctx, const uint8_t *seed, size_t seed_len, uint64_t 
     determ_aes256_init(&aes_ctx, ctx->state);
 
     /*
-     * Memory-hard arena initialization:
-     * Fill 4096 blocks (16 bytes each = 64KB) via sequential AES block encryption.
-     * Block j is computed as AES_Encrypt(Block j-1 ^ counter).
+     * Arena initialization: fill 4096 blocks of 16 bytes (64 KiB), where
+     * block j = AES_Encrypt(block j-1 ^ counter j).
      */
     uint8_t prev_block[VDF_BLOCK_SIZE];
     memcpy(prev_block, ctx->state, VDF_BLOCK_SIZE);
@@ -105,12 +106,12 @@ int vdf_init(vdf_context_t *ctx, const uint8_t *seed, size_t seed_len, uint64_t 
 }
 
 /*
- * Execute the sequential memory-hard evaluation loop.
- * Each step performs:
- *   1. Pseudorandom memory lookup based on current state (memory bandwidth bottleneck).
- *   2. Strict non-parallelizable iterative mixing via AES round encryption.
- *   3. Memory write-back to enforce read-modify-write traffic.
- *   4. Compiler memory barrier to defeat instruction reordering / loop unrolling.
+ * Run the configured number of iterations. Each iteration reads the arena
+ * block selected by the state, XORs it with the state, AES-256-encrypts it,
+ * writes the result back to the arena and folds it into the state. The output
+ * is SHA-256 of the final 32-byte state. The data dependency between
+ * iterations is a source-level property only; it is not a proven sequential
+ * or memory bound.
  */
 int vdf_evaluate(vdf_context_t *ctx, uint8_t output[VDF_OUTPUT_LEN]) {
     if (!ctx || !output) {
@@ -167,7 +168,7 @@ int vdf_evaluate(vdf_context_t *ctx, uint8_t output[VDF_OUTPUT_LEN]) {
         /* Sequential AES block transform */
         determ_aes256_encrypt_block(&aes_ctx, in_blk, enc_blk);
 
-        /* Write-back to arena (forces dirty cache-line update / memory bandwidth) */
+        /* Write the block back to the arena */
         memcpy(arena_ptr, enc_blk, VDF_BLOCK_SIZE);
 
         /* Update sequential state */
@@ -177,15 +178,14 @@ int vdf_evaluate(vdf_context_t *ctx, uint8_t output[VDF_OUTPUT_LEN]) {
         }
 
         /*
-         * Strict Aliasing & Memory Barrier:
-         * Prevents compiler from reordering operations, caching arena slots in registers,
-         * or eliding intermediate iterations.
+         * Compiler barriers (GCC/Clang only): keep the compiler from folding
+         * iterations away. Not a hardware or security property.
          */
         VDF_MEMORY_BARRIER();
         VDF_VOLATILE_BARRIER(current_state[0]);
     }
 
-    /* Final digest over mutated state and arena digest */
+    /* Output = SHA-256 of the final state; the arena is not hashed. */
     determ_sha256(current_state, VDF_OUTPUT_LEN, output);
 
     /* Update context state and elapsed time */

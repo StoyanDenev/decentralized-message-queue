@@ -141,8 +141,9 @@ else echo "  FAIL: state not listed in help"; fail=$((fail+1)); fi
 
 echo ""
 echo "=== (C2) state --verify-anchor offline genesis re-pin gate (LSP-2) ==="
-# Craft a minimal genesis (chain_id + shard params — all load_genesis needs) and
-# read its authoritative LOCAL genesis hash off `shard-route --json` (which prints
+# Craft a minimal genesis (chain_id + shard params), convert it to the DGC1 file
+# load_genesis reads (`genesis-tool build` rewrites it in place), and read its
+# authoritative LOCAL genesis hash off `shard-route --json` (which prints
 # compute_genesis_hash). This is fully offline — the LSP-6 resume's genesis gate.
 SALT=$(printf '0%.0s' $(seq 1 64))
 cat > "$T/gen.json" <<EOF
@@ -152,6 +153,8 @@ cat > "$T/gen.json" <<EOF
   "shard_address_salt": "$SALT"
 }
 EOF
+# A bare file name, as an operator types it in the genesis directory.
+(cd "$T" && "$DETERM" genesis-tool build gen.json >/dev/null 2>&1)
 GH=$($DETERM_LIGHT shard-route --genesis "$T/gen.json" --address alice --json 2>/dev/null \
      | "${PY:-python}" -c "import json,sys;print(json.load(sys.stdin).get('genesis_hash',''))" 2>/dev/null)
 if [ -n "$GH" ] && [ ${#GH} -eq 64 ]; then
@@ -165,8 +168,8 @@ if [ -n "$GH" ] && [ ${#GH} -eq 64 ]; then
     $DETERM_LIGHT state --verify-anchor --genesis "$T/gen.json" --state "$SP" >/dev/null 2>&1
     ck $? 2 "--verify-anchor MISMATCH on wrong-chain anchor (exit 2)"
 else
-    echo "  SKIP: --verify-anchor PASS/MISMATCH (could not derive local genesis hash;"
-    echo "        shard-route --json unavailable on this host — usage paths below still run)"
+    echo "  FAIL: could not derive the local genesis hash (genesis-tool build / shard-route --json)"
+    fail=$((fail+1))
 fi
 
 # 15. --verify-anchor without --genesis → usage error (exit 1).
@@ -234,8 +237,12 @@ TRACE="$T/durability_trace.log"
 rm -f "$TRACE"
 DETERM_LIGHT_OUTBOX_TRACE="$TRACE" $DETERM_LIGHT state --selftest >/dev/null 2>&1
 ck $? 0 "state --selftest passes under trace"
-if [ -f "$TRACE" ] && grep -q "fsync_file" "$TRACE" && grep -q "publish" "$TRACE" && grep -q "fsync_dir" "$TRACE"; then
-    echo "  PASS: durable_write_replace executed full fsync+publish+fsync_dir pipeline (S-098)"; pass=$((pass+1))
+# Windows has no directory flush, so light/outbox.cpp's _WIN32 path emits no
+# fsync_dir event; everywhere else the full pipeline is required.
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) WANT_DIR_SYNC=0 ;; *) WANT_DIR_SYNC=1 ;; esac
+if [ -f "$TRACE" ] && grep -q "fsync_file" "$TRACE" && grep -q "publish" "$TRACE" \
+   && { [ "$WANT_DIR_SYNC" -eq 0 ] || grep -q "fsync_dir" "$TRACE"; }; then
+    echo "  PASS: durable_write_replace executed the fsync+publish pipeline (fsync_dir required: $WANT_DIR_SYNC) (S-098)"; pass=$((pass+1))
 else
     echo "  FAIL: durable write trace events missing from $TRACE"; fail=$((fail+1))
 fi

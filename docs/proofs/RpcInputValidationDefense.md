@@ -32,8 +32,8 @@ address-normalization partner);
 `docs/proofs/NonceMonotonicity.md` (FA-Apply-3 nonce gate at apply layer);
 `docs/proofs/StakeLifecycle.md` (FA-Apply-4 stake apply gate);
 `docs/proofs/FeeAccounting.md` (FA-Apply-6 fee charging gate);
-`docs/proofs/Preliminaries.md` §2.1 (H1 SHA-256 collision resistance), §2.2
-(A1 Ed25519 EUF-CMA), §3 (network model — partial-synchrony assumption
+`docs/proofs/Preliminaries.md` §2.1 (A2 SHA-256 collision resistance), §2.2
+(A1 Ed25519 EUF-CMA), §2.0 (A6 HMAC-SHA-256 PRF), §3 (network model — partial-synchrony assumption
 underlying T-3's rate-limit composition).
 
 ---
@@ -128,13 +128,13 @@ adversarial request byte string. Define the adversary classes:
   per-method semantics violate the method's contract (e.g., a `submit_tx`
   with stale nonce, an `unstake` on a non-staked account, a `state_proof`
   on an unsupported namespace).
-- **A4: high-rate flood.** `R` is byte-identical-or-similar but arrives
+- **$Adv_{exhaust}$: high-rate flood.** `R` is byte-identical-or-similar but arrives
   from a single peer-IP at rate `> C + r·Δ` per the S-014 bound.
-- **A5: unauthenticated.** `R` parses successfully and is semantically
+- **$Adv_{unauth}$: unauthenticated.** `R` parses successfully and is semantically
   valid, but lacks `req["auth"]` or carries a wrong HMAC value when
   Layer E is enabled.
 
-For each adversary class `Aᵢ ∈ {$Adv_{oversize}, $Adv_{malformed}, $Adv_{invalid}, $Adv_{unauth}, $Adv_{exhaust}}` there exists at
+For each adversary class $\mathcal{A} \in \{Adv_{oversize}, Adv_{malformed}, Adv_{invalid}, Adv_{exhaust}, Adv_{unauth}\}$ there exists at
 least one layer `Lⱼ ∈ {A, B, C, D, E}` that rejects `R` before Layer C's
 state-mutating method handler executes. Specifically:
 
@@ -143,8 +143,8 @@ state-mutating method handler executes. Specifically:
 | $Adv_{oversize}$ | Layer A | TCP framing drops; no JSON parse occurs |
 | $Adv_{malformed}$ | Layer B | `std::runtime_error` with `"S-018: "` diagnostic returned to client as `{"error": "..."}` |
 | $Adv_{invalid}$ | Layer C | per-method `std::runtime_error` returned to client (e.g., `"stale nonce"`, `"insufficient balance"`, `"unsupported namespace"`) |
-| A4   | Layer D | `{"error": "rate_limited"}` returned to client; no parse / auth / dispatch |
-| A5   | Layer E | `{"error": "auth_required: missing 'auth' field"}` or `{"error": "auth_failed"}` |
+| $Adv_{exhaust}$ | Layer D | `{"error": "rate_limited"}` returned to client; no parse / auth / dispatch |
+| $Adv_{unauth}$ | Layer E | `{"error": "auth_required: missing 'auth' field"}` or `{"error": "auth_failed"}` |
 
 In each row the listed layer's rejection happens before any state mutation
 in the post-Layer-C dispatch, so no `chain_`-mutating operation runs on
@@ -327,12 +327,12 @@ model from `docs/proofs/Preliminaries.md` §3.2:
   Layer C's `submit_tx` handler (S-002 sig-verify). An attacker without
   the from-account's private key cannot forge a signature over arbitrary
   `signing_bytes`.
-- **A2 (SHA-256 collision resistance, equivalently H1 in the proof's
-  notation).** Underlies Layer E's HMAC-SHA-256 binding to the
-  canonical `method ‖ "|" ‖ params.dump()` bytes. An attacker without
-  the operator's `auth_secret_` cannot forge a valid HMAC value (see
-  RpcAuthHmacSoundness T-1, reduces to A2 + uniform-key sampling).
-- **H1 (honest validators).** The K-of-K apply path's re-validation
+- **A6 (HMAC-SHA-256 PRF; Preliminaries §2.0).** Underlies Layer E's
+  HMAC-SHA-256 binding to the canonical `method ‖ "|" ‖ params.dump()`
+  bytes. An attacker without the operator's `auth_secret_` cannot forge
+  a valid HMAC value (see RpcAuthHmacSoundness T-1 and L-1, which reduce
+  forgery to HMAC's PRF security under a uniformly sampled key).
+- **Honest node.** The K-of-K apply path's re-validation
   (T-5) assumes at least one validator in `V \ F` exists at every
   height. Under Determ's K-of-K mutual-distrust safety, T-5's bound
   holds even if all K committee members are Byzantine for a given
@@ -834,18 +834,18 @@ specific semantics. Read-only methods return `nullptr` /
 `{"error": "..."}` for queries about non-existent state. No state
 mutation occurs in either case.   ∎ ($Adv_{invalid}$ covered by Layer C)
 
-**A4 (high-rate flood).** By L-4, the per-IP token-bucket enforces
+**$Adv_{exhaust}$ (high-rate flood).** By L-4, the per-IP token-bucket enforces
 `A_k([t, t+Δ]) ≤ ⌊C + r·Δ⌋`. Flooders exceeding the budget receive
 `{"error": "rate_limited"}` without parse, auth, or dispatch.   ∎
-(A4 covered by Layer D)
+($Adv_{exhaust}$ covered by Layer D)
 
-**A5 (unauthenticated).** By L-5, when `auth_secret_` is non-empty,
+**$Adv_{unauth}$ (unauthenticated).** By L-5, when `auth_secret_` is non-empty,
 forgery succeeds with probability ≤ 2⁻²⁵⁶ + negligible. Missing `auth`
 field returns `"auth_required..."`; wrong-secret returns
 `"auth_failed"`. When `auth_secret_` is empty, Layer E is a no-op —
 this is the documented single-tenant default. For multi-tenant
 deployments, the operator MUST enable the secret per the deployment
-recommendation in `docs/SECURITY.md` §S-001.   ∎ (A5 covered by Layer E,
+recommendation in `docs/SECURITY.md` §S-001.   ∎ ($Adv_{unauth}$ covered by Layer E,
 contingent on operator enabling the secret)
 
 Combining the five sub-arguments: for every adversary class, at least
@@ -1288,9 +1288,9 @@ class the threat model considers.
   + unlock-height gate.
 - `docs/proofs/EquivocationSlashingApply.md` — FA-Apply-7 (apply-
   layer equivocation gate; backstops `rpc_submit_equivocation`).
-- `docs/proofs/Preliminaries.md` §2.1 (H1: SHA-256 collision
-  resistance), §2.2 (A1: Ed25519 EUF-CMA), §3.2 (Byzantine adversary
-  model).
+- `docs/proofs/Preliminaries.md` §2.1 (A2: SHA-256 collision
+  resistance), §2.2 (A1: Ed25519 EUF-CMA), §2.0 (A6: HMAC-SHA-256
+  PRF), §3.2 (Byzantine adversary model).
 
 ### Determ-internal tests
 

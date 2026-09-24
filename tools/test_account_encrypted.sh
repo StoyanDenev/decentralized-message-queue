@@ -11,7 +11,7 @@
 #   4. DETERM_PASSPHRASE env var works as an alternative to --passphrase.
 #   5. Plaintext-output path (no --passphrase) still works (S-004
 #      option 1 backward compat).
-#   6. File permissions are 0600-equivalent.
+# (File modes are gated by test_wallet_out_perms.sh / test_node_key_perms.sh.)
 #
 # Run from repo root: bash tools/test_account_encrypted.sh
 set -u

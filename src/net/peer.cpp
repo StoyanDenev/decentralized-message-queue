@@ -1,0 +1,176 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Determ Contributors
+#include <determ/net/peer.hpp>
+#include <iostream>
+
+namespace determ::net {
+
+Peer::Peer(std::shared_ptr<Connection> conn)
+    : conn_(std::move(conn)) {
+    address_ = conn_->remote_endpoint();
+    // S-026: enable TCP-level keepalive so dead connections (network
+    // partition, peer crash without FIN, NAT-rebind timeout) are detected
+    // and reaped via the on_close path instead of lingering as zombie
+    // peer entries in GossipNet::peers_.
+    //
+    // We only flip the SO_KEEPALIVE bit here. OS-default probe intervals
+    // apply (Linux: 2h idle / 75s probe / 9 probes ≈ 11m to detection;
+    // Windows: 2h / 1s / 10 ≈ 2h to detection). That's slow but bounded —
+    // before this change, idle dead connections were detected only when
+    // the kernel happened to attempt a write into them. Operators wanting
+    // faster detection can tune the system-level keepalive parameters
+    // (sysctl net.ipv4.tcp_keepalive_{time,intvl,probes} on Linux,
+    // HKLM\System\CurrentControlSet\Services\Tcpip\Parameters\Keep* on
+    // Windows). Per-socket override of the interval is non-portable and
+    // would couple the protocol to OS APIs unnecessarily; the system-
+    // level knob is the right surface.
+    conn_->set_keep_alive(true);
+}
+
+Peer::~Peer() {
+    close();
+}
+
+void Peer::start(MessageHandler on_msg, CloseHandler on_close) {
+    on_msg_   = std::move(on_msg);
+    on_close_ = std::move(on_close);
+    read_header();
+}
+
+void Peer::read_header() {
+    auto self = shared_from_this();
+    conn_->async_read(header_buf_.data(), header_buf_.size(),
+        [self](std::error_code ec, size_t) {
+            if (ec) {
+                if (self->on_close_) self->on_close_(self);
+                return;
+            }
+            uint32_t len = (static_cast<uint32_t>(self->header_buf_[0]) << 24)
+                         | (static_cast<uint32_t>(self->header_buf_[1]) << 16)
+                         | (static_cast<uint32_t>(self->header_buf_[2]) << 8)
+                         |  static_cast<uint32_t>(self->header_buf_[3]);
+            // S-022: framing-layer ceiling (kMaxFrameBytes = 16 MB). The
+            // per-message-type cap fires AFTER deserialize in read_body.
+            if (len == 0 || len > kMaxFrameBytes) {
+                if (self->on_close_) self->on_close_(self);
+                return;
+            }
+            self->read_body(len);
+        });
+}
+
+void Peer::read_body(uint32_t len) {
+    body_buf_.resize(len);
+    auto self = shared_from_this();
+    conn_->async_read(body_buf_.data(), body_buf_.size(),
+        [self](std::error_code ec, size_t) {
+            if (ec) {
+                if (self->on_close_) self->on_close_(self);
+                return;
+            }
+            try {
+                auto msg = Message::deserialize(self->body_buf_.data(), self->body_buf_.size());
+                // S-022: per-message-type cap. The framing layer accepted
+                // up to kMaxFrameBytes (16 MB) so the only types with a
+                // legitimate need for that ceiling get it; everything else
+                // is bounded much tighter here. Oversize messages indicate
+                // either a peer-side bug or an active flooding attempt;
+                // drop the message and close the connection (same
+                // disposition the framing layer applies).
+                if (self->body_buf_.size() > max_message_bytes(msg.type)) {
+                    std::cerr << "[peer] oversize message from " << self->address_
+                              << " type=" << static_cast<int>(msg.type)
+                              << " size=" << self->body_buf_.size()
+                              << " cap=" << max_message_bytes(msg.type) << "\n";
+                    if (self->on_close_) self->on_close_(self);
+                    return;
+                }
+                if (self->on_msg_) self->on_msg_(self, msg);
+            } catch (std::exception& e) {
+                // WIRE-3 (round-12 hostile-wire audit): a malformed frame
+                // CLOSES the connection. This branch previously logged and
+                // fell through to read_header(), re-arming the peer — which
+                // contradicted both the disposition the framing layer applies
+                // (read_header's oversize/zero-length branch closes) and the
+                // one the oversize branch just above applies, and made every
+                // pre-auth parse cost infinitely repeatable at zero reconnect
+                // cost to the sender. The S-014 per-IP token bucket cannot
+                // meter it: that lives in GossipNet::handle_message, i.e. the
+                // on_msg_ callback below, strictly DOWNSTREAM of the parse.
+                //
+                // Fail-closed by design: a legitimate peer emitting one
+                // malformed frame is now disconnected rather than tolerated.
+                // That is the intended trade — a well-behaved peer never emits
+                // one, and gossip reconnects.
+                std::cerr << "[peer] message parse error from " << self->address_
+                          << ": " << e.what() << " — closing connection\n";
+                if (self->on_close_) self->on_close_(self);
+                return;
+            }
+            self->read_header();
+        });
+}
+
+void Peer::send(const Message& msg) {
+    // D2: the wire is binary-only — every message, HELLO included, encodes
+    // via the single binary codec. The old silent catch-all JSON fallback is
+    // deliberately NOT reproduced: an encode failure is a local bug and must
+    // surface loudly at the call site, never mask itself as legacy traffic.
+    std::vector<uint8_t> bytes = msg.serialize_binary();
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    // S-082: if write queue exceeds capacity, close the connection to prevent
+    // memory exhaustion on slow/non-reading peers.
+    if (write_queue_.size() >= MAX_PEER_WRITE_QUEUE) {
+        conn_->close();
+        return;
+    }
+    bool idle = write_queue_.empty();
+    write_queue_.push_back(std::move(bytes));
+    if (idle) do_write();
+}
+
+void Peer::do_write() {
+    auto self = shared_from_this();
+    conn_->async_write(write_queue_.front().data(), write_queue_.front().size(),
+        [self](std::error_code ec, size_t) {
+            // on_close_ is invoked with NO lock held (the read path's
+            // discipline): it runs GossipNet::handle_peer_closed, which takes
+            // peers_mutex_, while broadcast/send_to_domain hold peers_mutex_
+            // across Peer::send (which takes write_mutex_) — invoking it
+            // under write_mutex_ inverts that order and can ABBA-deadlock a
+            // failed write to a dying peer against a concurrent broadcast
+            // (adversarial-review finding; threaded paths only). on_close_
+            // is set once in start() before any I/O, so the unlocked read
+            // is safe, exactly as in read_header/read_body.
+            bool failed = false;
+            {
+                std::lock_guard<std::mutex> lock(self->write_mutex_);
+                self->write_queue_.pop_front();
+                if (ec) {
+                    failed = true;
+                    self->write_queue_.clear();
+                } else if (!self->write_queue_.empty()) {
+                    self->do_write();
+                }
+            }
+            if (failed && self->on_close_) self->on_close_(self);
+        });
+}
+
+void Peer::close() {
+    conn_->close();
+}
+
+void async_connect(Transport& transport,
+                   const std::string& host, uint16_t port,
+                   std::function<void(std::shared_ptr<Peer>)> on_connect,
+                   std::function<void(const std::string&)>    on_error) {
+    transport.async_connect(host, port,
+        [on_connect, on_error](std::error_code ec,
+                               std::shared_ptr<Connection> conn) {
+            if (ec || !conn) { on_error(ec.message()); return; }
+            on_connect(std::make_shared<Peer>(std::move(conn)));
+        });
+}
+
+} // namespace determ::net

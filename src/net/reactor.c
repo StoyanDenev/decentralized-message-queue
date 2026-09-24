@@ -2,34 +2,28 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
- * Core Zero-Dependency C99 Native Event Loop Reactor.
- * Single-threaded I/O multiplexer using native OS interfaces:
- *   #if defined(__linux__) -> epoll
- *   #elif defined(__APPLE__) -> kqueue
- *   #elif defined(_WIN32) -> select()
+ * Core Zero-Dependency C99 Native Event Loop Reactor Implementation.
+ * Single-threaded I/O multiplexer over net_event_loop_t (epoll / kqueue; see
+ * reactor.h for other platforms).
+ *
+ * Zero dynamic memory allocations.
  */
 
+#include "determ/net/reactor.h"
+
+#if defined(__linux__)
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
-
-#include <determ/net/reactor.h>
-#include <determ/time/clock.h>
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <errno.h>
-
-#if defined(__linux__)
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <sys/epoll.h>
-#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+#include <errno.h>
+#elif defined(__APPLE__)
 #ifndef _DARWIN_C_SOURCE
 #define _DARWIN_C_SOURCE
 #endif
@@ -37,15 +31,16 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <sys/event.h>
-#include <sys/time.h>
+#include <errno.h>
 #elif defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <io.h>
 #define close(s) closesocket(s)
 #define EWOULDBLOCK WSAEWOULDBLOCK
 #define EAGAIN WSAEWOULDBLOCK
@@ -58,41 +53,32 @@ typedef int ssize_t;
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <sys/select.h>
+#include <errno.h>
 #endif
 
-/*
- * Static memory arena for socket connection states: strictly zero malloc()
- */
-static struct connection_state connections[MAX_CONNECTIONS];
+#include <string.h>
+#include <stdio.h>
 
-static struct connection_state* allocate_slot(reactor_t *reactor) {
-    if (!reactor || !reactor->slots) return NULL;
-    for (size_t i = 0; i < MAX_CONNECTIONS; i++) {
-        if (reactor->slots[i].state == REACTOR_SLOT_UNUSED) {
-            reactor->slots[i].state = REACTOR_SLOT_CONNECTING;
-            reactor->slots[i].fd = -1;
-            reactor->slots[i].rx_len = 0;
-            reactor->slots[i].tx_len = 0;
-            reactor->slots[i].on_read = NULL;
-            reactor->slots[i].on_write = NULL;
-            reactor->slots[i].on_accept = NULL;
-            reactor->slots[i].on_close = NULL;
-            reactor->slots[i].on_error = NULL;
-            reactor->slots[i].user_data = NULL;
-            reactor->active_count++;
+static reactor_socket_t* find_slot_by_fd(reactor_t *reactor, int fd) {
+    if (!reactor || fd < 0) return NULL;
+    for (size_t i = 0; i < REACTOR_MAX_SOCKETS; i++) {
+        if (reactor->slots[i].state != REACTOR_SLOT_UNUSED && reactor->slots[i].fd == fd) {
             return &reactor->slots[i];
         }
     }
     return NULL;
 }
 
-static struct connection_state* find_slot_by_fd(reactor_t *reactor, int fd) {
-    if (!reactor || !reactor->slots || fd < 0) return NULL;
-    for (size_t i = 0; i < MAX_CONNECTIONS; i++) {
-        if (reactor->slots[i].state != REACTOR_SLOT_UNUSED && reactor->slots[i].fd == fd) {
+static reactor_socket_t* allocate_slot(reactor_t *reactor) {
+    if (!reactor) return NULL;
+    for (size_t i = 0; i < REACTOR_MAX_SOCKETS; i++) {
+        if (reactor->slots[i].state == REACTOR_SLOT_UNUSED) {
+            memset(&reactor->slots[i], 0, sizeof(reactor_socket_t));
+            reactor->slots[i].fd = -1;
+            reactor->active_count++;
             return &reactor->slots[i];
         }
     }
@@ -102,39 +88,29 @@ static struct connection_state* find_slot_by_fd(reactor_t *reactor, int fd) {
 int reactor_init(reactor_t *reactor) {
     if (!reactor) return -1;
     memset(reactor, 0, sizeof(*reactor));
-    memset(connections, 0, sizeof(connections));
-    for (size_t i = 0; i < MAX_CONNECTIONS; i++) {
-        connections[i].fd = -1;
-        connections[i].state = REACTOR_SLOT_UNUSED;
+    if (net_event_loop_init(&reactor->loop) != 0) {
+        return -1;
     }
-    reactor->slots = connections;
+    for (size_t i = 0; i < REACTOR_MAX_SOCKETS; i++) {
+        reactor->slots[i].fd = -1;
+        reactor->slots[i].state = REACTOR_SLOT_UNUSED;
+    }
     reactor->active_count = 0;
     reactor->running = false;
-    reactor->ingestion_halted = false;
-    reactor->consensus_sm = NULL;
-    reactor->epoch_start_ns = 0;
-
-    return net_event_loop_init(&reactor->loop);
-}
-
-void reactor_bind_consensus(reactor_t *reactor, duel_state_machine_t *sm, uint64_t epoch_start_ns) {
-    if (!reactor) return;
-    reactor->consensus_sm = sm;
-    reactor->epoch_start_ns = epoch_start_ns;
-    reactor->ingestion_halted = false;
+    return 0;
 }
 
 int reactor_listen(reactor_t *reactor,
                    uint16_t port,
                    reactor_accept_fn on_accept,
                    void *user_data) {
-    if (!reactor) return -1;
+    if (!reactor || !on_accept) return -1;
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
 
-    if (net_socket_set_reuseaddr(fd) != 0 ||
-        net_socket_set_nonblocking(fd) != 0) {
+    if (net_socket_set_nonblocking(fd) != 0 ||
+        net_socket_set_reuseaddr(fd) != 0) {
         close(fd);
         return -1;
     }
@@ -142,8 +118,8 @@ int reactor_listen(reactor_t *reactor,
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         close(fd);
@@ -155,7 +131,7 @@ int reactor_listen(reactor_t *reactor,
         return -1;
     }
 
-    struct connection_state *slot = allocate_slot(reactor);
+    reactor_socket_t *slot = allocate_slot(reactor);
     if (!slot) {
         close(fd);
         return -1;
@@ -189,7 +165,7 @@ int reactor_register_client(reactor_t *reactor,
         return -1;
     }
 
-    struct connection_state *slot = allocate_slot(reactor);
+    reactor_socket_t *slot = allocate_slot(reactor);
     if (!slot) return -1;
 
     slot->fd = client_fd;
@@ -211,7 +187,7 @@ int reactor_register_client(reactor_t *reactor,
 int reactor_send(reactor_t *reactor, int fd, const void *data, size_t len) {
     if (!reactor || fd < 0 || !data || len == 0) return -1;
 
-    struct connection_state *slot = find_slot_by_fd(reactor, fd);
+    reactor_socket_t *slot = find_slot_by_fd(reactor, fd);
     if (!slot || slot->state != REACTOR_SLOT_CONNECTED) return -1;
 
     /* If tx_buf already has pending data, append to buffer */
@@ -224,14 +200,16 @@ int reactor_send(reactor_t *reactor, int fd, const void *data, size_t len) {
         return (int)len;
     }
 
-    /* Direct non-blocking write */
+    /* Otherwise, attempt direct non-blocking write */
     ssize_t written = send(fd, (const char *)data, len, 0);
     if (written < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            /* Socket buffer is full; queue entire message in static tx_buf */
             if (len > REACTOR_BUFFER_CAPACITY) return -1;
             memcpy(slot->tx_buf, data, len);
             slot->tx_len = len;
 
+            /* Register write interest */
             slot->registered_events |= NET_EV_WRITE;
             net_event_loop_mod(&reactor->loop, fd, slot->registered_events, slot);
             return (int)len;
@@ -239,7 +217,7 @@ int reactor_send(reactor_t *reactor, int fd, const void *data, size_t len) {
         return -1;
     }
 
-    /* Partial write handling */
+    /* If partial write occurred, buffer remainder */
     if ((size_t)written < len) {
         size_t rem = len - (size_t)written;
         if (rem > REACTOR_BUFFER_CAPACITY) return -1;
@@ -253,23 +231,18 @@ int reactor_send(reactor_t *reactor, int fd, const void *data, size_t len) {
     return (int)len;
 }
 
-static void handle_listener_read(reactor_t *reactor, struct connection_state *slot) {
-    if (!reactor || reactor->ingestion_halted) return;
-
+static void handle_listener_read(reactor_t *reactor, reactor_socket_t *slot) {
+    (void)reactor;
     while (1) {
         struct sockaddr_in client_addr;
         socklen_t addr_len = sizeof(client_addr);
         int client_fd = accept(slot->fd, (struct sockaddr *)&client_addr, &addr_len);
         if (client_fd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                /* Graceful sleep: drained all incoming connections */
                 break;
             }
             if (errno == EINTR) continue;
-            break;
-        }
-
-        if (reactor->ingestion_halted) {
-            close(client_fd);
             break;
         }
 
@@ -281,9 +254,7 @@ static void handle_listener_read(reactor_t *reactor, struct connection_state *sl
     }
 }
 
-static void handle_client_read(reactor_t *reactor, struct connection_state *slot) {
-    if (!reactor || reactor->ingestion_halted) return;
-
+static void handle_client_read(reactor_t *reactor, reactor_socket_t *slot) {
     while (1) {
         ssize_t n = recv(slot->fd, (char *)slot->rx_buf, sizeof(slot->rx_buf), 0);
         if (n > 0) {
@@ -291,14 +262,17 @@ static void handle_client_read(reactor_t *reactor, struct connection_state *slot
                 slot->on_read(slot->fd, slot->rx_buf, (size_t)n, slot->user_data);
             }
         } else if (n == 0) {
+            /* Client disconnected */
             int fd = slot->fd;
             reactor_close_fd(reactor, fd);
             break;
         } else {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                /* Non-blocking socket drained: gracefully quiesce to sleep */
                 break;
             }
             if (errno == EINTR) continue;
+            /* Read error */
             int fd = slot->fd;
             reactor_close_fd(reactor, fd);
             break;
@@ -306,8 +280,9 @@ static void handle_client_read(reactor_t *reactor, struct connection_state *slot
     }
 }
 
-static void handle_client_write(reactor_t *reactor, struct connection_state *slot) {
+static void handle_client_write(reactor_t *reactor, reactor_socket_t *slot) {
     if (slot->tx_len == 0) {
+        /* No data pending, unregister write interest */
         slot->registered_events &= ~NET_EV_WRITE;
         net_event_loop_mod(&reactor->loop, slot->fd, slot->registered_events, slot);
         return;
@@ -331,9 +306,11 @@ static void handle_client_write(reactor_t *reactor, struct connection_state *slo
             }
         } else {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                /* Cannot write more now; wait for next write notification */
                 break;
             }
             if (errno == EINTR) continue;
+            /* Write error */
             int fd = slot->fd;
             reactor_close_fd(reactor, fd);
             break;
@@ -349,7 +326,7 @@ int reactor_step(reactor_t *reactor, int timeout_ms) {
     if (nev <= 0) return nev;
 
     for (int i = 0; i < nev; i++) {
-        struct connection_state *slot = (struct connection_state *)events[i].user_data;
+        reactor_socket_t *slot = (reactor_socket_t *)events[i].user_data;
         if (!slot || slot->state == REACTOR_SLOT_UNUSED) continue;
 
         if (events[i].flags & (NET_EV_ERROR | NET_EV_EOF)) {
@@ -366,6 +343,7 @@ int reactor_step(reactor_t *reactor, int timeout_ms) {
             }
         }
 
+        /* Check if slot is still active after read before doing write */
         if (slot->state == REACTOR_SLOT_CONNECTED && (events[i].flags & NET_EV_WRITE)) {
             handle_client_write(reactor, slot);
         }
@@ -374,70 +352,11 @@ int reactor_step(reactor_t *reactor, int timeout_ms) {
     return nev;
 }
 
-int reactor_run_epoch(reactor_t *reactor, duel_state_machine_t *sm, uint64_t epoch_start_ns) {
-    if (!reactor) return -1;
-    reactor->running = true;
-    reactor->ingestion_halted = false;
-    reactor->consensus_sm = sm;
-    reactor->epoch_start_ns = epoch_start_ns;
-
-    while (1) {
-        uint64_t now = determ_clock_now();
-        uint64_t elapsed_ns = (now >= epoch_start_ns) ? (now - epoch_start_ns) : 0;
-
-        /*
-         * Monotonic Timer Integration:
-         * When clock hits exactly 2000ms (2,000,000,000 ns) from epoch start:
-         * 1. Instantly halt network ingestion
-         * 2. Trigger REVEAL_WINDOW buzzer
-         * 3. Transition state machine to VDF_EVALUATION (or ABORTED)
-         */
-        if (elapsed_ns >= 2000000000ULL) {
-            reactor->ingestion_halted = true;
-            if (sm) {
-                duel_state_poll_buzzer(sm);
-            }
-            break;
-        }
-
-        uint64_t remaining_ns = 2000000000ULL - elapsed_ns;
-        int slice_ms = (int)(remaining_ns / 1000000ULL);
-        if (slice_ms <= 0) slice_ms = 0;
-        else if (slice_ms > 10) slice_ms = 10;
-
-        int nev = reactor_step(reactor, slice_ms);
-        if (nev < 0 && errno != EINTR) {
-            break;
-        }
-
-        if (sm && (sm->state == DUEL_STATE_VDF_EVALUATION ||
-                   sm->state == DUEL_STATE_ABORTED ||
-                   sm->state == DUEL_STATE_COMPLETED)) {
-            break;
-        }
-
-        if (!reactor->running) {
-            break;
-        }
-    }
-
-    return 0;
-}
-
 void reactor_run(reactor_t *reactor) {
     if (!reactor) return;
     reactor->running = true;
     while (reactor->running) {
-        if (reactor->consensus_sm && reactor->epoch_start_ns > 0) {
-            uint64_t now = determ_clock_now();
-            uint64_t elapsed_ns = (now >= reactor->epoch_start_ns) ? (now - reactor->epoch_start_ns) : 0;
-            if (elapsed_ns >= 2000000000ULL) {
-                reactor->ingestion_halted = true;
-                duel_state_poll_buzzer(reactor->consensus_sm);
-                break;
-            }
-        }
-        reactor_step(reactor, 10);
+        reactor_step(reactor, 100);
     }
 }
 
@@ -450,7 +369,7 @@ void reactor_stop(reactor_t *reactor) {
 void reactor_close_fd(reactor_t *reactor, int fd) {
     if (!reactor || fd < 0) return;
 
-    struct connection_state *slot = find_slot_by_fd(reactor, fd);
+    reactor_socket_t *slot = find_slot_by_fd(reactor, fd);
     if (!slot) return;
 
     net_event_loop_del(&reactor->loop, fd);
@@ -472,7 +391,7 @@ void reactor_close_fd(reactor_t *reactor, int fd) {
 
 void reactor_destroy(reactor_t *reactor) {
     if (!reactor) return;
-    for (size_t i = 0; i < MAX_CONNECTIONS; i++) {
+    for (size_t i = 0; i < REACTOR_MAX_SOCKETS; i++) {
         if (reactor->slots[i].state != REACTOR_SLOT_UNUSED && reactor->slots[i].fd >= 0) {
             net_event_loop_del(&reactor->loop, reactor->slots[i].fd);
             close(reactor->slots[i].fd);

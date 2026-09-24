@@ -43,13 +43,14 @@ REJECT_CONFLICTING_ROOTS = """for(size_t i=0;i<n->record_count;i++) if(n->record
             }
     /* This model does not select between competing complete histories. */"""
 MUTANTS = [
-    ('http-body-capacity', 'test-http-rpc', 'src/rpc/http_rpc_server.c', 'if (value > limit / 10 || (value == limit / 10 && digit > limit % 10)) return 413;', '/* mutant: unchecked length accumulation */'),
+    ('http-body-capacity', 'test-http-rpc', 'src/rpc/http_rpc_server.c', 'if (value > limit / 10 || (value == limit / 10 && digit > limit % 10)) return 413;', '(void)limit; /* mutant: unchecked length accumulation */'),
     ('http-header-case', 'test-http-rpc', 'src/rpc/http_rpc_server.c', "if (c >= 'A' && c <= 'Z') c = (uint8_t)(c + ('a' - 'A'));", '/* mutant: case-sensitive header comparison */'),
-    ('http-header-name', 'test-http-rpc', 'src/rpc/http_rpc_server.c', 'if (len != strlen(expected)) return 0;', 'if (len < strlen(expected)) return 0; name += len - strlen(expected); len = strlen(expected);'),
+    ('http-header-name', 'test-http-rpc', 'src/rpc/http_rpc_server.c', 'if (len != strlen(expected)) return 0;', 'if (len < strlen(expected)) return 0;\n    name += len - strlen(expected);\n    len = strlen(expected);'),
     ('http-duplicate-length', 'test-http-rpc', 'src/rpc/http_rpc_server.c', 'if (seen) return 400;', '/* mutant: accept duplicate length */'),
     ('http-transfer-encoding', 'test-http-rpc', 'src/rpc/http_rpc_server.c', 'if (http_field_is(data + pos, colon - pos, "transfer-encoding")) return 400;', '/* mutant: accept transfer encoding with content length */'),
     ('http-decimal-length', 'test-http-rpc', 'src/rpc/http_rpc_server.c', "if (data[i] < '0' || data[i] > '9') return 400;", '/* mutant: accept nondecimal digits */'),
     ('http-reserved-byte', 'test-http-rpc', 'src/rpc/http_rpc_server.c', 'const size_t limit = (HTTP_RPC_BUF_SIZE - 1) - header_len;', 'const size_t limit = HTTP_RPC_BUF_SIZE - header_len;'),
+    ('http-init-client-fds', 'test-http-rpc', 'src/rpc/http_rpc_server.c', '        server->clients[i].fd = -1;\n        server->clients[i].state = HTTP_CLIENT_INACTIVE;\n    }\n    server->port', '        server->clients[i].state = HTTP_CLIENT_INACTIVE;\n    }\n    server->port'),
     ('http-incomplete-body', 'test-http-rpc', 'src/rpc/http_rpc_server.c', 'if (c->rx_len < header_len + content_len) {', 'if (0) {'),
     ('pending-signature', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'if (determ_ed25519_verify(sender, signing, sizeof(signing), tx.sig) != 0)', 'if (0)'),
     ('pending-small-order', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'if (determ_ed25519_point_has_small_order(sender) != 0)', 'if (0)'),
@@ -57,7 +58,10 @@ MUTANTS = [
     ('pending-source-route', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'tx.shard_id >= pool->routing.shard_count || tx.shard_id != source_shard', 'tx.shard_id >= pool->routing.shard_count'),
     ('pending-destination-route', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'destination_shard != source_shard', '0'),
     ('pending-data-hash', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'if (memcmp(hash, tx.hash, sizeof(hash)) != 0) return PENDING_TRANSFER_ERR_HASH;', '/* mutant: trust advertised hash */'),
-    ('pending-canonical-frame', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'written != len || memcmp(canonical, frame, len) != 0', 'written != len'),
+    # The decoder's payload-padding rule is judged at test-binary-codec
+    # (codec-tx-padding below). The pending inbox also re-encodes and compares
+    # (defense in depth), so a mutant of either check alone is masked at the
+    # inbox; neither is judged there.
     ('pending-core-prefix', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'if (memcmp(tx.sender_pubkey, tx.from, 32) != 0 || memcmp(tx.recipient_pubkey, tx.to, 32) != 0)', 'if (0)'),
     ('pending-conflict-preference', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'int order = memcmp(candidate.hash, incumbent->hash, sizeof(candidate.hash));', 'int order = -memcmp(candidate.hash, incumbent->hash, sizeof(candidate.hash));'),
     ('pending-bucket-isolation', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'else if (at->shard_id == shard_id) { bucket = at; break; }', 'else { bucket = at; break; }'),
@@ -132,7 +136,7 @@ MUTANTS = [
      "if (seen & bit) return -32600;", "if (0) return -32600;"),
     ("routing-rpc-method-key", "test-rpc-shard-routing", "src/rpc/json_rpc.c",
      "const determ_json_tok_t *method_tok = rpc_method_token(request_json, tokens, (size_t)num_tokens);",
-     'const determ_json_tok_t *method_tok = determ_json_find_key(request_json, tokens, (size_t)num_tokens, &tokens[0], "method");'),
+     'const determ_json_tok_t *method_tok = determ_json_find_key(request_json, tokens, (size_t)num_tokens, &tokens[0], "method"); (void)rpc_method_token;'),
     ("routing-rpc-request-bound", "test-rpc-shard-routing", "src/rpc/json_rpc.c",
      "len > RPC_ROUTING_MAX_REQUEST_LEN", "len > RPC_ROUTING_MAX_REQUEST_LEN + 1"),
     ("routing-rpc-error-id", "test-rpc-shard-routing", "src/rpc/json_rpc.c",
@@ -167,7 +171,8 @@ MUTANTS = [
      "return average > UINT32_MAX ? UINT32_MAX : (uint32_t)average;",
      "return (uint32_t)average;"),
     ("dda-timestamp-order", "test-dda", "src/consensus/dda.c",
-     "if (timestamp_ms <= tracker->block_timestamps[newest_idx])", "if (false)"),
+     "if (timestamp_ms <= tracker->block_timestamps[newest_idx])",
+     "(void)newest_idx;\n        if (false)"),
     ("dda-predecessor-work", "test-dda", "src/consensus/dda.c",
      "if (!tracker || !dda_verify_block_iterations(tracker, iterations))", "if (!tracker)"),
     ("dda-work-progress", "test-dda", "src/consensus/dda.c",
@@ -199,7 +204,94 @@ MUTANTS = [
     ("net-eof-before-buffered-result", "test-k2-net-rpc", "src/net/k2_net.c",
      "/* READ|EOF can carry the final complete frame followed by FIN. */",
      "if (flags & NET_EV_EOF) return fail_contributor(cont);\n        /* mutant: discard unread final frame on EOF */"),
+    # The status is unchanged (a later bound still rejects); the read past the
+    # input reaches the test's inaccessible page and the process faults.
+    ("parser-from-bound", "fuzzer-parser", "src/wire/parser.c",
+     "if (from_len > WIRE_MAX_ADDR_LEN || offset + from_len > data_len) {",
+     "if (from_len > WIRE_MAX_ADDR_LEN) {"),
+    ("parser-reject-all", "fuzzer-parser", "src/wire/parser.c",
+     "    if (offset != data_len) {", "    if (offset <= data_len) {"),
+    ("parser-header-trailing", "fuzzer-parser", "src/wire/parser.c",
+     "data_len != WIRE_BLOCK_HEADER_LEN", "data_len < WIRE_BLOCK_HEADER_LEN"),
+    ("dda-header-trailing", "test-dda", "src/consensus/dda.c",
+     "if (len != CONSENSUS_BLOCK_HEADER_SIZE) return -2;", "if (len < CONSENSUS_BLOCK_HEADER_SIZE) return -2;"),
+    ("parser-charset-bypass", "fuzzer-parser", "src/wire/parser.c",
+     "wire_status_t wire_validate_charset_strict(const uint8_t *field, size_t len, size_t max_len) {\n",
+     "wire_status_t wire_validate_charset_strict(const uint8_t *field, size_t len, size_t max_len) {\n    return WIRE_OK;\n"),
+    ("ledger-overspend", "fuzz-ledger", "src/ledger/state.c",
+     "    if (sender_balance < total_debit) {", "    if (sender_balance < total_debit && 0) {"),
+    ("ledger-amount-overflow", "fuzz-ledger", "src/ledger/state.c",
+     "    if (UINT64_MAX - tx_amount < tx_fee) {", "    if (0) {"),
+    ("ledger-receiver-overflow", "fuzz-ledger", "src/ledger/state.c",
+     "    if (UINT64_MAX - receiver_balance < tx_amount) {", "    if (0) {"),
+    ("vdf-zero-iterations", "test-k2-duel", "src/crypto/vdf.c",
+     "for (uint64_t i = 0; i < iters; ++i) {", "for (uint64_t i = iters; i < iters; ++i) {"),
+    ("codec-envelope-reserved", "test-binary-codec", "src/wire/binary_codec.c",
+     "if (data[3] != 0x00) {", "if (data[3] != 0x00 && 0) {"),
+    ("codec-tx-reserved", "test-binary-codec", "src/wire/binary_codec.c",
+     "if (reserved != 0) {", "if (reserved != 0 && 0) {"),
+    ("codec-hello-trailing", "test-binary-codec", "src/wire/binary_codec.c",
+     "msg->wire_version = data[off++];\n    if (off != len) {",
+     "msg->wire_version = data[off++];\n    if (off != len && 0) {"),
+    ("codec-tx-padding", "test-binary-codec", "src/wire/binary_codec.c",
+     "if (data[i] != 0) {", "if (data[i] != 0 && 0) {"),
+    ("codec-tx-overflow-segment", "test-binary-codec", "src/wire/binary_codec.c",
+     "tx->payload_overflow = data + off;", "tx->payload_overflow = data + 96;"),
+    ("duel-reveal-deadline", "test-dsf-k2-duel", "src/consensus/duel_state.c",
+     "if (attempt_elapsed(sm) >= DUEL_REVEAL_WINDOW_NS) return DUEL_DROPPED_BUZZER_EXCEEDED;",
+     "if (0) return DUEL_DROPPED_BUZZER_EXCEEDED;"),
+    ("mesh-rate-limit", "test-peer-mesh", "src/net/peer_mesh.c",
+     "    if (per_sec <= 0.0 || burst <= 0.0) return true;",
+     "    if (per_sec <= 0.0 || burst <= 0.0 || 1) return true;"),
+    ("mesh-partial-frame", "test-peer-mesh", "src/net/peer_mesh.c",
+     "    if (env_len > PEER_MESH_TX_BUF_SIZE - 4 || peer->tx_len > PEER_MESH_TX_BUF_SIZE - 4 - env_len)\n"
+     "        return -2; /* Outbound buffer full */",
+     "    if (env_len > PEER_MESH_TX_BUF_SIZE - 4 || peer->tx_len > PEER_MESH_TX_BUF_SIZE - 4 - env_len) {\n"
+     "        if (peer->tx_len <= PEER_MESH_TX_BUF_SIZE - 4) {\n"
+     "            be_put_u32(peer->tx_buf + peer->tx_len, (uint32_t)env_len);\n"
+     "            peer->tx_len += 4; /* mutant: header queued without its envelope */\n"
+     "        }\n"
+     "        return -2;\n"
+     "    }"),
+    ("mesh-dedup-type", "test-peer-mesh", "src/net/peer_mesh.c",
+     "determ_sha256_update(&sha, &msg_type, 1);", "/* mutant: key covers the payload only */"),
+    ("mesh-accept-once", "test-peer-mesh", "src/net/peer_mesh.c",
+     "net_event_loop_add(&mesh->loop, cfd, NET_EV_READ, (void*)(uintptr_t)slot);\n        peer_mesh_send_hello(mesh, slot);",
+     "net_event_loop_add(&mesh->loop, cfd, NET_EV_READ, (void*)(uintptr_t)slot);\n        peer_mesh_send_hello(mesh, slot);\n        return;"),
+    ("loop-epoll-edge-triggered", "test-peer-mesh", "src/net/event_loop.c",
+     "ev.events |= EPOLLERR | EPOLLHUP; /* level-triggered, as mod() and kqueue */",
+     "ev.events |= EPOLLERR | EPOLLHUP | EPOLLET;"),
+    ("loop-kqueue-write-kept", "test-peer-mesh", "src/net/event_loop.c",
+     "EV_ADD | ((events & NET_EV_WRITE) ? EV_ENABLE : EV_DISABLE)", "EV_ADD | EV_ENABLE"),
+    ("store-dbk1-magic", "test-block-store", "src/storage/block_store.c",
+     'if (mn != 4 || memcmp(magic, "DBK1", 4) != 0) {', "if (mn != 4) {"),
+    ("store-unvouched-hash", "test-block-store", "src/storage/block_store.c",
+     "height >= store->indexed_count ||\n        !store->index[height].hash_known) {",
+     "height >= store->indexed_count) {"),
+    ("ledger-nonce-gap", "test-ledger-state", "src/ledger/state.c",
+     "sender_nonce == UINT64_MAX || tx_nonce != sender_nonce + 1",
+     "sender_nonce == UINT64_MAX || tx_nonce <= sender_nonce"),
+    ("ledger-fee-floor", "test-ledger-state", "src/ledger/state.c",
+     "    if (tx_fee < min_fee) {", "    if (tx_fee < min_fee && 0) {"),
+    ("ledger-root-count", "test-ledger-state", "src/ledger/state.c",
+     "safe_write_uint64_be(preimage, (uint64_t)count);", "safe_write_uint64_be(preimage, 0);"),
+    ("ledger-root-native-endian", "test-ledger-state", "src/ledger/state.c",
+     "safe_write_uint64_be(leaf + LEDGER_PUBKEY_LEN, balance);",
+     "memcpy(leaf + LEDGER_PUBKEY_LEN, &balance, sizeof(balance));"),
+    ("ledger-tx-root-sig", "test-ledger-state", "src/ledger/state.c",
+     "determ_sha256_update(&sha, txs[i].sig, LEDGER_SIG_LEN);", "/* mutant: signature not committed */"),
 ]
+
+
+# Cases whose mutated code is compiled for one event-loop backend only; on the
+# other backends the mutation is not compiled, so the case is skipped.
+EPOLL_ONLY = ("loop-epoll-edge-triggered",)
+KQUEUE_ONLY = ("loop-kqueue-write-kept",)
+
+# The targets tools/ci_c99.sh lists in C99_UNIX (POSIX transport only).
+POSIX_TARGETS = ("test-dsf-k2-duel", "test-k2-net-rpc", "test-peer-mesh", "test-block-store",
+                 "test-http-rpc", "test-ledger-state", "fuzz-ledger", "test-triple-entry-ledger",
+                 "test-rpc-shard-routing", "test-rpc-pending-transfer", "determ-node")
 
 
 def run_gate(source, build, targets, jobs):
@@ -232,14 +324,18 @@ def main():
         parser.error("--jobs must be positive")
     if not MUTANTS:
         raise RuntimeError("no mutation cases configured")
-    cases = MUTANTS
+    cases = list(MUTANTS)
     if sys.platform in ("win32", "cygwin", "msys"):
-        cases = [case for case in MUTANTS if case[1] not in
-                 ("determ-node", "test-k2-net-rpc", "test-rpc-shard-routing",
-                  "test-triple-entry-ledger", "test-rpc-pending-transfer", "test-http-rpc")]
+        cases = [case for case in MUTANTS if case[1] not in POSIX_TARGETS]
         for case in MUTANTS:
             if case not in cases:
                 print("PLATFORM-SKIP(mutant): " + case[0] + " (POSIX prototype)", flush=True)
+    kqueue = sys.platform == "darwin" or "bsd" in sys.platform
+    for case in list(cases):
+        if (case[0] in EPOLL_ONLY and not sys.platform.startswith("linux")) or \
+                (case[0] in KQUEUE_ONLY and not kqueue):
+            cases.remove(case)
+            print("PLATFORM-SKIP(mutant): " + case[0] + " (other event-loop backend)", flush=True)
     root = Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory(prefix="determ-c99-mutants-") as temporary:
         work = Path(temporary)
@@ -249,10 +345,8 @@ def main():
         # stale binaries, dependencies, or .git metadata enter this snapshot.
         for name in ("include", "src", "tests", "tools", "third_party",
                      "wallet", "light", "sim", "dapps"):
-            src_dir = root / name
-            if src_dir.is_dir():
-                shutil.copytree(src_dir, baseline / name,
-                                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            shutil.copytree(root / name, baseline / name,
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         shutil.copy2(root / "CMakeLists.txt", baseline / "CMakeLists.txt")
         targets = list(dict.fromkeys(case[1] for case in cases))
         print("=== ci_local --c99-mutants: fresh baseline ===", flush=True)

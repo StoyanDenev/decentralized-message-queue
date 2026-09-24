@@ -40,13 +40,14 @@ typedef struct {
 
 typedef struct {
     uint16_t      port;
-    const char   *bind_ip; /* Defaults to "127.0.0.1" if NULL */
+    const char   *bind_ip; /* Dotted IPv4 address to bind; NULL = "127.0.0.1" (loopback). */
     rpc_context_t rpc_ctx;
 } http_rpc_config_t;
 
 typedef struct {
     int               server_fd;
     uint16_t          port;
+    uint32_t          bind_addr_be; /* IPv4 bind address, network byte order */
     rpc_context_t     rpc_ctx;
     http_client_t     clients[HTTP_RPC_MAX_CLIENTS];
 } http_rpc_server_t;

@@ -157,7 +157,7 @@ static void test_calibration_limits(void) {
 
 static void test_header_codec(void) {
     consensus_block_header_t header, decoded;
-    uint8_t bytes[CONSENSUS_BLOCK_HEADER_SIZE];
+    uint8_t bytes[CONSENSUS_BLOCK_HEADER_SIZE + 1];
     size_t written = 0;
     memset(&header, 0, sizeof(header));
     header.block_index = 42;
@@ -177,8 +177,10 @@ static void test_header_codec(void) {
     CHECK(memcmp(decoded.prev_hash, header.prev_hash, 32) == 0);
     CHECK(memcmp(decoded.merkle_root, header.merkle_root, 32) == 0);
     CHECK(memcmp(decoded.vdf_output, header.vdf_output, 32) == 0);
-    CHECK(consensus_block_header_encode(bytes, sizeof(bytes) - 1, &header, &written) != 0);
-    CHECK(consensus_block_header_decode(bytes, sizeof(bytes) - 1, &decoded) != 0);
+    CHECK(consensus_block_header_encode(bytes, CONSENSUS_BLOCK_HEADER_SIZE - 1, &header, &written) != 0);
+    CHECK(consensus_block_header_decode(bytes, CONSENSUS_BLOCK_HEADER_SIZE - 1, &decoded) != 0);
+    bytes[CONSENSUS_BLOCK_HEADER_SIZE] = 0;
+    CHECK(consensus_block_header_decode(bytes, CONSENSUS_BLOCK_HEADER_SIZE + 1, &decoded) != 0);
 }
 
 int main(void) {

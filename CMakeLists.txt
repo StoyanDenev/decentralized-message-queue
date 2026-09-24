@@ -1,174 +1,769 @@
-# SPDX-License-Identifier: Apache-2.0
-# Copyright 2026 Determ Contributors
-#
-# Sovereign C99 Unikernel Execution Environment
-# Monolithic Pure C99 Toolchain Configuration
+cmake_minimum_required(VERSION 3.20)
+project(determ CXX C)
+if(WIN32)
+  link_libraries(ws2_32 wsock32 crypt32)
+endif()
 
-cmake_minimum_required(VERSION 3.16)
-project(determ_c99_node C)
+if(UNIX AND NOT APPLE)
+  link_libraries(rt pthread)
+endif()
+
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_C_EXTENSIONS OFF)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Enforce strict bare-metal C99 warning compliance
-if(MSVC)
-    add_compile_options(/W4 /WX /TC)
-    add_definitions(-D_CRT_SECURE_NO_WARNINGS -DWIN32_LEAN_AND_MEAN)
-else()
-    add_compile_options(-Wall -Wextra -Werror -pedantic -Wshadow -Wstrict-prototypes)
-    add_definitions(-D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE -D_DEFAULT_SOURCE)
+# ── DETERM_UBSAN: instrument ONLY Determ's own targets (determ +
+# determ-crypto-c99) with -fsanitize=undefined, NOT the vendored FetchContent
+# deps (OpenSSL/asio/json build + cache normally). Target-scoped rather than
+# global CMAKE_CXX_FLAGS so the heavy OpenSSL tree is not rebuilt under the
+# sanitizer. Enables the tools/ci_local.sh --sanitize consensus-UB gate
+# (the state_root-fork class, DECISION-LOG 2026-07-03). GCC/Clang only.
+option(DETERM_UBSAN "Instrument Determ's own targets with UBSan (GCC/Clang)" OFF)
+
+# ── DETERM_ASAN: the memory-safety companion to DETERM_UBSAN. Same target-scoped
+# discipline (only determ + determ-crypto-c99 + determ-dsso, vendored deps left
+# uninstrumented so the OpenSSL tree still caches). AddressSanitizer catches the
+# heap/lifetime class UBSan does not — use-after-free, heap-buffer-overflow, and
+# re-entrant container mutation during destruction (e.g. the net/scheduler
+# teardown paths: the VirtualEventLoop timer/closure queues drained under lock at
+# ~dtor) — and, for determ-dsso, the STACK class: its bounded external-format
+# readers allocate NOTHING, so every buffer a hostile wallet reaches is an
+# automatic array, and only -fsanitize=address ON THOSE TRANSLATION UNITS makes
+# an overflow of one observable. Instrumenting determ-dsso is therefore not a
+# formality: linking an instrumented determ-crypto-c99 leaves the dapps/dsso
+# parsers invisible. The determ-dsso instrumentation is applied where that target
+# is defined (it does not exist yet at this point in the file). GCC/Clang only;
+# wired into tools/ci_local.sh --asan.
+option(DETERM_ASAN "Instrument Determ's own targets with ASan (GCC/Clang)" OFF)
+
+include(FetchContent)
+
+# The vendored OpenSSL fork (janbar/openssl-cmake) declares a pre-3.5
+# cmake_minimum_required; CMake 4.0 removed compatibility with < 3.5 and refuses
+# to configure it (surfaced on the windows-latest CI runner, which upgraded to
+# CMake 4.x). Allow the old minimum for the FetchContent subprojects — set BEFORE
+# the FetchContent_MakeAvailable calls so it is in scope for their add_subdirectory.
+# Harmless on the dev box's CMake 3.x (an unused cache/normal variable there).
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
+# ── OpenSSL (no Perl required) — TEST-ORACLE ONLY (minix §6 split) ──────────
+# After the test-oracle split, OpenSSL is consumed EXCLUSIVELY by the
+# determ-cryptotest binary (the §Q9 dual-oracle cross-validation of the
+# determ-crypto-c99 stack). The daemon, wallet, and light link ZERO OpenSSL.
+# A tactical/SBOM build with -DDETERM_BUILD_CRYPTOTEST=OFF never even fetches
+# the OpenSSL sources.
+option(DETERM_BUILD_CRYPTOTEST
+       "Build the OpenSSL test-oracle binary (determ-cryptotest)" ON)
+if(DETERM_BUILD_CRYPTOTEST)
+  set(BUILD_SHARED_LIBS     OFF CACHE BOOL "" FORCE)
+  set(WITH_APPS             OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(
+    openssl
+    GIT_REPOSITORY https://github.com/janbar/openssl-cmake.git
+    GIT_TAG        1.1.1w-20231130
+    GIT_SHALLOW    TRUE
+  )
+  FetchContent_MakeAvailable(openssl)
 endif()
 
-option(DETERM_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
-option(DETERM_ASAN "Enable AddressSanitizer" OFF)
+# (asio DELETED — minix §7 step 4: the daemon networks on native IOCP
+#  (Windows) / epoll (POSIX) behind the net:: seam; no transport library.)
 
-if(DETERM_UBSAN)
-    add_compile_options(-fsanitize=undefined -fno-omit-frame-pointer)
-    add_link_options(-fsanitize=undefined)
-endif()
-if(DETERM_ASAN)
-    add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
-    add_link_options(-fsanitize=address)
-endif()
-
-include_directories(include src tests)
-
-# Core Cryptography C99 Library Sources
-set(CRYPTO_SRCS
-    src/crypto/secure_zero.c
-    src/crypto/ct.c
-    src/crypto/aes/aes_core.c
-    src/crypto/sha2/sha256.c
-    src/crypto/sha2/sha512.c
-    src/crypto/sha2/hmac.c
-    src/crypto/sha2/hkdf.c
-    src/crypto/sha2/pbkdf2.c
-    src/crypto/chacha20/chacha20.c
-    src/crypto/chacha20/poly1305.c
-    src/crypto/chacha20/chacha20_poly1305.c
-    src/crypto/chacha20/xchacha20_poly1305.c
-    src/crypto/ed25519/ed25519.c
-    src/crypto/x25519/x25519.c
-    src/crypto/p256/p256.c
-    src/crypto/opaque_dsso.c
-    src/crypto/rng/rng.c
+# ── nlohmann/json — VENDORED in-tree (minix JSON track, phase 1) ────────────
+# The single-include header v3.11.3 lives at third_party/nlohmann/json.hpp,
+# byte-pinned by the SHA-256 ratchet in tools/test_minix_dependency_surface.sh.
+# Vendoring replaces the FetchContent download: the whole JSON source is
+# auditable in-repo and configure works fully offline. The imported target name
+# is preserved, so no consumer changes anywhere. (The former release-tarball
+# pin was SHA256 d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d.)
+add_library(nlohmann_json INTERFACE)
+add_library(nlohmann_json::nlohmann_json ALIAS nlohmann_json)
+target_include_directories(nlohmann_json INTERFACE
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party
 )
 
-# Core Consensus, Wire, Storage & Networking C99 Sources
-set(CONSENSUS_SRCS
-    src/time/clock.c
-    src/net/virtual_transport.c
+# ── determ executable ───────────────────────────────────────────────────────
+add_definitions(-DASIO_STANDALONE -DASIO_NO_DEPRECATED)
+
+if(WIN32)
+  add_definitions(-D_WIN32_WINNT=0x0601)
+endif()
+
+file(GLOB_RECURSE SOURCES "src/*.cpp")
+
+# minix §4.5: native net backends are per-platform TUs (each is also
+# #ifdef-guarded, but pruning here keeps the other platform's builds from
+# even parsing them): the IOCP pair is Windows-only, the epoll reactor pair
+# is POSIX-only.
+if(NOT WIN32)
+    list(REMOVE_ITEM SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/net/iocp_event_loop.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/net/iocp_transport.cpp")
+else()
+    list(REMOVE_ITEM SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/net/reactor_event_loop.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/net/reactor_transport.cpp")
+endif()
+
+# v2.17 / S-004 option 2: passphrase-encrypted keyfiles. The
+# envelope crypto (AES-256-GCM + PBKDF2-HMAC-SHA-256) lives in
+# wallet/envelope.cpp; main `determ` binary needs it for
+# `account create --passphrase` to encrypt the generated keyfile
+# at rest. No wallet-state is shared between binaries — only the
+# crypto primitive code.
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/wallet/envelope.cpp")
+# S-035 Option 1 seed: the `determ test-shamir` subcommand
+# exercises wallet/shamir.cpp directly (in-process unit test of
+# the A2 Phase 1 secret-sharing primitive). Link it into the main
+# binary so the test command can call shamir::split / ::combine.
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/wallet/shamir.cpp")
+# S-091 / D2 src-side keyfile increment: DNK1 binary container encoding and
+# decoding. Linked into the main determ binary so save_node_key / load_node_key
+# can write and read canonical DNK1 binary keyfiles.
+list(APPEND SOURCES "${CMAKE_SOURCE_DIR}/wallet/keyfmt.cpp")
+# ── determ-crypto-c99: the libsodium-free C99 primitive layer as a STATIC
+# library (CRYPTO-C99-SPEC §3.14 seed — "each module compiles as a static
+# lib; top-level libdeterm-crypto aggregates"). One aggregate target today
+# (per-module split is the §3.14 follow-up once a second consumer exists);
+# consumed by `determ` and linkable by any future target without re-listing
+# sources. Umbrella header: include/determ/crypto.h; C++ wrapper:
+# include/determ/crypto.hpp (header-only, rides the PUBLIC include dir).
+# Per-module provenance + validation evidence: src/crypto/<module>/README.md.
+# The src/*.cpp glob above does not pick up .c files; list them explicitly.
+# libsodium drop: DONE (2026-07-03) — no Determ binary links libsodium.
+# The daemon and determ-light never did; determ-wallet, the last consumer,
+# migrated its ~200 call sites (Ed25519 sign/verify/derive, X25519,
+# sodium_memzero) in wallet/main.cpp to determ::c99 via an API-compatible
+# shim (§3.15), and the OPAQUE stub was DELETED with the liboprf track
+# (DECISION-LOG.md 2026-07-03). libsodium.a survives only as the byte-equal
+# cross-validation oracle (tools/c99_libsodium_xval.c). §3.14 remaining:
+# the per-module sub-library split + the cross-compilation matrix.
+add_library(determ-crypto-c99 STATIC
+  # §3.10 shared primitives — secure_zero (hygiene) + ct_memcmp (CT compare),
+  # consumed by every module below.
+  "${CMAKE_SOURCE_DIR}/src/crypto/secure_zero.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/ct.c"
+  # §3.1 SHA-2 family + §3.8b PBKDF2 — `determ test-sha2-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/sha2/sha256.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/sha2/sha512.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/sha2/hmac.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/sha2/hkdf.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/sha2/pbkdf2.c"
+  # §3.4 ChaCha20 / Poly1305 / ChaCha20-Poly1305 + XChaCha20-Poly1305 —
+  # `determ test-chacha20-c99` + `determ test-xchacha-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/chacha20.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/poly1305.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/chacha20_poly1305.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/chacha20/xchacha20_poly1305.c"
+  # §3.5 AES-256 + GCM (arithmetic S-box + branchless GHASH) — `determ test-aes-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/aes/aes_core.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/aes/aes_gcm.c"
+  # §3.2 Ed25519 (gf[16] cswap-ladder, RFC 8032; includes exposed
+  # scalar/group ops) — `determ test-ed25519-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/ed25519/ed25519.c"
+  # §3.3 X25519 (Montgomery cswap-ladder, RFC 7748) — `determ test-x25519-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/x25519/x25519.c"
+  # §3.6 BLAKE2b (RFC 7693) + Argon2id (RFC 9106) — `determ test-blake2b-c99`
+  # + `determ test-argon2id-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/blake2/blake2b.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/argon2/argon2id.c"
+  # §3.8c NIST P-256 (FIPS-profile curve; Montgomery field + RCB complete
+  # addition + CT ladder) — `determ test-p256-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/p256/p256.c"
+  # §3.19 Pedersen commitment over P-256 (range-proof / confidential-tx track,
+  # increments 1-3: commit + vector commit + MSM) — pure composition over the
+  # P-256 primitives above; `determ test-pedersen-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/pedersen/pedersen.c"
+  # §3.19 inc.4: the Bulletproofs inner-product argument (the range-proof track's
+  # log-size core) — `determ test-bp-ipa-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/pedersen/ipa.c"
+  # §3.19 inc.5: the Bulletproofs single-value range proof (v in [0,2^n)) wrapping
+  # the inc.4 IPA — `determ test-bp-rangeproof-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/pedersen/rangeproof.c"
+  # §3.19 inc.7: confidential-tx balance proof over P-256 (the FIPS-profile amount-
+  # conservation half) — pure composition over the pedersen/P-256 public API,
+  # `determ test-p256-balance-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/pedersen/balance.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/pedersen/ctxbundle.c"  # §3.22 DCT1 confidential-transfer bundle
+  # FIPS 202 SHA-3 / SHAKE (Keccak-f[1600]) — the XOF prerequisite for the
+  # ML-DSA/Dilithium PQ signature track — `determ test-sha3-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/sha3/sha3.c"
+  # §3.18 ML-DSA (Dilithium, FIPS 204) PQ signature track, increment 1: the
+  # Z_q arithmetic core (modular reduction + negacyclic NTT) — `determ
+  # test-mldsa-c99`. Built on the SHAKE XOF above; additive (no signer yet).
+  "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/reduce.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/ntt.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/rounding.c"
+  # §3.18 increment 3: the rejection samplers — the first SHAKE consumers.
+  "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/sample.c"
+  # §3.18 increment 4: coefficient bit-packing (the poly <-> byte codec).
+  "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/pack.c"
+  # §3.18 increment 5: per-poly ring arithmetic (add/sub/reduce/caddq/pointwise).
+  "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/poly.c"
+  # §3.18 increment 6: matrix/vector layer (ExpandA/ExpandS/ExpandMask + polyvec ops).
+  "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/polyvec.c"
+  # §3.18 increment 7: ML-DSA.KeyGen_internal (ACVP-pinned; pk/sk encode).
+  "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/keygen.c"
+  # §3.18 increment 8: ML-DSA Sign_internal + Verify_internal (ACVP-pinned).
+  "${CMAKE_SOURCE_DIR}/src/crypto/mldsa/sign.c"
+  # §3.15 OS-entropy shim (BCryptGenRandom / getrandom) — replaces OpenSSL
+  # RAND_bytes at the daemon's entropy sites (dh_secret commit, node keygen).
+  "${CMAKE_SOURCE_DIR}/src/crypto/rng/rng.c"
+  # RFC 4648 Base64 (strict decode) — the 1c wallet-envelope codec, replacing
+  # OpenSSL EVP_EncodeBlock/EVP_DecodeBlock (the wallet's last OpenSSL class).
+  "${CMAKE_SOURCE_DIR}/src/crypto/base64/base64.c"
+  # §3.24 A1 per-epoch view-key derivation (HKDF-SHA256 composition, frozen
+  # python-first) — `determ test-view-key-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/viewkey/viewkey.c"
+  # NC-8 encrypted-note delivery (shielded Option A): ephemeral-static ECIES
+  # over P-256 (ECDH + HKDF-SHA256 + ChaCha20-Poly1305) — `determ test-enote-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/enote/enote.c"
+  # NC-8 recipient note-key derivation (wiring inc.4): profile-split note keypair
+  # from a 32-byte IKM (hash_to_scalar + base mult + compress) — the shared base
+  # plus the MODERN (1a, independent seed) and FIPS (1b, A2 view_master_sk)
+  # wrappers — `determ test-notekey-modern-c99` / `test-notekey-fips-c99`.
+  "${CMAKE_SOURCE_DIR}/src/crypto/notekey/notekey.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/notekey/modern/notekey_modern.c"
+  "${CMAKE_SOURCE_DIR}/src/crypto/notekey/fips/notekey_fips.c"
+
+  # §3.26 DSSO G4 OPAQUE-3DH AKE core (RFC 9807 §6.4) — the login session-key
+  # co-generation + transcript-MAC mutual auth, a pure composition of P-256
+  # scalar mult + HKDF-SHA256 + SHA-256 (`determ test-dsso-opaque3dh`).
+  "${CMAKE_SOURCE_DIR}/src/crypto/dsso/opaque3dh.c"
+  # D.5 government random-selection — lowest-hash sortition (the pure, Apache-2.0
+  # citizen-verifier draw core; D5-RANDOM-SELECTION-SPEC §4) — `determ test-d5-draw`.
+  "${CMAKE_SOURCE_DIR}/src/dapp/d5draw.c"
+  # D.5 canonical-binary payload codecs (roster/case-open/result; D2 no-JSON) —
+  # `determ test-d5-codec`.
+  "${CMAKE_SOURCE_DIR}/src/dapp/d5codec.c"
+)
+target_include_directories(determ-crypto-c99 PUBLIC include)
+if(WIN32)
+  # rng.c uses BCryptGenRandom; PUBLIC so every consumer links bcrypt.
+  target_link_libraries(determ-crypto-c99 PUBLIC bcrypt)
+endif()
+
+add_executable(determ ${SOURCES})
+
+target_include_directories(determ PRIVATE
+  include
+  ${CMAKE_SOURCE_DIR}/wallet
+)
+
+# minix §6 (OpenSSL test-oracle split): the daemon links ZERO OpenSSL. All
+# production crypto runs on determ-crypto-c99 (§3.15), and the §Q9 dual-oracle
+# test-*-c99 subcommands now live in the separate determ-cryptotest binary —
+# the sole OpenSSL consumer in the tree.
+target_link_libraries(determ PRIVATE
+  determ-crypto-c99
+  nlohmann_json::nlohmann_json
+)
+
+if(WIN32)
+  target_link_libraries(determ PRIVATE ws2_32 wsock32 crypt32)
+  if(MSVC)
+    # src/main.cpp is the single-TU dispatcher: hundreds of mutually-exclusive
+    # `if (cmd == ...)` test/CLI branches in one object file. It has crossed the
+    # COFF per-object section limit (C1128) as the S-036 suite grew; /bigobj lifts
+    # the 2^16 section cap to 2^32. Compile-only, zero codegen/ABI effect —
+    # production bytes + all goldens are unchanged (GCC has no such limit).
+    target_compile_options(determ PRIVATE /bigobj)
+  endif()
+  # MSVC defaults to a 1 MB stack; the in-process test handlers
+  # (test-atomic-scope, test-overflow-paths, test-time-monotonicity,
+  # test-chain-prev-hash-link, test-state-root-determinism, etc.)
+  # accumulate stack frames across many mutually-exclusive
+  # `if (cmd == ...)` branches inside main() and can hit
+  # STATUS_STACK_OVERFLOW (0xC00000FD) at startup. Bump the reserve
+  # to 16 MB to eliminate the failure mode without restructuring the
+  # dispatcher into a separate compilation unit.
+  target_link_options(determ PRIVATE /STACK:16777216)
+endif()
+
+if(UNIX)
+  target_link_libraries(determ PRIVATE pthread)
+endif()
+
+# UBSan on Determ's own code only (see the DETERM_UBSAN option above). The
+# vendored deps stay uninstrumented, so the OpenSSL tree is reused from cache
+# and the sanitized build is just the ~18 Determ TUs.
+if(DETERM_UBSAN)
+  # -O1 (overriding RelWithDebInfo's -O2) on the instrumented targets: the
+  # ~14k-line main.cpp under -O2 -g + UBSan peaks several GB per TU and OOM-killed
+  # the GitHub runner (SIGTERM/143 at ~5.5 min, right as the build started) when
+  # compiled in parallel. -O1 slashes per-TU compiler memory while UBSan still
+  # catches the C-standard UB this gate targets (the state_root determinism-fork
+  # and signed-shift classes are optimization-level-independent). Paired with the
+  # -j cap in tools/ci_local.sh --sanitize.
+  target_compile_options(determ-crypto-c99 PRIVATE -fsanitize=undefined -O1)
+  target_compile_options(determ            PRIVATE -fsanitize=undefined -O1)
+  # The UBSan RUNTIME must be linked into every executable that links the
+  # instrumented static lib, or the final link dies with undefined
+  # __ubsan_handle_* references — exactly what every clean-checkout CI run
+  # hits via determ-cryptotest (an incremental local tree whose lib objects
+  # predate instrumentation masks it). INTERFACE on the lib propagates the
+  # flag to ALL its consumers instead of hand-listing each executable.
+  target_link_options(determ-crypto-c99 INTERFACE -fsanitize=undefined)
+  target_link_options(determ            PRIVATE -fsanitize=undefined)
+  message(STATUS "DETERM_UBSAN: determ + determ-crypto-c99 instrumented with UBSan (-O1)")
+endif()
+
+# ASan on Determ's own code only (see the DETERM_ASAN option above). -O1 for the
+# same per-TU compiler-memory reason as the UBSan block (main.cpp is ~15k lines).
+# Frame-pointers kept for readable teardown/heap reports.
+if(DETERM_ASAN)
+  target_compile_options(determ-crypto-c99 PRIVATE -fsanitize=address -fno-omit-frame-pointer -O1)
+  target_compile_options(determ            PRIVATE -fsanitize=address -fno-omit-frame-pointer -O1)
+  # Same runtime-propagation rule as the UBSan block above: any executable
+  # linking the instrumented lib needs -fsanitize=address at link time.
+  target_link_options(determ-crypto-c99 INTERFACE -fsanitize=address)
+  target_link_options(determ            PRIVATE -fsanitize=address)
+  message(STATUS "DETERM_ASAN: determ + determ-crypto-c99 instrumented with ASan (-O1)")
+endif()
+
+# ── determ-wallet executable (A2 Phases 1-5 + 7) ────────────────────────────
+# Separate binary so wallet secret material never shares address space with
+# the networked `determ` daemon. 1c (2026-07-03): the wallet links ZERO
+# OpenSSL — every crypto class migrated to determ-crypto-c99 (PBKDF2 +
+# AES-256-GCM envelopes, HKDF/HMAC, Ed25519 keygen/derive, OS entropy,
+# base64), format-compatible byte-for-byte with the OpenSSL-era output.
+# Recovery uses Shamir + c99 AEAD envelopes (passphrase scheme); the
+# OPAQUE/liboprf track was DE-SCOPED 2026-07-03 (DECISION-LOG).
+file(GLOB_RECURSE WALLET_SOURCES "wallet/*.cpp")
+add_executable(determ-wallet ${WALLET_SOURCES})
+target_include_directories(determ-wallet PRIVATE
+  wallet
+)
+target_link_libraries(determ-wallet PRIVATE
+  determ-crypto-c99
+  nlohmann_json::nlohmann_json
+)
+if(WIN32)
+  target_link_libraries(determ-wallet PRIVATE ws2_32 crypt32)
+endif()
+if(UNIX)
+  target_link_libraries(determ-wallet PRIVATE pthread)
+endif()
+
+# ── determ-light executable (R39 / robust-gathering-oasis plan) ─────────────
+# Trust-minimized light-client wallet. Talks to a daemon's RPC and verifies
+# every piece of data received (headers, committee sigs, state-proofs) so an
+# honest light-client cannot be tricked even by a malicious daemon. Genesis
+# JSON pins the chain identity on every connection.
+#
+# Dependency footprint: OpenSSL (Ed25519 + SHA-256) + nlohmann/json + BSD
+# sockets (Winsock on Windows). Explicitly NO libsodium, NO asio, NO
+# node/* / producer.cpp / validator.cpp / chain/chain.cpp linkage —
+# reuses the standalone crypto + chain primitives from src/ via an
+# EXPLICIT file list (not glob) so the binary stays small (~3-5 MB
+# stripped) and the linker can't accidentally pull in daemon code.
+add_executable(determ-light
+  light/main.cpp
+  light/rpc_client.cpp
+  light/verify.cpp
+  light/trustless_read.cpp
+  light/keyfile.cpp
+  light/seed_source.cpp      # S-110: --*-seed-from (file:/env:/prompt) + the raw-flag warning
+  light/sign_tx.cpp
+  light/pq_sign_tx.cpp
+  light/audit_tx.cpp
+  light/ct_tx.cpp
+  light/watch.cpp
+  light/export.cpp
+  light/verify_archive.cpp
+  light/verify_state_bundle.cpp
+  light/account_history.cpp
+  light/verify_tx_inclusion.cpp
+  light/verify_state_root.cpp
+  light/verify_rand.cpp      # D.5 inc.4: cumulative_rand[H] beacon authentication
+  light/verify_selection.cpp # D.5 inc.5: selection-verifier core (first-open-wins + ordering + draw)
+  light/verify_ct.cpp        # A3: client-side CT range/balance verification
+  light/persist.cpp
+  light/outbox.cpp           # durable sender outbox (DOX1 records, durable writes, submit/reconcile cores)
+  light/outbox_cli.cpp       # `determ-light outbox <verb>`
+  light/outbox_selftest.cpp  # selftest-outbox-{record,classify,core} (in-process fixture daemon)
+  # Reused from src/ (explicit list — no glob):
+  src/crypto/merkle.cpp
+  src/crypto/keys.cpp
+  src/crypto/sha256.cpp
+  src/crypto/random.cpp          # D3.5e-7e: epoch_committee_seed + select_m_creators
+                                 # (the verify-shardtip-records committee re-derivation;
+                                 # standalone — deps are sha256 + <algorithm> only)
+  src/crypto/pqauth.cpp          # §3.21 DPQ1 PQ tx-auth envelope (determ::pqauth)
+  src/crypto/pq_address.cpp      # §3.21 PQ-native bearer address (pq-address / pq-transfer)
+  src/chain/pq_tx_auth.cpp       # §3.21 PQ_TRANSFER accept-rule (verify_pq_transaction — the
+                                 # address-binding the offline pq-verify-tx enforces)
+  src/chain/block.cpp
+  src/chain/genesis.cpp
+  wallet/envelope.cpp
+  wallet/keyfmt.cpp
+)
+# §3.15 (2026-07-03): determ-light links ZERO OpenSSL. Its whole crypto
+# surface (SHA-256 via src/crypto/sha256.cpp, Ed25519 via src/crypto/keys.cpp
+# + light/keyfile.cpp) now runs on determ-crypto-c99; HMAC in light/main.cpp
+# was already from-scratch. The EOL-OpenSSL liability is out of the
+# light-client verification path entirely.
+target_include_directories(determ-light PRIVATE
+  include
+  light
+  wallet
+)
+target_link_libraries(determ-light PRIVATE
+  determ-crypto-c99
+  nlohmann_json::nlohmann_json
+)
+if(WIN32)
+  target_link_libraries(determ-light PRIVATE ws2_32 crypt32)
+endif()
+if(UNIX)
+  target_link_libraries(determ-light PRIVATE pthread)
+endif()
+
+# ── determ-dsf: Deterministic Simulation Framework (S-035 Opt 2, DSF-SPEC) ───
+# TEST-ONLY binary. Increment 1 = the deterministic core (virtual clock +
+# discrete-event scheduler + scenario DSL + trace/replay + property checker +
+# framework-demonstration scenarios). Fully self-contained: header-only core
+# under sim/, a single .cpp TU, NO link deps (no OpenSSL, no determ core, no
+# asio) — the same cross-toolchain determinism discipline as the consensus
+# surface (a fixed --seed yields a byte-identical trace across -O0/-O2). The
+# full virtual-network + consensus-engine coupling + 30-scenario set land in
+# later increments. Excluded from install/production targets.
+add_executable(determ-dsf sim/dsf_main.cpp)
+target_compile_features(determ-dsf PRIVATE cxx_std_17)
+target_include_directories(determ-dsf PRIVATE ${CMAKE_SOURCE_DIR}/sim)
+
+# ── determ-cryptotest: OpenSSL dual-oracle test binary (minix §6 split) ──────
+# TEST-ONLY. Holds the 11 §Q9 test-*-c99 cross-validation subcommands moved
+# VERBATIM out of src/main.cpp (byte-identical stdout; wrapper summary pins
+# unchanged) so the daemon links zero OpenSSL. This target is the SOLE OpenSSL
+# consumer in the tree; -DDETERM_BUILD_CRYPTOTEST=OFF (tactical/SBOM builds)
+# skips both this target and the OpenSSL FetchContent entirely. Links the
+# in-tree determ-crypto-c99 (the implementation under test), OpenSSL crypto
+# (the independent oracle), and src/crypto/sha256.cpp (the determ::crypto
+# SHA-256 wrapper used by test-sha2-c99's backend-parity leg).
+if(DETERM_BUILD_CRYPTOTEST)
+  add_executable(determ-cryptotest
+    cryptotest/main.cpp
+    src/crypto/sha256.cpp
+  )
+  target_include_directories(determ-cryptotest PRIVATE
+    include
+    ${openssl_SOURCE_DIR}/include
+  )
+  target_link_libraries(determ-cryptotest PRIVATE
+    determ-crypto-c99
+    crypto
+  )
+  if(WIN32)
+    target_link_libraries(determ-cryptotest PRIVATE crypt32)
+    # Mirror determ's stack reserve: the p256 handlers carry large
+    # stack locals inherited verbatim from the monolithic dispatcher.
+    target_link_options(determ-cryptotest PRIVATE /STACK:16777216)
+  endif()
+  if(UNIX)
+    target_link_libraries(determ-cryptotest PRIVATE pthread)
+  endif()
+endif()
+
+# ── determ-dsso: the DSSO identity service (dapps/dsso) ───────────────────────
+# "Sign-In With Determ" runs OFF the chain: it consumes EUDI Wallet identity
+# presentations, authenticates users and asserts to its own relying parties.
+# Those formats (JSON/base64url, CBOR) are external interop requirements, so the
+# service is a SEPARATE binary linking only determ-crypto-c99 — no chain object
+# is reachable from it, which is what keeps the canonical-binary rule intact for
+# consensus while DSSO speaks what the EUDI specifications mandate.
+add_executable(determ-dsso
+  dapps/dsso/dsso.c
+  dapps/dsso/assertion.c
+  # The wallet-relying-party surface (docs/proofs/DssoPidVerification.md): the
+  # bounded external-format readers, the nine PID verification rules, and the
+  # account-binding rules. Every byte a hostile wallet can reach is parsed in
+  # these three translation units and nowhere else in the tree.
+  dapps/dsso/dsso_jose.c
+  dapps/dsso/dsso_pid.c
+  dapps/dsso/dsso_bind.c
+  dapps/dsso/dsso_selftest_pid.c
+  dapps/dsso/authn.c
+  dapps/dsso/authn_selftest.c
+  dapps/dsso/dsso_main.c
+)
+target_compile_features(determ-dsso PRIVATE c_std_99)
+target_include_directories(determ-dsso PRIVATE include dapps/dsso)
+target_link_libraries(determ-dsso PRIVATE determ-crypto-c99)
+
+# ASan over the bounded parsers (see the DETERM_ASAN option at the top of this
+# file). This is the ONE place it can be applied — the option block runs long
+# before this target exists. determ-crypto-c99's INTERFACE link option already
+# pulls the runtime in; what is added here is the COMPILE instrumentation, and
+# without it dapps/dsso's stack buffers (its readers allocate nothing) are not
+# checked at all. -O1 + frame pointers for the same reason as the other two
+# instrumented targets: readable reports at a bounded per-TU compiler cost.
+if(DETERM_ASAN)
+  target_compile_options(determ-dsso PRIVATE -fsanitize=address -fno-omit-frame-pointer -O1)
+  target_link_options(determ-dsso PRIVATE -fsanitize=address)
+  message(STATUS "DETERM_ASAN: determ-dsso instrumented with ASan (-O1)")
+endif()
+
+# ── d5rp: the D.5 reference-RP producer (dapps/d5-random-selection, BUSL-1.1) ──
+# The orchestrator side of D.5 (the founding MOTIVATION.md use case; dapps
+# catalog first DApp). Produces the three canonical-binary DAPP_CALL streams
+# (roster / case-open / result) using ONLY the shipped Apache-2.0 primitives
+# determ-crypto-c99 (d5codec + d5draw); it has no consensus authority and the
+# chain never parses its payloads. Its `selftest` round-trips producer output
+# through the codec + an independent lowest-hash re-derivation — the exact
+# contract the Apache-2.0 citizen verifier (`determ-light verify-selection`)
+# enforces adversarially. This target is the substrate from which the Apache-2.0
+# RP SDK (sdk/rp) is later extracted. Pure C99, no OpenSSL, no threads.
+add_executable(d5rp
+  dapps/d5-random-selection/d5rp.c
+  dapps/d5-random-selection/d5rp_main.c
+)
+target_compile_features(d5rp PRIVATE c_std_99)
+target_include_directories(d5rp PRIVATE include)
+target_link_libraries(d5rp PRIVATE determ-crypto-c99)
+
+# ── Strict C99 for the C99 migration targets (review 2026-09-23) ─────────────
+# ISO C99 without GNU extensions, POSIX.1-2008 feature macros, and warnings as
+# errors on GCC/Clang, so a non-portable construct fails CI here instead of
+# compiling only as gnu99 (the root Makefile that claimed this was never run
+# by CI and is removed). determ-crypto-c99 is shared with the C++ binaries and
+# keeps its own settings. DETERM_C99_SANITIZE (tools/ci_local.sh
+# --c99-sanitize) adds ASan + UBSan to these targets; any report aborts the test.
+option(DETERM_C99_SANITIZE "ASan + UBSan on the C99 migration targets (GCC/Clang)" OFF)
+function(determ_c99_strict tgt)
+  set_target_properties(${tgt} PROPERTIES
+    C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+  if(UNIX)
+    target_compile_definitions(${tgt} PRIVATE _POSIX_C_SOURCE=200809L)
+    if(APPLE)
+      target_compile_definitions(${tgt} PRIVATE _DARWIN_C_SOURCE)
+    endif()
+  endif()
+  if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(${tgt} PRIVATE -Wall -Wextra -Werror -pedantic)
+    if(DETERM_C99_SANITIZE)
+      target_compile_options(${tgt} PRIVATE -fsanitize=address,undefined
+        -fno-sanitize-recover=all -fno-omit-frame-pointer)
+      target_link_options(${tgt} PRIVATE -fsanitize=address,undefined)
+    endif()
+  endif()
+endfunction()
+# The crypto library every C99 target links is instrumented too, so the
+# sanitizers see accesses made inside it; it keeps its own warning settings.
+if(DETERM_C99_SANITIZE AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(determ-crypto-c99 PRIVATE -fsanitize=address,undefined
+    -fno-sanitize-recover=all -fno-omit-frame-pointer)
+endif()
+
+# ── test-k2-duel: local commit/reveal and VDF primitive checks ──────────────
+option(ENABLE_LIBFUZZER "Build K=2 Duel target with LLVM LibFuzzer (-fsanitize=address,fuzzer)" OFF)
+
+add_executable(test-k2-duel
+  tests/test_k2_duel.c
+  src/consensus/duel_state.c
+  src/consensus/dda.c
+  src/crypto/vdf.c
+  src/wire/parser.c
+  src/time/clock.c
+)
+target_compile_features(test-k2-duel PRIVATE c_std_99)
+determ_c99_strict(test-k2-duel)
+target_include_directories(test-k2-duel PRIVATE include src)
+target_link_libraries(test-k2-duel PRIVATE determ-crypto-c99)
+
+if(ENABLE_LIBFUZZER)
+  target_compile_definitions(test-k2-duel PRIVATE LIBFUZZER_ENABLED=1)
+  target_compile_options(test-k2-duel PRIVATE -fsanitize=address,fuzzer -fno-omit-frame-pointer)
+  target_link_options(test-k2-duel PRIVATE -fsanitize=address,fuzzer)
+elseif(DETERM_ASAN)
+  target_compile_options(test-k2-duel PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+  target_link_options(test-k2-duel PRIVATE -fsanitize=address,undefined)
+endif()
+
+# ── test-dsf-k2-duel: deterministic local clock/transport simulation ────────
+if(UNIX)
+add_executable(test-dsf-k2-duel
+  tests/test_dsf_k2_duel.c
+  src/consensus/duel_state.c
+  src/consensus/dda.c
+  src/crypto/vdf.c
+  src/wire/parser.c
+  src/time/clock.c
+  src/net/virtual_transport.c
+  src/net/event_loop.c
+)
+target_compile_features(test-dsf-k2-duel PRIVATE c_std_99)
+determ_c99_strict(test-dsf-k2-duel)
+target_compile_definitions(test-dsf-k2-duel PRIVATE DETERM_DSF_ENABLED=1)
+target_include_directories(test-dsf-k2-duel PRIVATE include src tests)
+target_link_libraries(test-dsf-k2-duel PRIVATE determ-crypto-c99)
+
+# ── fuzz-ledger: ledger sweep vs a reference model, DSF seam, reactor ────────
+# Standalone main only (LLVMFuzzerTestOneInput is the sweep's entry point).
+add_executable(fuzz-ledger
+  tests/fuzz_ledger.c
+  src/consensus/duel_state.c
+  src/consensus/dda.c
+  src/crypto/vdf.c
+  src/wire/parser.c
+  src/time/clock.c
+  src/net/virtual_transport.c
+  src/net/event_loop.c
+  src/net/reactor.c
+  src/ledger/state.c
+)
+target_compile_features(fuzz-ledger PRIVATE c_std_99)
+determ_c99_strict(fuzz-ledger)
+target_compile_definitions(fuzz-ledger PRIVATE DETERM_DSF_ENABLED=1)
+target_include_directories(fuzz-ledger PRIVATE include src tests)
+target_link_libraries(fuzz-ledger PRIVATE determ-crypto-c99)
+endif()
+
+# ── test-k2-duel-fallback: local deadlines and explicit retry under DSF ─────
+add_executable(test-k2-duel-fallback
+  tests/test_k2_duel_fallback.c
+  src/consensus/duel_state.c
+  src/consensus/dda.c
+  src/crypto/vdf.c
+  src/wire/parser.c
+  src/time/clock.c
+)
+target_compile_features(test-k2-duel-fallback PRIVATE c_std_99)
+determ_c99_strict(test-k2-duel-fallback)
+target_compile_definitions(test-k2-duel-fallback PRIVATE DETERM_DSF_ENABLED=1)
+target_include_directories(test-k2-duel-fallback PRIVATE include src tests)
+target_link_libraries(test-k2-duel-fallback PRIVATE determ-crypto-c99)
+
+# ── test-qpc-clock-overflow: Windows QPC Scaled Arithmetic Overflow Test ────────
+add_executable(test-qpc-clock-overflow
+  tests/test_qpc_clock_overflow.c
+)
+target_compile_features(test-qpc-clock-overflow PRIVATE c_std_99)
+determ_c99_strict(test-qpc-clock-overflow)
+target_include_directories(test-qpc-clock-overflow PRIVATE include src tests)
+
+# ── test-dda: Dynamic Difficulty Adjustment Suite ────────────────────────────
+add_executable(test-dda
+  tests/test_dda.c
+  src/consensus/dda.c
+)
+target_compile_features(test-dda PRIVATE c_std_99)
+determ_c99_strict(test-dda)
+target_include_directories(test-dda PRIVATE include src tests)
+
+# Compile the real Ed25519 source with allocator interception confined to its
+# test object. Production consumers continue to link the ordinary crypto library.
+add_library(ed25519-bounded-test-object OBJECT tests/test_ed25519_bounded.c)
+target_compile_features(ed25519-bounded-test-object PRIVATE c_std_99)
+determ_c99_strict(ed25519-bounded-test-object)
+target_compile_definitions(ed25519-bounded-test-object PRIVATE ED25519_BOUNDED_IMPL=1)
+target_include_directories(ed25519-bounded-test-object PRIVATE include)
+add_executable(test-ed25519-bounded tests/test_ed25519_bounded.c
+  src/crypto/sha2/sha512.c src/crypto/secure_zero.c src/crypto/ct.c
+  $<TARGET_OBJECTS:ed25519-bounded-test-object>)
+target_compile_features(test-ed25519-bounded PRIVATE c_std_99)
+determ_c99_strict(test-ed25519-bounded)
+target_include_directories(test-ed25519-bounded PRIVATE include)
+
+
+
+if(UNIX)
+# ── test-triple-entry-ledger: self-transfer, nonce and fee-accumulator checks ─
+add_executable(test-triple-entry-ledger
+  tests/test_triple_entry_ledger.c
+  src/ledger/state.c
+  src/time/clock.c
+  src/net/virtual_transport.c
+)
+target_compile_features(test-triple-entry-ledger PRIVATE c_std_99)
+determ_c99_strict(test-triple-entry-ledger)
+target_compile_definitions(test-triple-entry-ledger PRIVATE DETERM_DSF_ENABLED=1)
+target_include_directories(test-triple-entry-ledger PRIVATE include src tests)
+target_link_libraries(test-triple-entry-ledger PRIVATE determ-crypto-c99)
+endif()
+
+# ── fuzzer-parser: LLVM libFuzzer Target for Wire Deserializer ───────────────
+option(ENABLE_PARSER_LIBFUZZER "Build fuzzer-parser with LLVM LibFuzzer (-fsanitize=address,fuzzer)" OFF)
+
+add_executable(fuzzer-parser
+  tests/fuzzer_parser.c
+  src/wire/parser.c
+)
+target_compile_features(fuzzer-parser PRIVATE c_std_99)
+determ_c99_strict(fuzzer-parser)
+target_include_directories(fuzzer-parser PRIVATE include src tests)
+target_link_libraries(fuzzer-parser PRIVATE determ-crypto-c99)
+
+if(ENABLE_PARSER_LIBFUZZER)
+  target_compile_definitions(fuzzer-parser PRIVATE LIBFUZZER_ENABLED=1)
+  target_compile_options(fuzzer-parser PRIVATE -fsanitize=address,fuzzer -fno-omit-frame-pointer)
+  target_link_options(fuzzer-parser PRIVATE -fsanitize=address,fuzzer)
+endif()
+
+# The canonical envelope codec is independent of the POSIX node transport.
+add_executable(test-dsf-k2-recovery tests/test_dsf_k2_recovery.c
+  sim/k2_recovery_model.c src/ledger/state.c)
+target_compile_features(test-dsf-k2-recovery PRIVATE c_std_99)
+determ_c99_strict(test-dsf-k2-recovery)
+target_include_directories(test-dsf-k2-recovery PRIVATE include sim)
+target_link_libraries(test-dsf-k2-recovery PRIVATE determ-crypto-c99)
+
+add_executable(test-shard-routing tests/test_shard_routing.c src/ledger/shard_routing.c)
+target_compile_features(test-shard-routing PRIVATE c_std_99)
+determ_c99_strict(test-shard-routing)
+target_include_directories(test-shard-routing PRIVATE include)
+target_link_libraries(test-shard-routing PRIVATE determ-crypto-c99)
+
+add_executable(test-pending-transfer tests/test_pending_transfer.c
+  src/ledger/pending_transfer.c src/ledger/shard_routing.c src/wire/binary_codec.c)
+target_compile_features(test-pending-transfer PRIVATE c_std_99)
+determ_c99_strict(test-pending-transfer)
+target_include_directories(test-pending-transfer PRIVATE include)
+target_compile_definitions(test-pending-transfer PRIVATE DETERM_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
+target_link_libraries(test-pending-transfer PRIVATE determ-crypto-c99)
+
+add_executable(test-binary-codec tests/test_binary_codec.c src/wire/binary_codec.c)
+target_compile_features(test-binary-codec PRIVATE c_std_99)
+determ_c99_strict(test-binary-codec)
+target_include_directories(test-binary-codec PRIVATE include src)
+
+# The C99 socket prototype currently has a POSIX transport. Keep its integration
+# gate explicit instead of presenting an uncompiled Windows path as supported.
+if(UNIX)
+  add_library(determ-c99-node-core STATIC
     src/consensus/duel_state.c
-    src/consensus/branch_resolver.c
     src/consensus/dda.c
     src/crypto/vdf.c
+    src/time/clock.c
+    src/net/virtual_transport.c
+    src/net/event_loop.c
+    src/net/k2_net.c
+    src/net/peer_mesh.c
+    src/net/reactor.c
     src/wire/parser.c
     src/wire/json_token.c
     src/wire/binary_codec.c
+    src/rpc/json_rpc.c
+    src/rpc/http_rpc_server.c
+    src/storage/block_store.c
     src/ledger/state.c
     src/ledger/shard_routing.c
     src/ledger/pending_transfer.c
-)
-
-if(NOT WIN32)
-    list(APPEND CONSENSUS_SRCS
-        src/net/event_loop.c
-        src/net/k2_net.c
-        src/net/peer_mesh.c
-        src/net/reactor.c
-        src/rpc/json_rpc.c
-        src/rpc/http_rpc_server.c
-        src/storage/block_store.c
-    )
-endif()
-
-add_library(determ_core STATIC ${CRYPTO_SRCS} ${CONSENSUS_SRCS})
-add_library(determ_core_dsf STATIC ${CRYPTO_SRCS} ${CONSENSUS_SRCS})
-target_compile_definitions(determ_core_dsf PUBLIC DETERM_DSF_ENABLED)
-
-# Target Platform Link Libraries
-set(EXTRA_LIBS "")
-if(WIN32)
-    list(APPEND EXTRA_LIBS ws2_32 bcrypt)
-elseif(UNIX AND NOT APPLE)
-    list(APPEND EXTRA_LIBS rt pthread)
-endif()
-
-# C99 Test Suites
-enable_testing()
-
-macro(determ_add_test test_name source_file)
-    add_executable(${test_name} ${source_file})
-    target_link_libraries(${test_name} PRIVATE determ_core ${EXTRA_LIBS})
-    add_test(NAME ${test_name} COMMAND ${test_name})
-endmacro()
-
-macro(determ_add_dsf_test test_name source_file)
-    add_executable(${test_name} ${source_file})
-    target_compile_definitions(${test_name} PRIVATE DETERM_DSF_ENABLED)
-    target_link_libraries(${test_name} PRIVATE determ_core_dsf ${EXTRA_LIBS})
-    add_test(NAME ${test_name} COMMAND ${test_name})
-endmacro()
-
-# Portable Test Targets
-determ_add_test(test-k2-duel tests/test_k2_duel.c)
-determ_add_dsf_test(test-k2-duel-fallback tests/test_k2_duel_fallback.c)
-determ_add_test(test-dda tests/test_dda.c)
-determ_add_test(test-qpc-clock-overflow tests/test_qpc_clock_overflow.c)
-determ_add_test(test-binary-codec tests/test_binary_codec.c)
-determ_add_test(fuzzer-parser tests/fuzzer_parser.c)
-determ_add_test(test-shard-routing tests/test_shard_routing.c)
-determ_add_test(test-pending-transfer tests/test_pending_transfer.c)
-
-# Specialized Test Targets
-add_library(ed25519_bounded_impl OBJECT tests/test_ed25519_bounded.c)
-target_compile_definitions(ed25519_bounded_impl PRIVATE ED25519_BOUNDED_IMPL=1)
-
-add_executable(test-ed25519-bounded tests/test_ed25519_bounded.c $<TARGET_OBJECTS:ed25519_bounded_impl> src/crypto/sha2/sha512.c src/crypto/secure_zero.c src/crypto/ct.c)
-target_link_libraries(test-ed25519-bounded PRIVATE ${EXTRA_LIBS})
-add_test(NAME test-ed25519-bounded COMMAND test-ed25519-bounded)
-
-add_executable(test-dsf-k2-recovery sim/k2_recovery_model.c tests/test_dsf_k2_recovery.c)
-target_include_directories(test-dsf-k2-recovery PRIVATE sim)
-target_compile_definitions(test-dsf-k2-recovery PRIVATE DETERM_DSF_ENABLED)
-target_link_libraries(test-dsf-k2-recovery PRIVATE determ_core_dsf ${EXTRA_LIBS})
-add_test(NAME test-dsf-k2-recovery COMMAND test-dsf-k2-recovery)
-
-if(NOT WIN32)
-    # Determ Node Executable
-    add_executable(determ-node src/determ_node.c)
-    target_link_libraries(determ-node PRIVATE determ_core ${EXTRA_LIBS})
-
-    determ_add_dsf_test(test-execution-env tests/test_execution_env.c)
-    determ_add_dsf_test(test-k2-posw tests/test_k2_posw.c)
-    determ_add_test(test-k2-net-rpc tests/test_k2_net_rpc.c)
-    determ_add_test(test-peer-mesh tests/test_peer_mesh.c)
-    determ_add_test(test-block-store tests/test_block_store.c)
-    determ_add_test(test-http-rpc tests/test_http_rpc.c)
-    determ_add_test(test-ledger-dsso tests/test_ledger_dsso.c)
-    determ_add_dsf_test(test-opaque-dsso tests/test_opaque_dsso.c)
-    determ_add_dsf_test(test-dsf-k2-duel tests/test_dsf_k2_duel.c)
-    determ_add_dsf_test(test-triple-entry-ledger tests/test_triple_entry_ledger.c)
-    determ_add_dsf_test(fuzz-ledger tests/fuzz_ledger.c)
-    determ_add_test(test-rpc-shard-routing tests/test_rpc_shard_routing.c)
-    determ_add_test(test-rpc-pending-transfer tests/test_rpc_pending_transfer.c)
-
-    # Compatibility aliases for legacy targets
-    add_custom_target(determ DEPENDS determ-node)
-    add_custom_target(determ-wallet DEPENDS determ-node)
-    add_custom_target(determ-light DEPENDS determ-node)
-    add_custom_target(determ-cryptotest DEPENDS test-ed25519-bounded)
-    add_custom_target(determ-dsf DEPENDS test-dsf-k2-duel)
-    add_custom_target(d5rp DEPENDS test-k2-duel)
-    add_custom_target(determ-dsso DEPENDS test-ledger-dsso)
-else()
-    # Compatibility aliases for Windows MSBuild
-    add_custom_target(determ DEPENDS test-k2-duel)
-    add_custom_target(determ-wallet DEPENDS test-k2-duel)
-    add_custom_target(determ-light DEPENDS test-k2-duel)
-    add_custom_target(determ-cryptotest DEPENDS test-ed25519-bounded)
-    add_custom_target(determ-dsf DEPENDS test-k2-duel)
-    add_custom_target(d5rp DEPENDS test-k2-duel)
-    add_custom_target(determ-dsso DEPENDS test-k2-duel)
+  )
+  target_compile_features(determ-c99-node-core PUBLIC c_std_99)
+  determ_c99_strict(determ-c99-node-core)
+  target_include_directories(determ-c99-node-core PUBLIC include src)
+  target_link_libraries(determ-c99-node-core PUBLIC determ-crypto-c99)
+  foreach(c99_test k2-net-rpc peer-mesh block-store http-rpc ledger-state rpc-shard-routing rpc-pending-transfer)
+    string(REPLACE "-" "_" c99_test_source "${c99_test}")
+    add_executable(test-${c99_test} tests/test_${c99_test_source}.c)
+    target_link_libraries(test-${c99_test} PRIVATE determ-c99-node-core)
+    determ_c99_strict(test-${c99_test})
+  endforeach()
+  target_compile_definitions(test-rpc-pending-transfer PRIVATE DETERM_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
+  add_executable(determ-node src/determ_node.c)
+  target_link_libraries(determ-node PRIVATE determ-c99-node-core)
+  determ_c99_strict(determ-node)
 endif()

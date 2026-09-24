@@ -1,6 +1,6 @@
 # K2_VDF_Soundness — C99 experiment contracts and consensus blockers
 
-**Status:** Current implementation contract; no production-consensus security proof.
+**Status:** Current implementation contract; no production-consensus security proof. Proof-index ID FB75 (renumbered 2026-09-23 from a duplicate FB70); TLA companion FB74 (`tla/K2LocalAttempt.tla`).
 **Correction date:** 2026-09-22. The former zero-bias, absolute-liveness and unique-block
 theorems in this file are withdrawn for the counterexamples below. Their presence in
 an earlier revision was not evidence that the C99 node implemented those properties.
@@ -133,8 +133,9 @@ supply an independent replacement proof or authorize that pair to act early.
 
 ## 7. Verification boundary
 
-Run C99 checks through `tools/ci_local.sh --c99`, select targets with `--c99-test`,
-and run isolated falsification through `--c99-mutants`. Build success must precede
+Run C99 checks through `tools/ci_local.sh --c99` (`--c99-sanitize` for the same
+targets under ASan + UBSan), select targets with `--c99-test`, and run isolated
+falsification through `--c99-mutants`. Build success must precede
 execution of the selected binary. A failed build does not count as a rejected mutant.
 Unsupported platform cases must be reported distinctly from passes.
 
@@ -158,6 +159,11 @@ mutants after successful fresh builds; `--docs-only` passed 16 guards. Source an
 design review were independent of test color. These results establish only the
 stated checks; Linux/Windows runtime and the C++ FAST suite were not run in this pass.
 
+**Recorded execution (2026-09-23, Linux x86_64):** `--c99` passed 21 targets with GCC 13.3
+and with Clang 18.1; `--c99-sanitize` passed the same 21 under ASan + UBSan (GCC, the
+crypto library instrumented); `--c99-mutants` rejected 106/106 isolated mutants after successful fresh builds (the kqueue-only case platform-skipped); the TLA companion
+(FB74) passed TLC. Same scope limits as above; Windows and Darwin were not run.
+
 ## 8. C99 ledger self-transfer contract
 
 The standalone ledger is not connected to C99 network block acceptance. For a
@@ -174,7 +180,9 @@ failure. A repeated nonce or insufficient gross balance rejects without mutation
 full-state equality after rejection. Isolated mutations restore the aliasing bug,
 charge the gross debit, or omit the nonce update. This closes the self-transfer
 defect only; accumulated-fee overflow is addressed separately in §10. Portable
-state/transaction root encoding still requires correction before broader claims.
+root encoding was corrected on 2026-09-23: the state and transaction roots use
+big-endian leaves, commit the leaf count (SHA-256 of BE64 count ‖ tree root), and
+refuse a count above capacity instead of truncating (`src/ledger/state.c`).
 
 ## 9. C99 ledger nonce exhaustion
 

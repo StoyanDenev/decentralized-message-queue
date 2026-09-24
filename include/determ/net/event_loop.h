@@ -6,6 +6,13 @@
  * Dual-backend:
  *   - macOS / BSD: kqueue (<sys/event.h>)
  *   - Linux:       epoll  (<sys/epoll.h>)
+ * Other platforms compile to an unsupported stub: add/mod/del succeed without
+ * registering anything and poll reports no events.
+ *
+ * Readiness is level-triggered on both backends, whether an fd was registered
+ * by add() or changed by mod(): an fd is reported by every poll while it stays
+ * readable/writable, so a handler may consume part of what is available.
+ * mod() sets the complete interest set; interest it omits is removed.
  *
  * Strictly zero dynamic memory allocations.
  */
@@ -52,7 +59,7 @@ int net_event_loop_init(net_event_loop_t *loop);
 int net_event_loop_add(net_event_loop_t *loop, int fd, uint32_t events, void *user_data);
 
 /*
- * Modify registered events for an FD.
+ * Replace the registered interest set for an FD (NET_EV_READ | NET_EV_WRITE).
  */
 int net_event_loop_mod(net_event_loop_t *loop, int fd, uint32_t events, void *user_data);
 

@@ -5,22 +5,33 @@ A 5-minute walkthrough of the full Determ v1 operator workflow: build, run a 3-n
 ## 1. Build
 
 ```bash
-cmake -S . -B build
-cmake --build build --config Release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --target determ determ-wallet determ-light
 ```
 
-Single binary: `build/Release/determ.exe` (Windows) or `build/determ` (Linux/Mac).
+Three binaries: `build/determ`, `build/determ-wallet` and `build/determ-light` on Linux/macOS, or `build/Release/determ.exe` etc. with MSVC on Windows. The node daemon is `determ`; the wallet and the light client are separate executables. Configuring fetches OpenSSL for the `determ-cryptotest` test oracle (none of the three binaries above links it); `-DDETERM_BUILD_CRYPTOTEST=OFF` skips the fetch. The C99 `determ-node` target is a separate experimental executable, not the node this walkthrough runs.
 
 ## 2. Run the regression suite
 
 ```bash
+bash tools/ci_local.sh             # CMake build into build-linux/ + the FAST suite
+                                   # (tools/run_all.sh, FAST=1) + the doc guards
+bash tools/ci_local.sh --docs-only # the doc guards alone; builds nothing
+```
+
+`tools/ci_local.sh` exports `DETERM_BIN` / `DETERM_WALLET_BIN` / `DETERM_LIGHT_BIN`, so every test runs against the binaries it just built; a bare `tools/test_*.sh` run instead resolves the binary by `tools/common.sh` search order and can pick up a stale build. The multi-node cluster scripts below are not in the FAST suite. To run them by hand, point them at a build first:
+
+```bash
+export DETERM_BIN=$(pwd)/build-linux/determ
+export DETERM_WALLET_BIN=$(pwd)/build-linux/determ-wallet
+export DETERM_LIGHT_BIN=$(pwd)/build-linux/determ-light
 bash tools/test_bearer.sh                  # bearer-wallet TRANSFER round-trip
 bash tools/test_bft_escalation.sh          # K-of-K → BFT fallback when stuck
 bash tools/test_sharded_smoke.sh           # beacon + shard chains start independently
 bash tools/test_domain_registry.sh         # DOMAIN_INCLUSION (no-stake validators)
 bash tools/test_zero_trust_cross_chain.sh  # cross-chain gossip plumbing
 bash tools/test_cross_shard_transfer.sh    # cross-shard TRANSFER end-to-end
-bash tools/test_equivocation_slashing.sh   # equivocation closed-loop
+bash tools/test_equivocation_slashing.sh   # equivocation evidence closed loop (no L1 consequence, D4)
 bash tools/test_snapshot_bootstrap.sh      # fast-bootstrap from snapshot
 bash tools/test_dapp_snapshot.sh           # S-037 + S-038: DApp registry survives snapshot bootstrap
 ```
@@ -30,16 +41,28 @@ All 9 should print `PASS:`.
 ## 3. Run a 3-node single chain by hand
 
 ```bash
-DETERM=$(pwd)/build/Release/determ.exe
+DETERM=$(pwd)/build/determ            # Windows: $(pwd)/build/Release/determ.exe
+W=$(pwd)/build/determ-wallet          # (same Release/ prefix on Windows)
+L=$(pwd)/build/determ-light
 T=$(pwd)/quickstart
 rm -rf $T && mkdir -p $T
 
-# 3 data dirs + per-node Ed25519 keypairs.
+# 3 data dirs + per-node Ed25519 keys. single_test is the single-chain
+# profile (SINGLE role, M=K=3); the production profiles (web, cluster, ...)
+# are beacon or shard roles and need a matching sharded genesis.
 for n in 1 2 3; do
-  $DETERM init --data-dir $T/n$n --profile web
+  $DETERM init --data-dir $T/n$n --profile single_test
   $DETERM genesis-tool peer-info node$n --data-dir $T/n$n --stake 1000 \
     > $T/p$n.json
 done
+
+# Two bearer wallets (random Ed25519 key + 0x-prefixed address): alice is
+# funded at genesis, bob receives in step 5. Each file holds the private key
+# in plaintext (0600 on POSIX).
+$DETERM account create --out $T/alice.json
+$DETERM account create --out $T/bob.json
+ALICE_ADDR=$(python -c "import json; print(json.load(open('$T/alice.json'))['address'])")
+BOB_ADDR=$(python -c "import json; print(json.load(open('$T/bob.json'))['address'])")
 
 # Genesis: 3 creators, M=K=3, BFT escalation enabled by default.
 cat > $T/gen.json <<EOF
@@ -53,13 +76,17 @@ $(cat $T/p1.json | tr -d '\n'),
 $(cat $T/p2.json | tr -d '\n'),
 $(cat $T/p3.json | tr -d '\n')
   ],
-  "initial_balances": [{"domain": "treasury", "balance": 999}]
+  "initial_balances": [
+    {"domain": "treasury",    "balance": 999},
+    {"domain": "$ALICE_ADDR", "balance": 100}
+  ]
 }
 EOF
 $DETERM genesis-tool build $T/gen.json
 GHASH=$(cat $T/gen.json.hash)
 
-# Wire each node's config (3-mesh, ports 7771-7773 / 8771-8773).
+# Wire each node's config (ports 7771-7773 gossip / 8771-8773 RPC). The
+# single_test round timers are 5 ms, sized for CI; by hand, use 2 s rounds.
 for n in 1 2 3; do
   python -c "
 import json
@@ -67,12 +94,13 @@ with open('$T/n$n/config.json') as f: c = json.load(f)
 c['domain']          = 'node$n'
 c['listen_port']     = 777$n
 c['rpc_port']        = 877$n
-c['bootstrap_peers'] = ['127.0.0.1:7771','127.0.0.1:7772','127.0.0.1:7773']
+c['bootstrap_peers'] = [p for p in ['127.0.0.1:7771','127.0.0.1:7772','127.0.0.1:7773']
+                        if p != '127.0.0.1:777$n']
 c['genesis_path']    = '$T/gen.json'
 c['genesis_hash']    = '$GHASH'
-c['chain_path']      = '$T/n$n/chain.json'
-c['key_path']        = '$T/n$n/node_key.json'
-c['data_dir']        = '$T/n$n'
+c['tx_commit_ms']    = 2000
+c['block_sig_ms']    = 2000
+c['abort_claim_ms']  = 1000
 with open('$T/n$n/config.json','w') as f: json.dump(c,f,indent=2)
 "
 done
@@ -85,6 +113,8 @@ $DETERM start --config $T/n3/config.json > $T/n3/log 2>&1 &
 sleep 15
 $DETERM status --rpc-port 8771   # height should be > 1
 ```
+
+`init` wrote each node's key as plaintext `node_key.json`. To keep it encrypted at rest instead (a DNK1 container, `node_key.bin`), pass `--passphrase-from file:<path>` to `init` and to `start` (see `CLI-REFERENCE.md`).
 
 Stop the cluster with `kill %1 %2 %3` when done.
 
@@ -99,57 +129,48 @@ $DETERM committee --rpc-port 8771              # current epoch's K committee
 $DETERM show-account treasury --rpc-port 8771  # account state (balance + nonce)
 ```
 
-## 5. Send a TRANSFER from a bearer wallet
+## 5. Send a TRANSFER
 
 ```bash
-# Generate a bearer wallet (random Ed25519 key + 0x-prefixed address).
-$DETERM account create --out $T/alice.json
-ALICE_ADDR=$(python -c "import json; print(json.load(open('$T/alice.json'))['address'])")
+# From alice's bearer wallet (funded with 100 at genesis) to bob.
+$DETERM balance $ALICE_ADDR --rpc-port 8771     # 100
 ALICE_PRIV=$(python -c "import json; print(json.load(open('$T/alice.json'))['privkey'])")
-
-# Fund Alice via a TRANSFER from treasury... but wait — only registered
-# domains in initial_balances have balance. Actually treasury is in
-# initial_balances above. Real flow: pre-fund Alice in genesis, OR
-# transfer from a node1 (creators receive subsidy + fees). For this
-# quickstart, transfer from node1 (which has accumulated subsidy):
-$DETERM send node1 100 --rpc-port 8771   # not directly — node1's own
-                                          # priv key is in $T/n1/node_key.json
-                                          # CLI authoring TRANSFERs from
-                                          # registered domains is a node-
-                                          # local op (not an RPC).
-
-# Easier: from a bearer wallet that you pre-funded in initial_balances.
-# Set initial_balances = [{"domain": "$ALICE_ADDR", "balance": 100}, ...]
-# in genesis BEFORE step 3, then send_anon works:
 $DETERM send_anon "$BOB_ADDR" 25 "$ALICE_PRIV" --rpc-port 8771
+sleep 10
+$DETERM balance $BOB_ADDR --rpc-port 8771       # 25
+
+# From node1's registered domain: `send` asks the node to sign with its own key.
+$DETERM send "$BOB_ADDR" 5 --rpc-port 8771
 ```
+
+`send_anon` takes the private key as a positional argument, so it is visible in the process table and the shell history; the S-115 `--*-from` flags do not cover it. For keys you care about, sign offline with a keyfile instead (`determ-light verify-and-submit`, §12).
 
 ## 6. Snapshot create + fetch + restore
 
 ```bash
-# Operator dumps the running chain's state.
-$DETERM snapshot create --out $T/snap.json --rpc-port 8771
+# Operator dumps the running chain's state. The file is the binary DSN1 record.
+$DETERM snapshot create --out $T/snap.bin --rpc-port 8771
 
 # Verify the file.
-$DETERM snapshot inspect --in $T/snap.json
+$DETERM snapshot inspect --in $T/snap.bin
 
 # Fetch the same snapshot from a remote peer over the gossip wire
 # (no genesis or chain config locally — pure network client).
-$DETERM snapshot fetch --peer 127.0.0.1:7771 --out $T/snap2.json
+$DETERM snapshot fetch --peer 127.0.0.1:7771 --out $T/snap2.bin
 
 # Bootstrap a brand-new node from the snapshot (no genesis required).
 mkdir -p $T/receiver
-$DETERM init --data-dir $T/receiver
+$DETERM init --data-dir $T/receiver --profile single_test
 python -c "
 import json
 with open('$T/receiver/config.json') as f: c = json.load(f)
-c['domain']        = 'receiver'
-c['listen_port']   = 7799
-c['rpc_port']      = 8799
-c['snapshot_path'] = '$T/snap.json'   # ← triggers fast-bootstrap
-c['chain_path']    = '$T/receiver/chain.json'
-c['key_path']      = '$T/receiver/node_key.json'
-c['data_dir']      = '$T/receiver'
+c['domain']         = 'receiver'
+c['listen_port']    = 7799
+c['rpc_port']       = 8799
+c['snapshot_path']  = '$T/snap.bin'   # ← triggers fast-bootstrap
+c['tx_commit_ms']   = 2000
+c['block_sig_ms']   = 2000
+c['abort_claim_ms'] = 1000
 with open('$T/receiver/config.json','w') as f: json.dump(c,f,indent=2)
 "
 $DETERM start --config $T/receiver/config.json > $T/receiver/log 2>&1 &
@@ -158,24 +179,27 @@ grep "restored from snapshot" $T/receiver/log
 $DETERM status --rpc-port 8799   # head_hash matches snapshot
 ```
 
+The restored node holds the snapshot's state plus its tail headers (16 by default), so its `status` reports that tail's length as `height` and the tail's first header as `genesis`; the `head_hash` is the snapshot's.
+
 ## 7. Light-client trustless verification (v2.2)
 
-Demonstrates the full v2.2 trustless verification chain — fetch any state from an untrusted full node, verify locally against a pinned trusted root. Four CLIs compose:
+Demonstrates the trustless verification chain — fetch any state from an untrusted full node, verify locally against a committee-bound root. The `determ` CLIs below compose with `determ-light verify-state-root`, which supplies the root:
 
 ```bash
 # 1. Fetch a slice of block headers (Block JSON minus heavy
-#    collections; light-client header-sync primitive).
-$DETERM headers --rpc-port 8771 --from 0 --count 10 > headers.json
+#    collections; light-client header-sync primitive). Start at 1:
+#    genesis carries no committee signatures.
+$DETERM headers --rpc-port 8771 --from 1 --count 10 > headers.json
 
 # 2. Verify the prev_hash chain (chain-of-hashes integrity).
 #    Optional --genesis-hash pins the genesis when starting at 0.
 $DETERM verify-headers --in headers.json
 #   → OK
-#     verified 10 header(s) 0..9
+#     verified 10 header(s) 1..10
 
-# 3. Verify K-of-K committee signatures on a header.
-#    `determ validators --json` emits the {domain, ed_pub} array
-#    that verify-block-sigs expects, no transformation needed.
+# 3. Verify K-of-K committee signatures on a header (the first one in
+#    headers.json). `determ validators --json` emits the {domain, ed_pub}
+#    array that verify-block-sigs expects, no transformation needed.
 $DETERM validators --rpc-port 8771 --json > committee.json
 $DETERM verify-block-sigs --header headers.json --committee committee.json
 #   → OK
@@ -183,19 +207,17 @@ $DETERM verify-block-sigs --header headers.json --committee committee.json
 #     mode: MD (full K-of-K)
 #     verified sigs: 3/3
 
-# 4. Pin a verified state_root and verify any state field against it.
-#    Step 1 returned headers with state_root in each; pick one.
-STATE_ROOT=$(python -c "
-import json
-hdrs = json.load(open('headers.json'))['headers']
-# Pick the last header that has a state_root populated.
-for h in reversed(hdrs):
-    if 'state_root' in h:
-        print(h['state_root']); break")
-
-# Fetch a state-proof for an account, then verify against the pinned
-# state_root.
+# 4. Fetch a state-proof for an account. The state_proof RPC serves the
+#    head only; the proof's "height" is the chain length, so its root is the
+#    state_root of block height-1.
 $DETERM state-proof --rpc-port 8771 --ns a --key treasury > proof.json
+PH=$(python -c "import json; print(json.load(open('proof.json'))['height'])")
+
+# 5. Get that block's state_root bound to the committee, then verify the
+#    proof against it. --wait lets the next block arrive if needed.
+STATE_ROOT=$($L verify-state-root --rpc-port 8771 --genesis $T/gen.json \
+               --height $((PH - 1)) --wait 10 --json \
+             | python -c "import sys,json; print(json.load(sys.stdin)['state_root'])")
 $DETERM verify-state-proof --in proof.json --state-root "$STATE_ROOT"
 #   → OK
 #     state_root: <hex>
@@ -207,15 +229,21 @@ $DETERM verify-state-proof --in proof.json --state-root "$STATE_ROOT"
 **What this proves:**
 - The full node serving the headers might be tampering with them; the chain-of-hashes check catches re-ordered/spliced headers.
 - The full node might supply forged committee signatures; `verify-block-sigs` catches them by verifying against the pinned committee pubkeys.
-- The full node might fabricate a state_root that's self-consistent with its tampered state; pinning `--state-root` from a verified header forces the proof to verify against the *trusted* root, defeating that attack.
+- The full node might fabricate a state_root that's self-consistent with its tampered state; pinning `--state-root` to the committee-bound root forces the proof to verify against the *trusted* root, defeating that attack. The committee does not sign a block's `state_root` (`compute_block_digest` excludes it), so the `state_root` field of a header from `determ headers` is not trusted on its own. `verify-state-root` binds it through the committee-signed successor: it recomputes block `H`'s hash from the full block and checks it against block `H+1`'s signed `prev_hash`. For the current head there is no successor yet, which is why step 5 may need `--wait`.
 
-The pinned committee pubkeys are the bootstrap-trust anchor: a light client obtains them from a trusted source (registry snapshot signed by the founders, baked-in genesis pubkeys, etc.) and then chains verification forward via the four CLIs above.
+The pinned committee pubkeys are the bootstrap-trust anchor: a light client obtains them from a trusted source (registry snapshot signed by the founders, baked-in genesis pubkeys, etc.) and then chains verification forward via the CLIs above.
 
 **Snapshot-level trustless verification** complements the per-field state-proof path:
 
 ```bash
-# Verify a downloaded snapshot's whole state Merkle against a pinned root.
-$DETERM snapshot inspect --in $T/snap.json --state-root "$STATE_ROOT"
+# Verify a downloaded snapshot's whole state Merkle against the committee-bound
+# root at the snapshot's own height.
+SNAP_H=$($DETERM snapshot inspect --in $T/snap.bin --dump \
+         | python -c "import sys,json; print(json.load(sys.stdin)['block_index'])")
+SNAP_ROOT=$($L verify-state-root --rpc-port 8771 --genesis $T/gen.json \
+              --height $SNAP_H --wait 10 --json \
+            | python -c "import sys,json; print(json.load(sys.stdin)['state_root'])")
+$DETERM snapshot inspect --in $T/snap.bin --state-root "$SNAP_ROOT"
 #   → snapshot OK + "trusted root: ✓ matches --state-root"
 ```
 
@@ -228,7 +256,7 @@ For a beacon + S-shard deployment, see `tools/test_cross_shard_transfer.sh` — 
 ```bash
 # Synthesize off-chain via Python (Ed25519 signing) — see
 # tools/test_equivocation_slashing.sh for the full template.
-# Then submit:
+# Then submit (the test submits to every node, so each producer holds it):
 python -c "
 import socket, json
 ev = json.load(open('evidence.json'))
@@ -236,7 +264,7 @@ s = socket.create_connection(('127.0.0.1', 8771))
 req = json.dumps({'method':'submit_equivocation','params':{'event': ev}})
 s.sendall((req + '\n').encode())
 print(s.recv(4096).decode().strip())
-# → {\"error\":null,\"result\":{\"accepted\":true,\"equivocator\":\"node1\",\"block_index\":1}}
+# → {\"error\":null,\"result\":{\"accepted\":true,\"block_index\":1,\"equivocator\":\"node1\",\"kind\":0}}
 "
 ```
 
@@ -248,9 +276,9 @@ Deploy a chain with `governance_mode = 1` and N founder keyholders. Then any tim
 
 ```bash
 # Build genesis with 3 founder keyholders (use existing validator keys)
-PK1=$(python -c "import json; print(json.load(open('n1/node_key.json'))['pubkey'])")
-PK2=$(python -c "import json; print(json.load(open('n2/node_key.json'))['pubkey'])")
-PK3=$(python -c "import json; print(json.load(open('n3/node_key.json'))['pubkey'])")
+PK1=$(python -c "import json; print(json.load(open('$T/n1/node_key.json'))['pubkey'])")
+PK2=$(python -c "import json; print(json.load(open('$T/n2/node_key.json'))['pubkey'])")
+PK3=$(python -c "import json; print(json.load(open('$T/n3/node_key.json'))['pubkey'])")
 
 # In your genesis JSON:
 #   "governance_mode": 1,
@@ -258,9 +286,9 @@ PK3=$(python -c "import json; print(json.load(open('n3/node_key.json'))['pubkey'
 #   "param_keyholders": ["<PK1>", "<PK2>", "<PK3>"]
 
 # Sign + submit a PARAM_CHANGE: MIN_STAKE = 2000 (8-byte LE)
-PRIV1=$(python -c "import json; print(json.load(open('n1/node_key.json'))['priv_seed'])")
-PRIV2=$(python -c "import json; print(json.load(open('n2/node_key.json'))['priv_seed'])")
-PRIV3=$(python -c "import json; print(json.load(open('n3/node_key.json'))['priv_seed'])")
+PRIV1=$(python -c "import json; print(json.load(open('$T/n1/node_key.json'))['priv_seed'])")
+PRIV2=$(python -c "import json; print(json.load(open('$T/n2/node_key.json'))['priv_seed'])")
+PRIV3=$(python -c "import json; print(json.load(open('$T/n3/node_key.json'))['priv_seed'])")
 
 $DETERM submit-param-change \
   --priv "$PRIV1" --from node1 \
@@ -272,15 +300,13 @@ $DETERM submit-param-change \
   --rpc-port 8771
 ```
 
-After block 50 finalizes, `snapshot inspect` shows `min_stake: 2000`. Whitelist of mutable parameters: see `docs/PROTOCOL.md` §13. Off-list parameters (committee size K, sharding mode) require a new chain genesis.
+`--priv` has a `--priv-from <file:path|env:NAME|prompt>` twin that keeps the key off the command line; the `--keyholder-sig` values have none (S-115). After block 50 finalizes, `snapshot inspect` shows `min_stake: 2000`. Whitelist of mutable parameters: see `docs/PROTOCOL.md` §13. Off-list parameters (committee size K, sharding mode) require a new chain genesis.
 
 ### Offline / air-gapped authoring (determ-wallet)
 
 `submit-param-change` builds, signs, and submits in one RPC call. For an air-gapped keyholder setup, `determ-wallet` (which never touches a daemon) splits the authoring into a build → lint → verify pipeline you run *before* submission:
 
 ```bash
-W=./build/Release/determ-wallet
-
 # 1. Build the unsigned PARAM_CHANGE body + the per-keyholder signing preimage.
 $W param-change-build --name MIN_STAKE --value 2000 \
    --effective-height 50 --nonce 0 --from node1 --out pc.json
@@ -308,83 +334,94 @@ Lint and verify answer **different** questions: a bad-width value can carry a pe
 The `determ-wallet` binary is separate from the chain daemon. Generate a recovery setup for any 32-byte secret (typically your Ed25519 seed):
 
 ```bash
-# Split a seed into 3-of-5 shares with passphrase protection
-SEED="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-./build/Release/determ-wallet create-recovery \
-  --seed $SEED --password "my-recovery-passphrase" \
-  -t 3 -n 5 --out wallet_backup.json
+# Split a seed into 3-of-5 shares with passphrase protection. The
+# --*-from forms keep both secrets off the command line.
+( umask 077
+  printf '%s\n' 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef > seed.hex
+  printf '%s\n' 'my-recovery-passphrase' > pass.txt )
+$W create-recovery \
+  --seed-from file:seed.hex --password-from file:pass.txt \
+  -t 3 -n 5 --out wallet_backup.drs
 
-# Distribute wallet_backup.json's envelopes to 5 different locations
-# (cloud storage, hardware token, trusted peers, paper backup, etc.)
+# wallet_backup.drs is one binary DRS1 container holding all five envelopes.
 
-# Recover any time using >=3 of the 5 guardians:
-./build/Release/determ-wallet recover \
-  --in wallet_backup.json \
-  --password "my-recovery-passphrase" \
+# Recover any time using >=3 of the 5 guardians (indices 0-4):
+$W recover \
+  --in wallet_backup.drs \
+  --password-from file:pass.txt \
   --guardians 0,2,4
 # → 0123456789abcdef...
 ```
 
-For under-quorum compromise resistance against guardians, use `--scheme opaque`. The development-stub adapter (default today) is offline-grindable from any single compromised guardian; the wallet's `is_stub()` flag reports this and `docs/proofs/WalletRecovery.md` (FA12) documents the bound degradation. Production deployments should wait for **v2.14 — Real OPAQUE wallet recovery** (real `libopaque` integration; tracked in `docs/V2-DESIGN.md`; status gated on the upstream-VLA MSVC porting work in `wallet/PHASE6_PORTING_NOTES.md`).
+The only recovery scheme is `passphrase`. Each share is sealed under the same password (DWE2: Argon2id + AES-256-GCM), so whoever holds the file and the password recovers the seed, and the password's strength is the whole defense against offline guessing. `--scheme opaque` is rejected: the OPAQUE guardian adapter was de-scoped and deleted (DECISION-LOG 2026-07-03); `docs/proofs/WalletRecovery.md` (FA12) covers the shipped passphrase path.
 
 ## 12. Light-client workflow
 
-The `determ-light` binary is a trust-minimized light-client wallet. Unlike `determ-wallet` (which never talks to a daemon), `determ-light` reads chain state via a daemon's RPC and locally verifies every response against a pinned genesis hash + the committee-signed `state_root`. A malicious or compromised daemon cannot serve fabricated balances, nonces, or chain history to an honest `determ-light` client — the client refuses on hash mismatch.
+The `determ-light` binary is a trust-minimized light-client wallet. Unlike `determ-wallet` (which never talks to a daemon), `determ-light` reads chain state via a daemon's RPC and locally verifies every response against a pinned genesis hash + the committee-bound `state_root`. A malicious or compromised daemon cannot serve fabricated balances, nonces, or chain history to an honest `determ-light` client — the client refuses on hash mismatch.
+
+Reads anchored at the chain head need the head's committee-signed successor (the S-042 binding of §7); `--wait <s>` blocks up to `s` seconds for it, and without it such a read fails closed.
 
 ```bash
 # Step 1: verify the daemon's chain end-to-end against the genesis pin.
 # Anchors genesis, walks every header, checks K-of-K committee sigs.
-./build/Release/determ-light verify-chain \
-  --rpc-port 8771 --genesis genesis.json
+$L verify-chain \
+  --rpc-port 8771 --genesis $T/gen.json
 
 # Step 2: read alice's balance trustlessly. The composite cross-checks
 # the daemon's cleartext `account` reply against a Merkle state-proof
-# anchored at the verified state_root.
-./build/Release/determ-light balance-trustless \
-  --rpc-port 8771 --genesis genesis.json --domain alice --json
+# anchored at the committee-bound state_root.
+$L balance-trustless \
+  --rpc-port 8771 --genesis $T/gen.json --domain $ALICE_ADDR --json --wait 10
 
 # Step 3: send a TRANSFER end-to-end with a trustless-fetched nonce.
-# Signs offline with the keyfile, submits via the daemon's RPC.
-./build/Release/determ-light verify-and-submit \
-  --rpc-port 8771 --genesis genesis.json --keyfile alice.json \
-  --to 0xbob... --amount 100 --fee 0
+# Signs offline with a DAK1 keyfile, submits via the daemon's RPC.
+# determ-wallet account-import writes the DAK1 file from a raw private key.
+( umask 077
+  python -c "import json; print(json.load(open('$T/alice.json'))['privkey'])" > $T/alice.priv )
+$W account-import --priv-from file:$T/alice.priv --out $T/alice.dak
+$L verify-and-submit \
+  --rpc-port 8771 --genesis $T/gen.json --keyfile $T/alice.dak \
+  --to $BOB_ADDR --amount 10 --fee 0 --wait 10
 
 # Step 4 (R39+1 A3): monitor a daemon's head trust-minimized over time.
 # Anchors genesis once, then re-verifies the head + K-of-K committee sigs
 # every --interval seconds. One TICK line per poll; SIGINT for clean exit.
-./build/Release/determ-light watch-head \
-  --rpc-port 8771 --genesis genesis.json --interval 5 --count 10
+$L watch-head \
+  --rpc-port 8771 --genesis $T/gen.json --interval 5 --count 10
 
 # Step 5 (R39+2 B3): capture a verifiable header archive for audit.
-# Anchors genesis, fetches + committee-sig-verifies headers [0, head),
-# and writes a self-contained archive an auditor re-verifies offline.
-./build/Release/determ-light export-headers \
-  --rpc-port 8771 --genesis genesis.json --from 0 --count 10 \
-  --out headers_archive.json
+# Anchors genesis, fetches + committee-sig-verifies headers [0, 10), and
+# writes a self-contained archive; --include-committee-sigs keeps the
+# signatures so the offline re-check can verify them too.
+$L export-headers \
+  --rpc-port 8771 --genesis $T/gen.json --from 0 --count 10 \
+  --include-committee-sigs --out headers_archive.json
 
 # Step 6 (R39+3 C3): re-verify the archive months later with no daemon.
-# Pure offline cryptographic re-check against the pinned genesis only.
-./build/Release/determ-light verify-archive \
-  --in headers_archive.json --genesis genesis.json
+# Pure offline cryptographic re-check against the pinned genesis only;
+# --require-sigs fails an archive exported without signatures.
+$L verify-archive \
+  --in headers_archive.json --genesis $T/gen.json --require-sigs
 
-# Step 7 (R40 D3): verified balance trajectory over an epoch.
+# Step 7 (R40 D3): verified balance trajectory over a height range.
 # Each sampled height's state_root is committee-verified; balance/nonce
 # are Merkle-verified at head (the state_proof RPC is head-only).
-./build/Release/determ-light account-history \
-  --rpc-port 7778 --genesis genesis.json --domain alice --from 100 --to 200 --step 10
+$L account-history \
+  --rpc-port 8771 --genesis $T/gen.json --domain treasury --from 1 --to 20 --step 5 --wait 10
 
 # Step 8 (R40 E3): confirm a payment landed, trustlessly.
 # INCLUDED / NOT-INCLUDED / UNVERIFIABLE verdict on whether tx <hex> is
 # in committee-signed block <B>; recomputes tx_root from the body and
 # gates on the committee-signed value (STRONG regime — no daemon trust).
-./build/Release/determ-light verify-tx-inclusion \
-  --rpc-port 7778 --genesis genesis.json --tx-hash <hex> --height <B>
+# `determ show-tx <hex>` reports the block_index to pass as --height.
+$L verify-tx-inclusion \
+  --rpc-port 8771 --genesis $T/gen.json --tx-hash <hex> --height <B>
 
-# Step 9 (R40 F3): anchor the committee-verified state_root at a height.
-# Reports the state_root committed at <H>, committee-signed (not daemon-
-# asserted), bound to the pinned genesis — feed it to verify-state-proof
-# --state-root to verify a state field against a trust-anchored root.
-determ-light verify-state-root --rpc-port 7778 --genesis genesis.json --height 150
+# Step 9 (R40 F3): anchor the committee-bound state_root at a height.
+# Reports the state_root committed at <H>, bound through the committee-signed
+# successor block (not daemon-asserted) and to the pinned genesis — feed it
+# to verify-state-proof --state-root to verify a state field against it.
+$L verify-state-root --rpc-port 8771 --genesis $T/gen.json --height 15
 ```
 
 ### Daemon-free verification from exported files
@@ -392,8 +429,6 @@ determ-light verify-state-root --rpc-port 7778 --genesis genesis.json --height 1
 The steps above re-fetch from a live daemon on every run. To verify a chain segment **offline** — from a checkpoint bundle, with no daemon at verify time — export the headers + committee once, then verify the files:
 
 ```bash
-L=./build/Release/determ-light
-
 # Export the inputs (the only steps that touch a daemon):
 $L fetch-headers    --rpc-port 8771 --from 0 --count 50 --out headers.json
 $L fetch-validators --rpc-port 8771                      --out committee.json
@@ -450,5 +485,5 @@ See `docs/proofs/UnderQuorumMerge.md` (FA9) for the safety argument across BEGIN
 - `README.md` §18.5 — wallet recovery (A2).
 - `README.md` §19 — formal verification (FA-track + FB-track).
 - `README.md` §17 — explicit non-goals (no smart contracts, no bridges, no oracles).
-- `tools/` — behavioral tests of every protocol feature (424 regression suites; `docs/README.md` has a representative table).
-- `docs/proofs/` — formal-verification proofs covering every safety-critical mechanism (F0 + FA1–FA12 + FA-Apply-1..FA-Apply-17 + MakeContribCommitmentBackwardCompat + F2ViewReconciliationAnalysis + RpcAuthHmacSoundness + WireFormatBackwardCompat + S014RateLimiterSoundness + BlockchainStateIntegrity + S014ConcurrencyAnalysis + S017UnstakeApplyConsistency + JsonValidationSoundness + S028AnonAddressNormalization + S006ContribMsgEquivocation + S010S011SybilEconomics + WalletRecoveryFlows + S022WireFormatCaps + S033StateRootNamespaceCoverage + S029ForkChoiceSoundness + RpcInputValidationDefense + S001RpcAuthSoundness + S004KeyfileAtRest + S007OverflowProtection + S012SnapshotStateRootGate + S031ConcurrencyComposition + S036UnderQuorumMerge + S013PerSignerCap + S020CommitteeSelection + S008BoundedMempool + S027InfoLeakage + S026TcpKeepalive + F2ApplyComposition + S015AsyncSavePersistence + S024EpochBlocks + S009DelayHashRemoval + S025BFTEscalationSoundness + S005PassphraseKeyfile + UnitTestCoverageMap + S014RateLimiterDDOSResistance + S022WireFormatCapsCompleteness + S016InboundReceiptTimeOrdered + S019DAppEndpointSpoof + S023NodeKeyfileEncryption + F2RPCAuthEnvComposition analytic, plus FB1–FB42 TLA+ specs).
+- `tools/` — behavioral tests of the protocol features (the FAST suite runs through `tools/ci_local.sh`; `docs/README.md` has a representative table).
+- `docs/proofs/` — the per-claim proof record (F0 + FA1–FA12 + FA-Apply-* + the S-item closure analyses) plus the TLA+ models; `docs/proofs/README.md` indexes every document with its status, including the withdrawn FA3 claim.

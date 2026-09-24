@@ -14,7 +14,10 @@
 #   tools/ci_local.sh [--build-dir DIR] [--skip-build] [--jobs N]
 #   tools/ci_local.sh --c99 [--c99-test TARGET] [--jobs N]
 #   tools/ci_local.sh --c99-mutants [--jobs N]
+#   tools/ci_local.sh --c99-sanitize [--jobs N]  # the C99 targets under ASan+UBSan
 #   tools/ci_local.sh --docs-only
+#   tools/ci_local.sh --tla                   # TLC over docs/proofs/tla/*.cfg
+#                                             # (java + a pinned tla2tools.jar)
 #   tools/ci_local.sh --sanitize [--jobs N]   # UBSan pass over the consensus
 #                                             # surface (Linux/GCC-only, heavier)
 #   tools/ci_local.sh --asan [--jobs N]       # ASan over the in-process net/
@@ -41,7 +44,6 @@
 # GitHub Actions runs the same content (.github/workflows/ci.yml).
 set -u
 cd "$(dirname "$0")/.."
-export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 JOBS=$( (command -v nproc >/dev/null && nproc) \
      || (command -v sysctl >/dev/null && sysctl -n hw.ncpu 2>/dev/null) \
@@ -50,15 +52,16 @@ SKIP_BUILD=0
 BUILD_DIR=""
 SANITIZE=0
 ASAN=0
-C99=1
-C99_EXPLICIT=0
+C99=0
 C99_MUTANTS=0
+C99_SANITIZE=0
 DOCS_ONLY=0
+TLA=0
 C99_TESTS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --help|-h)
-      sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,/^set -u/{/^set -u/!p;}' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     --build-dir)
       [ $# -ge 2 ] || { echo "FAIL: --build-dir requires a directory"; exit 1; }
@@ -69,12 +72,14 @@ while [ $# -gt 0 ]; do
       JOBS="$2"; shift 2 ;;
     --sanitize) SANITIZE=1; shift ;;
     --asan) ASAN=1; shift ;;
-    --docs-only) DOCS_ONLY=1; C99=0; shift ;;
-    --c99) C99=1; C99_EXPLICIT=1; shift ;;
+    --docs-only) DOCS_ONLY=1; shift ;;
+    --c99) C99=1; shift ;;
     --c99-test)
       [ $# -ge 2 ] || { echo "FAIL: --c99-test requires a target"; exit 1; }
-      C99=1; C99_EXPLICIT=1; C99_TESTS+=("$2"); shift 2 ;;
+      C99=1; C99_TESTS+=("$2"); shift 2 ;;
     --c99-mutants) C99=1; C99_MUTANTS=1; shift ;;
+    --c99-sanitize) C99=1; C99_SANITIZE=1; shift ;;
+    --tla) TLA=1; shift ;;
     *) echo "unknown arg: $1 (see --help)"; exit 1 ;;
   esac
 done
@@ -85,54 +90,55 @@ run_doc_guards() {
   DOC_GUARD_LOG=$(mktemp "${TMPDIR:-/tmp}/determ-doc-guard.XXXXXXXX") || return 1
   for g in test_doc_citation_bounds test_doc_tier_check test_docs_link_check \
            test_proofs_index_complete test_proofs_no_deleted_crypto_backend \
-           test_security_ledger_coherence; do
-    if [ -f "tools/$g.sh" ]; then
-      if bash "tools/$g.sh" >"$DOC_GUARD_LOG" 2>&1; then
-        echo "  PASS: $g"
-      else
-        echo "  FAIL: $g"; cat "$DOC_GUARD_LOG"; GUARDS_OK=0
-      fi
+           test_param_change_whitelist_coherence \
+           test_rpc_hmac_canonical_parity test_keygen_failclosed_guard \
+           test_wallet_accounting_credit_gate_source \
+           test_dapp_registry_active_boundary_coherence \
+           test_registrant_lifecycle_classifier_coherence \
+           test_light_state_root_binding_guard \
+           test_light_resume_monotonicity_guard \
+           test_light_keybind_surface \
+           test_security_ledger_coherence \
+           test_producer_admit_wiring_guard; do
+    if [ ! -f "tools/$g.sh" ]; then
+      echo "  FAIL: $g (tools/$g.sh missing)"; GUARDS_OK=0
+    elif bash "tools/$g.sh" >"$DOC_GUARD_LOG" 2>&1; then
+      echo "  PASS: $g"
+    else
+      echo "  FAIL: $g"; cat "$DOC_GUARD_LOG"; GUARDS_OK=0
     fi
   done
   rm -f "$DOC_GUARD_LOG"
   [ "$GUARDS_OK" -eq 1 ] || { echo "FAIL: ci-local doc guards RED"; return 1; }
 }
 
-if [ "$DOCS_ONLY" -eq 1 ]; then
-  if [ "$C99_EXPLICIT" -ne 0 ] || [ "$SKIP_BUILD" -ne 0 ] || [ "$SANITIZE" -ne 0 ] || [ "$ASAN" -ne 0 ] || [ -n "$BUILD_DIR" ]; then
-    echo "FAIL: --docs-only cannot be combined with build or binary-test modes"
+if [ "$DOCS_ONLY" -eq 1 ] || [ "$TLA" -eq 1 ]; then
+  if [ "$C99" -ne 0 ] || [ "$SKIP_BUILD" -ne 0 ] || [ "$SANITIZE" -ne 0 ] || [ "$ASAN" -ne 0 ] || [ -n "$BUILD_DIR" ] || [ "$DOCS_ONLY" -eq "$TLA" ]; then
+    echo "FAIL: --docs-only and --tla run alone (no build or binary-test modes)"
     exit 1
   fi
+  # 600 s per config: the slowest takes about 2 min; the bound only catches a hang.
+  [ "$TLA" -eq 1 ] && exec bash tools/test_tla_model_check.sh --timeout 600
   run_doc_guards || exit 1
   echo "PASS: ci-local docs-only guards (no binaries built or tested)"
   exit 0
 fi
 
-# Sovereign C99 Unikernel Execution Environment
+# The C99 prototype has a separate, explicitly scoped gate. It never inherits
+# legacy binary search paths, and never permits a skipped build.
 if [ "$C99" -eq 1 ]; then
-  if [ "$SKIP_BUILD" -ne 0 ]; then
-    echo "FAIL: --c99 cannot be combined with --skip-build"
+  if [ "$SKIP_BUILD" -ne 0 ] || [ "$SANITIZE" -ne 0 ] || [ "$ASAN" -ne 0 ]; then
+    echo "FAIL: --c99 cannot be combined with --skip-build, --sanitize, or --asan"
     exit 1
   fi
   if [ "$C99_MUTANTS" -eq 1 ]; then
-    [ -z "$BUILD_DIR" ] && [ "${#C99_TESTS[@]}" -eq 0 ] || {
+    [ -z "$BUILD_DIR" ] && [ "${#C99_TESTS[@]}" -eq 0 ] && [ "$C99_SANITIZE" -eq 0 ] || {
       echo "FAIL: --c99-mutants owns its isolated build directories and test selection"; exit 1; }
     exec python3 tools/c99_mutants.py --jobs "$JOBS"
   fi
-  case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*) DEFAULT_DIR="build" ;;
-    *)                    DEFAULT_DIR="build-linux" ;;
-  esac
-  BUILD_DIR="${BUILD_DIR:-$DEFAULT_DIR}"
-  HAS_CUSTOM_TESTS=0
-  [ "${#C99_TESTS[@]}" -gt 0 ] && HAS_CUSTOM_TESTS=1
+  # Sourced only from this wrapper; all entry points remain ci_local.
   source tools/ci_c99.sh
-  rc=$?
-  [ "$rc" -eq 0 ] || exit $rc
-  if [ "$C99_EXPLICIT" -eq 0 ] && [ "$HAS_CUSTOM_TESTS" -eq 0 ] && [ "$SANITIZE" -eq 0 ] && [ "$ASAN" -eq 0 ]; then
-    run_doc_guards || exit 1
-  fi
-  exit 0
+  exit $?
 fi
 
 # ── UBSan mode (--sanitize): the undefined-behavior net for the consensus
@@ -144,8 +150,7 @@ fi
 # serialization + arithmetic + determinism subcommands under it — the surfaces
 # where a determinism-breaking UB would live. Linux/GCC-only and a bit heavier
 # than the fast gate, so it is an OPT-IN job, not part of the default ci_local
-# pass. ASan is intentionally NOT enabled (its shadow-memory instrumentation
-# OOMs on the large main.cpp TU; memory-safety is a separable concern).
+# pass. Memory safety is the separate --asan mode below.
 if [ "$SANITIZE" -eq 1 ]; then
   SAN_DIR="build-linux-ubsan"
   echo "=== ci_local --sanitize: UBSan build of determ ($SAN_DIR) ==="
@@ -163,7 +168,7 @@ if [ "$SANITIZE" -eq 1 ]; then
   # runner (SIGTERM/143). -j2 (with the -O1 from CMakeLists) keeps peak RAM within
   # the runner while staying faster than a serial build (the job has 150-min headroom).
   SAN_JOBS=2; [ "$JOBS" -lt 2 ] && SAN_JOBS="$JOBS"
-  # Minix §6 split: the 11 pure-oracle test-*-c99 subcommands live in the
+  # Minix §6 split: the 10 pure-oracle test-*-c99 subcommands live in the
   # standalone determ-cryptotest binary — build it under UBSan alongside determ
   # so the full c99-crypto surface stays in the sanitize net.
   #
@@ -178,7 +183,7 @@ if [ "$SANITIZE" -eq 1 ]; then
   # and print its tail on failure so a red CI run is self-diagnosing.
   #
   # Targets built SEQUENTIALLY: linking a UBSan+RelWithDebInfo determ (the
-  # 53k-line main.cpp TU) peaks several GB of ld RSS; overlapping it with the
+  # large main.cpp TU) peaks several GB of ld RSS; overlapping it with the
   # determ-cryptotest link/compiles is exactly the OOM class that -j4 already
   # hit on the 16 GB GitHub runner (the SIGTERM/143 note above). Compile
   # parallelism within each target keeps -j$SAN_JOBS; only the giant links
@@ -215,8 +220,11 @@ if [ "$SANITIZE" -eq 1 ]; then
             test-cross-shard-atomicity test-cross-shard-multi-receipt test-cross-shard-outbound-apply \
             test-block-digest test-tx-root test-merkle test-overflow-paths \
             test-sha256 test-argon2id-c99 test-ct-c99 test-ed25519-vectors \
-            test-ed25519-scalar-reduce test-p256-oprf-c99 test-mldsa-c99 test-c99-vectors test-c99-api"
-  # The 11 moved oracle subcommands (Minix §6) run on the UBSan determ-cryptotest.
+            test-ed25519-scalar-reduce test-p256-oprf-c99 test-mldsa-c99 test-c99-vectors test-c99-api \
+            test-pedersen-c99 test-bp-ipa-c99 test-bp-rangeproof-c99 test-bp-agg-rangeproof-c99 \
+            test-p256-balance-c99 test-p256-confidential-tx-c99 test-p256-ctx-bundle test-rng-c99 \
+            test-view-key-c99 test-enote-c99 test-notekey-modern-c99 test-notekey-fips-c99"
+  # The 10 moved oracle subcommands (Minix §6) run on the UBSan determ-cryptotest.
   SAN_CMDS_CT="test-sha2-c99 test-blake2b-c99 test-sha3-c99 test-chacha20-c99 test-xchacha-c99 \
             test-aes-c99 test-ed25519-c99 test-x25519-c99 test-p256-c99 test-p256-h2c-c99"
   san_fail=0
@@ -258,7 +266,7 @@ if [ "$ASAN" -eq 1 ]; then
   cmake -B "$ASAN_DIR" -S . -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDETERM_ASAN=ON \
     >/dev/null 2>&1 || { echo "FAIL: ASan configure"; exit 1; }
   # Same -j2 cap + -O1 (from CMakeLists) as the UBSan build: shadow-memory
-  # instrumentation on the ~15k-line main.cpp TU peaks several GB.
+  # instrumentation on the large main.cpp TU peaks several GB.
   ASAN_JOBS=2; [ "$JOBS" -lt 2 ] && ASAN_JOBS="$JOBS"
   # Exit-code gate + logged output (same fix as the UBSan path above — the
   # grep-gate both swallowed real diagnostics and could false-green a failure
@@ -351,7 +359,7 @@ find_bin() {
 DETERM_BIN=$(find_bin determ)               || { echo "FAIL: determ binary not found under $BUILD_DIR"; exit 1; }
 DETERM_WALLET_BIN=$(find_bin determ-wallet) || { echo "FAIL: determ-wallet binary not found"; exit 1; }
 DETERM_LIGHT_BIN=$(find_bin determ-light)   || { echo "FAIL: determ-light binary not found"; exit 1; }
-# Minix §6 split: the 11 pure-oracle test-*-c99 wrappers run against the
+# Minix §6 split: the 10 pure-oracle test-*-c99 wrappers run against the
 # standalone determ-cryptotest binary (the daemon links zero OpenSSL), so it
 # is REQUIRED for a green FAST suite — fail loudly, not late in a wrapper.
 DETERM_CRYPTOTEST_BIN=$(find_bin determ-cryptotest) || { echo "FAIL: determ-cryptotest binary not found"; exit 1; }

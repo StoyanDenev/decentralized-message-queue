@@ -1,8 +1,10 @@
+> **Correction 2026-09-23:** The removal proof (T-1) stands. The claims that the commit-reveal replacement leaves an attacker zero selective-abort advantage, is "information-theoretic", or dominates delay-hash rest on FA3, which is withdrawn (`SelectiveAbort.md`, correction 2026-09-22). Commit-reveal gives commitment binding only. The member that receives the other K−1 Phase-2 reveals first can compute `delay_output` before revealing and reject that sample by withholding its own reveal; a Phase-2 abort is neither recorded nor suspended, so last-revealer selective abort remains open (S-077). Since D4 an equivocation event is an evidence record with no L1 consequence: nothing below is slashed. The sections below are restated accordingly.
+
 # S009DelayHashRemoval — delay-hash module removal (S-009 / S-015 / S-034 closure)
 
-This document is the structural removal proof closing **S-009** (iterated-SHA-256 delay-hash unenforceable under ASIC asymmetry), **S-015** (the delay-hash variant — separately, the async-save-persistence subtopic with the same ID was retained as a distinct concern; see `S015AsyncSavePersistence.md`), and **S-034** (per-iteration `EVP_MD_CTX` allocation inside `delay_hash_compute`). The closure mechanism is unusual: rather than patch a broken defense, **the entire delay-hash module was deleted** in commit `1b9b086`. This proof formalizes (a) why removal — not repair — is the correct closure, (b) that nothing in the current codebase depends on the deleted module, (c) that the K-of-K commit-reveal randomness protocol (shipped concurrently in commit `14bf3d6`) provides the structural property that delay-hash was meant to provide, and (d) that removing delay-hash creates no safety or liveness regression against the FA1 / FA3 / Liveness-L-1..L-4 conclusions.
+This document is the structural removal proof closing **S-009** (iterated-SHA-256 delay-hash unenforceable under ASIC asymmetry), **S-015** (the delay-hash variant — separately, the async-save-persistence subtopic with the same ID was retained as a distinct concern; see `S015AsyncSavePersistence.md`), and **S-034** (per-iteration `EVP_MD_CTX` allocation inside `delay_hash_compute`). The closure mechanism is unusual: rather than patch a broken defense, **the entire delay-hash module was deleted** in commit `1b9b086`. This proof formalizes (a) why removal — not repair — is the correct closure, (b) that nothing in the current codebase depends on the deleted module, (c) what the K-of-K commit-reveal randomness protocol (shipped concurrently in commit `14bf3d6`) provides in place of delay-hash — commitment binding, not the anti-selective-abort property delay-hash was meant to provide (S-077 is open), and (d) that removing delay-hash creates no safety or liveness regression against the FA1 / Liveness-L-1..L-4 conclusions (FA3's zero-bias claim is withdrawn on its own grounds).
 
-The proof is short and structural by design. There is no algorithmic content; the closure is a deletion. What requires formalization is the no-regression composition: that the K-of-K commit-reveal binding via `compute_block_digest` is the load-bearing replacement, that `signing_bytes` continues to bind every committee-derived input even though the post-Phase-2 secrets reveal them strictly later, and that the rate-limiter (S-014) provides analogous "time-cost" pushback on a different layer of the stack. The verification is empirical: a `grep -r` over `src/` plus `include/` confirms zero remaining functional references to the deleted module — only two stale-comment fossils in headers (cited and tracked, no code dependency) and unrelated `EVP_MD_CTX` usages in the live SHA-256 / Ed25519 paths.
+The proof is short and structural by design. There is no algorithmic content; the closure is a deletion. What requires formalization is the no-regression composition: that the K-of-K commit-reveal binding via `compute_block_digest` is the load-bearing replacement, that `signing_bytes` continues to bind every committee-derived input even though the post-Phase-2 secrets reveal them strictly later, and that the rate-limiter (S-014) provides analogous "time-cost" pushback on a different layer of the stack. The verification is empirical: a `grep -r` over `src/` plus `include/` confirms zero remaining functional references to the deleted module — only two stale-comment fossils in headers (cited and tracked, no code dependency) and the separate VDF module of the experimental C99 `determ-node`, which no C++ target compiles (§4.3). The `EVP_MD_CTX` usages the original audit filtered out are gone since the §3.15 migration (§4.5).
 
 **Companion documents.** `S006ContribMsgEquivocation.md` (S-006 closure — Phase-1 same-generation equivocation detection; the parallel surface to this proof's Phase-2 secret-reveal correctness). `S012SnapshotStateRootGate.md` and `S033StateRootNamespaceCoverage.md` (state_root binding — composition with the digest-binding T-2 invokes). `S014RateLimiterSoundness.md` (S-014 closure — the per-peer-IP token bucket that this proof's T-5 composes with for "time-cost at the network ingress layer"). `S015AsyncSavePersistence.md` (async chain.save subtopic — separately tracked under the S-015 identifier; distinct from this proof's S-015-as-delay-hash-variant subsumption). `Safety.md` (FA1 K-of-K safety — T-3 of this proof inherits the conclusion). `Liveness.md` (L-1..L-4 — T-4 of this proof inherits the conclusion). `SelectiveAbort.md` (FA3 — the commit-reveal randomness binding that replaces the delay-hash defense). `Preliminaries.md` §1.3 (`compute_block_digest` definition + bound-field list — the canonical reference for what `signing_bytes` actually covers post-removal). `docs/SECURITY.md` §S-009 / §S-015 / §S-034 for the closure-status narrative. The removed module's full history is preserved in the git commits `14bf3d6` (commit-reveal replacement) and `1b9b086` (dead-code cleanup).
 
@@ -39,7 +41,7 @@ The combination — ASIC asymmetry defeating the security claim, calibration une
 
 ### 1.3 The deletion decision (commit `1b9b086`)
 
-Commit `14bf3d6` (May 10, 2026) replaced the delay-hash defense with a commit-reveal protocol that achieves the same anti-selective-abort property via SHA-256 preimage resistance (information-theoretic) rather than SHA-256-iteration cost (compute-time). With the commit-reveal protocol providing the actual defense, the delay-hash module was kept temporarily as a legacy stub: `delay_hash_compute(seed, T)` became `SHA256(seed)` (the `T` parameter ignored), so the call sites continued to compile and the in-flight test infrastructure continued to run.
+Commit `14bf3d6` (May 10, 2026) replaced the delay-hash defense with a commit-reveal protocol that binds each member to its Phase-1 secret by a SHA-256 commitment (A2 binding, A3 hiding) instead of relying on SHA-256-iteration cost (compute-time). It does not achieve the anti-selective-abort property: the last revealer can still withhold after computing the output (S-077). With the commit-reveal protocol providing the actual defense, the delay-hash module was kept temporarily as a legacy stub: `delay_hash_compute(seed, T)` became `SHA256(seed)` (the `T` parameter ignored), so the call sites continued to compile and the in-flight test infrastructure continued to run.
 
 Commit `1b9b086` (same day, follow-up) removed the dead infrastructure:
 
@@ -55,7 +57,7 @@ The full diff is preserved in the commit. All 8 regression tests pass in 95s pos
 
 The decision to delete rather than repair was the right one:
 
-- **No salvageable security claim.** §1.2 enumerated five independent structural defects. Repairing any one (e.g., replacing SHA-256 with a non-ASIC-amenable VDF construction) would leave the others. Repairing all of them would be a full redesign — and the commit-reveal alternative (which §2.1 of this proof covers) was strictly simpler.
+- **No salvageable security claim.** §1.2 enumerated five independent structural defects. Repairing any one (e.g., replacing SHA-256 with a non-ASIC-amenable VDF construction) would leave the others. Repairing all of them would be a full redesign — and the commit-reveal alternative (which T-2 of this proof covers) was strictly simpler.
 - **Maintenance cost.** The module touched `Config`, `GenesisConfig`, `TimingProfile`, `Validator`, `Node`, `Producer`, the consensus state machine (`RUNNING_DELAY` phase), and every test config writer. Keeping a dead module compiled — even as a stub — meant every change to any of those surfaces had to remain aware of the dead surface area. Removing it permanently frees future contributors from that maintenance tax.
 - **Reviewer cognitive cost.** A reviewer encountering `delay_hash_compute(seed, T)` would reasonably assume the function does iteration-based delay work — the name and signature both suggest it. Keeping a stub function with a misleading name was a footgun for future code review.
 
@@ -67,13 +69,11 @@ The replacement defense (commit `14bf3d6`) reuses the existing Phase-1 / Phase-2
 - **Phase 2.** Each committee member publishes `BlockSigMsg.dh_secret = s_i` (the now-revealed secret). The receive path validates `SHA256(s_i || pk_i) == ContribMsg.dh_input` for the same signer; on mismatch the `BlockSigMsg` is rejected.
 - **Finalize.** The producer gathers K secrets from `pending_secrets_` in canonical committee order and passes them to `build_body`, which sets `Block.creator_dh_secrets[]` and computes `delay_output = compute_block_rand(delay_seed, ordered_secrets) = SHA256(delay_seed || s_0 || s_1 || ... || s_{K-1})`. The `Block.delay_output` field is the K-of-K-revealed randomness.
 
-The selective-abort defense is now information-theoretic rather than compute-time:
+What the replacement provides is commitment binding, not unbiasedness:
 
-> An attacker who controls (K-1) committee members at height `h` cannot grind candidate randomness across abort generations, because grinding requires knowing the (K-th) honest member's `s_*` — which is preimage-protected by SHA-256 until that member voluntarily reveals it in Phase-2. Once the (K-1) attacker members have committed their `dh_input` values in Phase-1, they cannot retroactively change them (the commits are Ed25519-signed envelopes — an attempt to swap one would constitute equivocation evidence per S-006). The randomness `compute_block_rand(delay_seed, secrets)` is therefore uniformly distributed conditional on the (K-1) attacker commits.
+> An attacker who controls (K-1) committee members at height `h` cannot choose its commitments as a function of the honest member's secret `s_*`, because `s_*` is hidden behind `SHA256(s_* ‖ pk_*)` (A3) until that member reveals it in Phase 2. Once the attacker's members have committed their `dh_input` values in Phase 1, they cannot open them to different secrets (A2), and a second signed commitment at the same generation is equivocation evidence per S-006. What the attacker keeps is the last word: after the honest reveal arrives, an attacker member that has not yet revealed knows every secret, can compute `compute_block_rand(delay_seed, secrets)` itself, and can withhold its own reveal to reject that output. The re-round is a fresh draw it cannot choose, and the veto costs it only its seat at that height — rejection sampling, not choice (S-077, open).
 
-No compute-time assumption. No ASIC concern. No genesis-calibration parameter. The defense reduces to SHA-256 preimage resistance — the same assumption every other digest-binding gate in the protocol already requires.
-
-The compute-time-to-information-theoretic shift is the canonical "Mauborgne" maxim: use information-theoretic security where you can; fall back to computational only where the structural cost is prohibitive. For randomness-binding, the information-theoretic path was strictly cheaper to implement and strictly stronger.
+No compute-time assumption, no ASIC concern and no genesis-calibration parameter are involved: the binding reduces to SHA-256 collision and preimage resistance (A2, A3), the assumptions every other digest-binding gate in the protocol already requires. The shift trades a compute-time assumption that ASICs broke for hash assumptions the protocol already makes; it does not close the last-revealer veto.
 
 ---
 
@@ -82,7 +82,7 @@ The compute-time-to-information-theoretic shift is the canonical "Mauborgne" max
 **Setup.** Let `S_pre` denote the pre-removal source tree at commit `14bf3d6^` (the parent of the commit-reveal replacement commit, which still contained the full delay-hash module). Let `S_post` denote the current source tree at HEAD (post-removal, post-replacement). Let `D = (delay_hash, VDF, EVP_MD_CTX)` denote the set of identifiers whose presence in `S_post` would constitute a residual dependency on the deleted module. Define:
 
 - `R_grep(I, T)` — the result of running `grep -r I T` over tree `T` for identifier `I ∈ D`.
-- `D_filter(R)` — the filter that excludes (a) doc-comment-only references, (b) `EVP_MD_CTX` references inside `src/crypto/sha256.cpp` and `src/crypto/keys.cpp` (these are the live SHA-256 and Ed25519 paths, structurally unrelated to delay-hash; the `EVP_MD_CTX` symbol is OpenSSL's generic message-digest context, used by every SHA-256 user in the codebase), and (c) regression-test references that name the deleted module in their *narrative* (e.g., `tools/test_multinode.sh` describing what the test once exercised). The filtered result `D_filter(R_grep(I, S_post))` is the set of *functional dependencies* on identifier `I` in the post-removal tree.
+- `D_filter(R)` — the filter that excludes (a) doc-comment-only references, (b) `EVP_MD_CTX` references inside `src/crypto/sha256.cpp` and `src/crypto/keys.cpp` (these are the live SHA-256 and Ed25519 paths, structurally unrelated to delay-hash; the `EVP_MD_CTX` symbol is OpenSSL's generic message-digest context, used by every SHA-256 user in the codebase), (c) regression-test references that name the deleted module in their *narrative* (e.g., `tools/test_multinode.sh` describing what the test once exercised), and (d) the VDF module of the experimental C99 `determ-node` (`src/crypto/vdf.c` and the K2 files that use it), a separate construction that is compiled only into the C99 targets (`CMakeLists.txt:547-756`) and not into `determ`, which globs `src/*.cpp` (`CMakeLists.txt:94`, `:248`); its soundness is `K2_VDF_Soundness.md`'s subject, not this proof's. Since the §3.15 migration removed `EVP_MD_CTX` from `src/` (§4.5), rule (b) no longer matches anything. The filtered result `D_filter(R_grep(I, S_post))` is the set of *functional dependencies* on identifier `I` in the post-removal tree.
 
 ### Theorem T-1 (No Delay-Hash Dependencies)
 
@@ -90,12 +90,12 @@ The compute-time-to-information-theoretic shift is the canonical "Mauborgne" max
 
 **Proof.** By direct enumeration of the audit results in §4. The full unfiltered grep result over the post-removal tree returns:
 
-- `src/crypto/sha256.cpp` and `src/crypto/keys.cpp` — both contain `EVP_MD_CTX_new()` / `EVP_MD_CTX_free()` calls. These are the live SHA-256 (chain.cpp / block-digest computation / Merkle path / state_root accumulator) and Ed25519 (signing + verification) paths. `EVP_MD_CTX` is OpenSSL's general-purpose message-digest context handle and is shared by every hash user; it is *not* delay-hash-specific. `D_filter` excludes these per filter rule (b).
-- `include/determ/chain/block.hpp:377` — a stale comment "Local delay: every node computes R = delay_hash(seed, T) on a worker thread." This is doc-only fossil text that survived the deletion. No code in the same header or in any TU references `delay_hash`. `D_filter` excludes this per filter rule (a). Tracked as F-2 below.
+- `EVP_MD_CTX` — no matches since the §3.15 migration (§4.5). At the original audit `src/crypto/sha256.cpp` and `src/crypto/keys.cpp` held the only `EVP_MD_CTX_new()` / `EVP_MD_CTX_free()` calls, in the live SHA-256 and Ed25519 paths; `EVP_MD_CTX` is OpenSSL's general-purpose message-digest context and was never delay-hash-specific. `D_filter` excluded them per rule (b).
+- `src/crypto/vdf.c`, `src/consensus/duel_state.c`, `src/consensus/dda.c`, `src/net/k2_net.c`, `src/rpc/json_rpc.c`, `src/determ_node.c` and the headers they use (`include/determ/crypto/vdf.h`, `include/determ/consensus/dda.h`, `include/determ/consensus/duel_state.h`, `include/determ/net/k2_net.h`) — the experimental C99 `determ-node`'s own VDF module (§4.3-§4.4). `D_filter` excludes these per rule (d).
+- `include/determ/chain/block.hpp:659` — a stale comment "Local delay: every node computes R = delay_hash(seed, T) on a worker thread." This is doc-only fossil text that survived the deletion. No code in the same header or in any TU references `delay_hash`. `D_filter` excludes this per filter rule (a). Tracked as F-2 below.
 - `include/determ/net/messages.hpp:17` — a stale comment "Phase 2: signed block digest + VDF output" in the `MsgType::BLOCK_SIG` documentation. Same status: doc-only fossil; the field name in the actual `BlockSigMsg` struct is now `dh_secret` / `delay_output` (delay_output retained as the field name for the K-secret-derived randomness, even though no iteration delay is involved). `D_filter` excludes per rule (a). Tracked as F-2 below.
 - `tools/test_multinode.sh` — narrative reference describing the test's history; no live code consumes the module. `D_filter` excludes per rule (c).
 - `docs/SECURITY.md` and `docs/proofs/*` — closure-status narration for S-009 / S-015 / S-034. Expected; `D_filter` excludes per rule (a).
-- `README.md` — closure-status narration in the security section. Expected; `D_filter` excludes per rule (a).
 
 After filtering, the residual count is zero. ∎
 
@@ -103,24 +103,24 @@ After filtering, the residual count is zero. ∎
 
 ### Theorem T-2 (K-of-K Commit-Reveal Replaces Delay-Hash)
 
-**Statement.** The K-of-K commit-reveal protocol shipped in commit `14bf3d6` provides a structural property equivalent to or stronger than the pre-removal delay-hash defense, namely: **an attacker controlling (K-1) committee members cannot predict or manipulate `delay_output` before the (K-th) honest member voluntarily reveals their Phase-2 secret**.
+**Statement.** Under A2 and A3, an attacker controlling (K-1) committee members **cannot predict `delay_output` before the (K-th) honest member reveals its Phase-2 secret, and cannot change its own committed secrets after Phase 1**. It can still reject an output after the honest reveal by withholding a reveal of its own (S-077); T-2 does not claim unbiasedness.
 
-**Proof.** Let `K_h = {v_0, ..., v_{K-1}}` denote the canonical committee at height `h` (Preliminaries §3.3). Suppose without loss of generality that `v_0, ..., v_{K-2}` are Byzantine and `v_{K-1}` is honest. The Byzantine subset's strategic objective is to predict `delay_output` before Phase-2 closure, so they can selectively-abort the round if the resulting randomness is unfavorable.
+**Proof.** Let `K_h = {v_0, ..., v_{K-1}}` denote the canonical committee at height `h` (Preliminaries §6). Suppose without loss of generality that `v_0, ..., v_{K-2}` are Byzantine and `v_{K-1}` is honest. The Byzantine subset's strategic objective is to predict `delay_output` before Phase-2 closure, so they can selectively-abort the round if the resulting randomness is unfavorable.
 
-The protocol forces each member `v_i` to publish `ContribMsg.dh_input_i = SHA256(s_i || pk_i)` in Phase-1, where `s_i` is the member's fresh 32-byte secret. The ContribMsg envelope is Ed25519-signed by `v_i`'s key, so swapping `s_i` post-publication constitutes equivocation evidence (per S-006: the receive path's same-generation duplicate detection catches identical-generation differing-`dh_input` envelopes and surfaces them via the existing `EquivocationEvent` channel; the producer chain.cpp applies slashing). The Byzantine subset is therefore committed to their `s_0, ..., s_{K-2}` choices the moment they publish their Phase-1 envelopes.
+The protocol forces each member `v_i` to publish `ContribMsg.dh_input_i = SHA256(s_i || pk_i)` in Phase-1, where `s_i` is the member's fresh 32-byte secret. Opening that commitment to a different secret needs a SHA-256 collision (A2), and the ContribMsg envelope is Ed25519-signed by `v_i`'s key, so publishing a second commitment at the same generation is equivocation evidence (per S-006: the receive path keeps the first commitment it received, drops the second, and records the pair via the `EquivocationEvent` channel — an evidence record with no L1 consequence since D4, Preliminaries §9). The Byzantine subset is therefore committed to their `s_0, ..., s_{K-2}` choices the moment they publish their Phase-1 envelopes.
 
-The honest member `v_{K-1}` holds `s_{K-1}` private until Phase-2. By SHA-256 preimage resistance (Preliminaries §2.1 — A2 in the standard assumption list), the Byzantine subset's view of `s_{K-1}` during the Phase-1 window is exactly `SHA256(s_{K-1} || pk_{K-1})`. Recovering `s_{K-1}` from this commitment requires a preimage attack on SHA-256, which is computationally infeasible under A2 (`~2^256` brute-force complexity; no known better attack).
+The honest member `v_{K-1}` holds `s_{K-1}` private until Phase-2. By SHA-256 preimage resistance (Preliminaries §2.1 — A3 in the standard assumption list), the Byzantine subset's view of `s_{K-1}` during the Phase-1 window is exactly `SHA256(s_{K-1} || pk_{K-1})`. Recovering `s_{K-1}` from this commitment requires a preimage attack on SHA-256, which is computationally infeasible under A3 (`~2^256` brute-force complexity; no known better attack).
 
-The block's randomness is `compute_block_rand(delay_seed, ordered_secrets) = SHA256(delay_seed || s_0 || s_1 || ... || s_{K-1})`. The Byzantine subset, lacking `s_{K-1}`, cannot compute this value during the Phase-1 / Phase-2 transition window. Their only choices are (a) wait for the honest member's reveal and observe `delay_output` after the fact (at which point they cannot selectively-abort — the round is already in Phase-2 finalization), or (b) abort blindly before observing `delay_output` (which is equivalent to flipping a coin: the randomness is uniformly distributed conditional on their commits, so blind aborts have expected utility zero against any non-adaptive randomness target).
+The block's randomness is `compute_block_rand(delay_seed, ordered_secrets) = SHA256(delay_seed || s_0 || s_1 || ... || s_{K-1})`. The Byzantine subset, lacking `s_{K-1}`, cannot compute this value before the honest reveal. Its choices are (a) abort blindly before the honest reveal, which gains nothing, or (b) wait for the honest reveal. Once `s_{K-1}` arrives, any Byzantine member that has not yet revealed knows every secret, computes `delay_output`, and can withhold its own reveal to abort the round if the output is unfavorable; the re-round draws fresh secrets. That veto is the S-077 residual: it cannot steer `delay_output` to a value of its choosing, but it can reject one sample per height at the cost of its seat, and a Phase-2 abort is neither recorded nor suspended.
 
-Both choices reduce the Byzantine subset's selective-abort advantage to zero. The commit-reveal defense is therefore information-theoretically tight: the (K-1) attacker cannot extract any bias on `delay_output` beyond what they could extract by ignoring the protocol entirely (i.e., randomly choosing whether to participate).
+So the Byzantine subset's selective-abort advantage is not zero. What T-2 establishes is the binding and hiding above, which is all the commit-reveal defense provides.
 
-**Comparison to delay-hash.** The pre-removal delay-hash defense was strictly weaker:
+**Comparison to delay-hash.**
 
 - Delay-hash assumed compute-time bounded grinding: the attacker had `~5s` to evaluate `SHA-256^T` per candidate, so could explore `~few` candidates per abort window. The defense relied on a small candidate set times the per-candidate success probability being small. ASIC asymmetry collapsed this (§1.2).
-- Commit-reveal assumes information-theoretic blindness: the attacker has zero information on the honest member's contribution. The defense relies on SHA-256 preimage resistance, which is the same assumption already required by every digest-binding gate in the protocol (block_digest, state_root, Merkle paths, etc.).
+- Commit-reveal hides the honest contribution until it is revealed (A3) and binds every contribution before any is revealed (A2) — the assumptions already required by every digest-binding gate in the protocol (block_digest, state_root, Merkle paths, etc.).
 
-The replacement is dominant. ∎
+On binding the replacement needs no calibration and survives ASICs. Neither construction, as shipped, stops a member from vetoing an output it has already computed. ∎
 
 **Composition with `compute_block_digest`.** The digest formula at `src/node/producer.cpp::compute_block_digest` excludes `delay_output` (per the `14bf3d6` commit body: "compute_block_digest EXCLUDES delay_output, so members can sign at Phase-2 entry without waiting for K-1 peer secrets to gather first"). This is the engineering trick that lets the producer post their Phase-2 signature before observing the full set of K reveals — it breaks the chicken-and-egg in the M=K=1 single-validator path. The digest still binds `prev_hash`, `tx_root`, `delay_seed`, `consensus_mode`, `bft_proposer`, `creators[]`, `creator_tx_lists[]`, `creator_ed_sigs[]`, and `creator_dh_inputs[]` (the Phase-1 commits), so the K-of-K commits are bound at signing time even though the secrets reveal later. The block hash (i.e., `signing_bytes`) does bind `delay_output` and `creator_dh_secrets`, so block identity is unique once Phase-2 closes — the L-1.2 Safety chain is preserved (Safety.md §1).
 
@@ -130,13 +130,13 @@ The replacement is dominant. ∎
 
 **Proof.** Safety.md's T-1 (Unique Canonical Block at Height `h`) reduces to three lemmas: L-1.1 (same committee), L-1.2 (digest collision), L-1.3 (every committee member equivocates on contradictory blocks). None of these lemmas reference `delay_output`'s *value* or its computation method:
 
-- **L-1.1 (committee determinism).** The committee `K_h` is selected deterministically from `(prev_hash, registry, stake_pool)` per Preliminaries §3.3 — no delay-hash input. Removing delay-hash leaves the committee selection function unchanged.
+- **L-1.1 (committee determinism).** The committee `K_h` is selected deterministically from the epoch randomness, the eligible registry and the height's abort events, per Preliminaries §6 — no delay-hash input. Removing delay-hash leaves the committee selection function unchanged.
 - **L-1.2 (digest collision).** The digest formula `compute_block_digest` covers a strict subset of block fields. The pre-removal field set included `delay_output`; the post-removal set excludes `delay_output` (the `14bf3d6` engineering trick). The removal can only *narrow* the set of contradictory blocks that resolve to identical digests. In particular, the post-removal set still contains `creator_dh_inputs[]` — the K-of-K commit binding — so two distinct sets of Phase-1 commits produce distinct digests by SHA-256 collision resistance (A2). The L-1.2 conclusion (`B ≠ B'` ∧ `compute_block_digest(B) = compute_block_digest(B')` ⇒ `signing_bytes(B) ≠ signing_bytes(B')`) is preserved verbatim.
-- **L-1.3 (every-member equivocates).** Quorum-overlap: any two K-of-K quorums at the same height share at least one member (in fact: all K members, since the K-of-K rule requires unanimous committee signing). The shared member's two signatures on `compute_block_digest(B) ≠ compute_block_digest(B')` constitute Ed25519-detectable equivocation. The lemma's quorum-arithmetic does not depend on `delay_output`.
+- **L-1.3 (every-member equivocates).** Quorum-overlap: two K-of-K quorums drawn from the same committee (L-1.1) share all K members, since the K-of-K rule requires unanimous committee signing. When two blocks carry different abort tails their committees differ, and FA1 then needs the committees to intersect; the runtime bound that guarantees it (`2K > N(h)`) is open (S-054). A shared member's two signatures on `compute_block_digest(B) ≠ compute_block_digest(B')` constitute Ed25519-detectable equivocation. The lemma's quorum-arithmetic does not depend on `delay_output`.
 
-The T-1 conclusion therefore holds verbatim post-removal: at most one canonical block per height under K-of-K. The FA1 safety budget is unchanged. ∎
+The T-1 conclusion therefore holds post-removal exactly as it held before, under the same hypotheses (an honest member per committee; intersecting committees, S-054 open). Removing delay-hash changes neither. ∎
 
-**Composition with FA6 / S-006.** The equivocation-detection paths that catch Phase-1 commit swaps (S-006: same-generation `ContribMsg.dh_input` differing for the same signer) and Phase-2 sig duplicates (FA6: same-`(block_index, prev_hash)` differing `block_hash` from the same signer) both continue to function post-removal. The delay-hash module was orthogonal to these paths.
+**Composition with FA6 / S-006.** The equivocation-detection paths that catch Phase-1 commit swaps (S-006: same-generation `ContribMsg.dh_input` differing for the same signer) and Phase-2 double signatures (FA6: two signatures by one signer over different block digests at the same height and generation, V11) both continue to function post-removal, producing evidence records with no L1 consequence (D4). The delay-hash module was orthogonal to these paths.
 
 ### Theorem T-4 (No Liveness Regression — L-1..L-4 Preserved)
 
@@ -155,17 +155,19 @@ The removal therefore creates no L-1..L-4 regression. The actual *effect* on liv
 
 **Statement.** While the delay-hash module's per-block compute-time pushback is gone, the S-014 per-peer-IP token-bucket rate limiter provides an analogous *time-cost* effect at the network ingress layer — caps the adversary's per-IP request rate, which bounds the rate at which they can attempt selective-abort grinding.
 
+**Scope.** T-5 bounds message floods. It does not touch the S-077 veto, which needs no messages at all: withholding one reveal is enough.
+
 **Proof.** The S-014 token-bucket (`S014RateLimiterSoundness.md` T-1) admits `C + r·Δ` messages per Δ-second window per peer IP. For a typical web-profile setting (`C_gossip = 1000`, `r_gossip = 500`), a single attacker IP is capped at `~500 msg/sec` sustained gossip throughput.
 
 An attacker attempting to brute-force the K-of-K commit-reveal would need to:
 
 1. Probe each candidate `s_{K-1}` value via some side-channel (e.g., timing on the honest member's processing path — none exists in the receive code).
-2. Or compute SHA-256 preimage attacks against `SHA256(s_{K-1} || pk_{K-1})` — infeasible per A2.
+2. Or compute SHA-256 preimage attacks against `SHA256(s_{K-1} || pk_{K-1})` — infeasible per A3.
 3. Or push high-rate ContribMsg / BlockSigMsg envelopes with varying `dh_input` / `dh_secret` values, hoping to find a commit-reveal pair that produces favorable `delay_output` after the honest member's reveal — bounded by the rate limiter at `~500 msg/sec` per IP.
 
 Path (3) is the only one with non-trivial probability. The rate limiter caps the per-IP attempts at `~500/sec`; an attacker with M IPs is capped at `~500·M/sec` aggregate. To achieve a non-negligible bias on the (256-bit) `delay_output`, the attacker would need to explore `~2^128` candidates (birthday bound for partial collision on a useful number of randomness bits). At `~500·M/sec`, this takes `(2^128) / (500·M) ≈ 2·10^36 / M` seconds — beyond cosmological timescales for any feasible `M`. The rate limiter alone is sufficient against path (3).
 
-The rate-limiter's "time-cost" effect is therefore *categorically stronger* than the pre-removal delay-hash defense:
+Against message floods, the rate limiter's "time-cost" effect is more robust than the pre-removal delay-hash defense:
 
 | Layer | Pre-removal: delay-hash | Post-removal: rate limiter |
 | --- | --- | --- |
@@ -175,23 +177,23 @@ The rate-limiter's "time-cost" effect is therefore *categorically stronger* than
 | Genesis-divergence risk | Yes (S-005) | No (`C`, `r` in genesis) |
 | Composes with K-of-K commit-reveal? | Redundant + broken | Strictly additive |
 
-Composition: the K-of-K commit-reveal handles the *information-theoretic* attack surface (T-2); the rate limiter handles the *brute-force-attempt-rate* surface (T-5). Each defense covers a disjoint attack class. Their composition is multiplicative — an attacker must defeat both simultaneously, which requires breaking SHA-256 preimage resistance *and* exhausting the rate limiter's per-IP budget over a multi-IP fan-out — neither of which is feasible. ∎
+Composition: the K-of-K commit-reveal binds and hides the secrets (T-2); the rate limiter bounds the rate of message floods (T-5). Neither addresses the last-revealer veto (S-077), which needs neither a preimage nor a flood. ∎
 
 **Defense-in-depth completeness.** The post-removal stack is:
 
-1. **K-of-K commit-reveal** (T-2): information-theoretic randomness binding under A2.
+1. **K-of-K commit-reveal** (T-2): commitment binding (A2) and hiding (A3) of the Phase-1 secrets — not unbiasedness (S-077).
 2. **S-014 rate limiter** (T-5): network-layer per-IP throughput cap.
-3. **S-006 equivocation detection** (T-3 composition): Phase-1 commit swap attempts are caught and slashed.
-4. **FA6 equivocation slashing** (T-3 composition): Phase-2 sig double-publish attempts are caught and slashed.
+3. **S-006 equivocation detection** (T-3 composition): Phase-1 commit swap attempts are caught and recorded as evidence (no L1 consequence since D4).
+4. **FA6 equivocation evidence** (T-3 composition): Phase-2 double signatures are caught and recorded as evidence (no L1 consequence since D4).
 5. **S-013 per-signer cap** (T-3 composition): even successful Byzantine commits are bounded at 2 entries per signer in `buffered_block_sigs_`, so the memory cost of attacker spam is bounded.
 
-The composition is strictly stronger than the pre-removal stack (which had delay-hash where K-of-K commit-reveal now sits, with the structural defects enumerated in §1.2). No regression.
+Nothing the pre-removal stack actually delivered is lost (it had delay-hash where K-of-K commit-reveal now sits, with the structural defects enumerated in §1.2). The last-revealer veto is open under both.
 
 ---
 
 ## 3. Adversary model $Adv_{randomness}..Adv_{resurrection}$
 
-### $Adv_{randomness}$ (Randomness-manipulation attempt — defeated by K-of-K commit-reveal binding)
+### $Adv_{randomness}$ (Randomness-manipulation attempt — strategies (a)-(c) defeated by K-of-K commit-reveal binding; the last-revealer veto is not, S-077)
 
 An attacker controls (K-1) of K committee members at height `h`. They attempt to bias `delay_output = compute_block_rand(delay_seed, ordered_secrets)` by:
 
@@ -201,19 +203,19 @@ An attacker controls (K-1) of K committee members at height `h`. They attempt to
 
 **Defeats.**
 
-- **(a)** Defeated by SHA-256 preimage resistance (T-2). The honest member's `s_{K-1}` is uniformly random and the attacker has no information beyond `SHA256(s_{K-1} || pk_{K-1})`. Timing side-channels are bounded because the honest committee member computes `s_{K-1}` once at the start of Phase-1 and stores it in `current_round_secret_` — there is no timing-sensitive comparison or branching on `s_{K-1}` before reveal. The RNG is the deterministic CSPRNG seeded from per-round entropy (Preliminaries §2.3 — A4); cryptographic weakness in the CSPRNG is out of scope for this proof and tracked separately.
-- **(b)** Defeated by the Ed25519 signature on the ContribMsg envelope. The attacker's `v_i` is Byzantine, so they could in principle sign two contradicting ContribMsgs with different `dh_input`. This is exactly the equivocation case S-006 detects: the receive path's same-generation duplicate scan at `on_contrib` catches the two signatures over different envelopes and surfaces them via the `EquivocationEvent` channel. The producer's apply path slashes `v_i`'s stake. The attacker pays the slashing cost for at most one Phase-1 swap attempt; the second attempt is rejected at admission.
+- **(a)** Defeated by SHA-256 preimage resistance (T-2, A3). The honest member's `s_{K-1}` is uniformly random and the attacker has no information beyond `SHA256(s_{K-1} || pk_{K-1})`. Timing side-channels are bounded because the honest committee member computes `s_{K-1}` once at the start of Phase-1 and stores it in `current_round_secret_` — there is no timing-sensitive comparison or branching on `s_{K-1}` before reveal. The secret is drawn from `determ_rng_bytes`, the OS-entropy CSPRNG (Preliminaries §2.3 — A4); cryptographic weakness in the CSPRNG is out of scope for this proof and tracked separately.
+- **(b)** Defeated by commitment binding and the Ed25519 signature on the ContribMsg envelope. The attacker's `v_i` is Byzantine, so they could in principle sign two contradicting ContribMsgs with different `dh_input`. This is exactly the equivocation case S-006 detects: `on_contrib` keeps the first commitment it received from `v_i` for the round, drops the second, and records the pair via the `EquivocationEvent` channel — an on-chain evidence record that moves no stake since D4 (Preliminaries §9). The swap fails on binding, not on cost; nothing is slashed.
 - **(c)** Defeated by S-006 same-generation equivocation detection (subsumed in (b)).
 
-The K-of-K commit-reveal defense is information-theoretically tight against $Adv_{randomness}$ — the attacker has zero net advantage beyond what they had pre-protocol.
+Strategies (a)-(c) gain the attacker nothing. They omit the one that works: an attacker member that reveals last computes `delay_output` first and can withhold its reveal to reject the sample (S-077, open; see the correction at the top).
 
 ### $Adv_{timing}$ (Timing attack on Phase 2 reveal — bounded by S-003 validator wall-clock window)
 
 An attacker observes the honest committee member's Phase-2 `BlockSigMsg` envelope (containing the revealed `dh_secret`) and attempts to retroactively swap their own published `dh_secret_i` to produce a different `delay_output`.
 
-**Defeat.** The attacker's Phase-2 envelope is also Ed25519-signed. Once published, swapping requires equivocation, caught by FA6 / S-006 (T-3 composition above). The Phase-2 reveal window is additionally bounded by the S-003 validator wall-clock window (`block_timestamp` is checked against the validator's local clock within a `±30s` skew; envelopes outside the window are rejected). So even if the attacker tried to delay their Phase-2 publication to maximize information about other reveals, they cannot delay beyond the S-003 window without their `BlockSigMsg` being rejected as stale.
+**Defeat of the swap.** There is nothing to swap to: a revealed secret must open the attacker's own Phase-1 commitment (`SHA256(s_i ‖ pk_i) = dh_input_i`, Preliminaries §5 V5), and a second opening needs a SHA-256 collision (A2). The attacker's Phase-2 envelope is also Ed25519-signed, and a second signature over a different block digest is FA6 / S-006 evidence (T-3 composition above; no L1 consequence since D4). The Phase-2 reveal window is additionally bounded by the S-003 validator wall-clock window (`block_timestamp` is checked against the validator's local clock within a `±30s` skew; envelopes outside the window are rejected). So even if the attacker tried to delay their Phase-2 publication to maximize information about other reveals, they cannot delay beyond the S-003 window without their `BlockSigMsg` being rejected as stale.
 
-Defeat is from the composition of (Ed25519 sig binding) + (S-006 equivocation detection) + (S-003 wall-clock bound). The pre-removal delay-hash defense was *not* relevant to $Adv_{timing}$ — it sat between Phase-1 and Phase-2, so it didn't protect the Phase-2 reveal interval at all. Post-removal status is no worse.
+What delaying does buy is the veto: an attacker that waits for the other reveals knows `delay_output` and can decline to publish its own (S-077, open). Commitment binding, the signatures and the wall-clock bound do not prevent that. The pre-removal delay-hash defense was *not* relevant to $Adv_{timing}$ — it sat between Phase-1 and Phase-2, so it didn't protect the Phase-2 reveal interval at all. Post-removal status is no worse.
 
 ### $Adv_{resurrection}$ (Resurrection of delay-hash bug class — defeated by structural removal)
 
@@ -226,9 +228,9 @@ A future contributor, unfamiliar with the S-009 closure rationale, attempts to r
 3. Adding a worker thread to `Node` (visible).
 4. Threading the new feature into the consensus state machine (visible).
 
-All four are PR-review-visible. The proof T-2 + T-3 + T-4 + T-5 establish that the K-of-K commit-reveal + rate limiter combination strictly dominates any delay-hash variant; a re-introduction PR would have to either (a) argue against this dominance (which would require a counter-proof) or (b) accept that the new module is net-negative on the security budget.
+All four are PR-review-visible. T-2 + T-3 + T-4 + T-5 establish that the K-of-K commit-reveal + rate limiter combination covers what the shipped delay-hash delivered; they do not show that it dominates every delay-hash variant, because neither stops the last-revealer veto (S-077). A re-introduction PR would have to name the property it adds and prove it.
 
-Finding F-2 below codifies this: any future delay-hash re-introduction requires re-running the soundness analysis (T-2 + T-3 + T-4 + T-5 + the underlying SHA-256 preimage assumption A2) from scratch.
+Finding F-2 below codifies this: any future delay-hash re-introduction requires re-running the soundness analysis (T-2 + T-3 + T-4 + T-5 + the underlying SHA-256 assumptions A2 and A3) from scratch.
 
 ---
 
@@ -247,7 +249,7 @@ Verification: zero occurrences in the entire `src/` subtree.
 ### 4.2 `grep -r "delay_hash" include/`
 
 ```
-include/determ/chain/block.hpp:377: //   Local delay: every node computes R = delay_hash(seed, T) on a worker
+include/determ/chain/block.hpp:659: //   Local delay: every node computes R = delay_hash(seed, T) on a worker
 ```
 
 Verification: 1 occurrence — a doc-only comment fossil in the `Block` struct's documentation header. No code in the same file references `delay_hash`; the comment describes a defunct protocol step. Tracked as F-2.
@@ -255,10 +257,15 @@ Verification: 1 occurrence — a doc-only comment fossil in the `Block` struct's
 ### 4.3 `grep -r "VDF" src/`
 
 ```
-(no matches)
+src/consensus/dda.c         (4 lines)
+src/consensus/duel_state.c  (2)
+src/crypto/vdf.c            (36)
+src/determ_node.c           (7)
+src/net/k2_net.c            (6)
+src/rpc/json_rpc.c          (3)
 ```
 
-Verification: zero occurrences in `src/`.
+Verification (updated 2026-09-23): every occurrence is in the experimental C99 `determ-node` and its VDF module. These files are compiled only into the C99 targets (`test-k2-duel`, `determ-c99-node-core` → `determ-node`, and the C99 test executables; `CMakeLists.txt:547-756`); `determ` globs `src/*.cpp` (`CMakeLists.txt:94`, `:248`) and `determ-crypto-c99` does not list `vdf.c`. None of them references the deleted module; they are a new construction whose assumptions `K2_VDF_Soundness.md` records. `D_filter` rule (d).
 
 ### 4.4 `grep -r "VDF" include/`
 
@@ -266,7 +273,9 @@ Verification: zero occurrences in `src/`.
 include/determ/net/messages.hpp:17: BLOCK_SIG = 3, // Phase 2: signed block digest + VDF output
 ```
 
-Verification: 1 occurrence — a doc-only comment fossil in the `MsgType::BLOCK_SIG` enum documentation. The actual `BlockSigMsg` struct fields are `dh_secret` (Phase-2 reveal) and `delay_output` (K-secret-derived randomness, no iteration). Tracked as F-2.
+plus the C99 experiment's headers (`include/determ/crypto/vdf.h`, `include/determ/consensus/dda.h`, `include/determ/consensus/duel_state.h`, `include/determ/net/k2_net.h`, `include/determ/wire/parser.h`), which `D_filter` rule (d) excludes as in §4.3.
+
+Verification: 1 occurrence in the C++ node — a doc-only comment fossil in the `MsgType::BLOCK_SIG` enum documentation. The actual `BlockSigMsg` struct fields are `dh_secret` (Phase-2 reveal) and `delay_output` (K-secret-derived randomness, no iteration). Tracked as F-2.
 
 ### 4.5 `grep -r "EVP_MD_CTX" src/`
 
@@ -293,15 +302,15 @@ holds vacuously.
 (no matches)
 ```
 
-Verification: zero header-level references. `EVP_MD_CTX` is encapsulated inside the `.cpp` implementations via the `pimpl` pattern in `sha256.cpp`'s `Impl` struct.
+Verification: zero header-level references. (At the original audit `EVP_MD_CTX` was encapsulated inside the `.cpp` implementations via the `pimpl` pattern in `sha256.cpp`'s `Impl` struct; since §3.15 it is absent from `src/` as well, §4.5.)
 
 ### 4.7 Summary
 
 | Identifier | `src/` matches (functional) | `include/` matches (functional) | Status |
 | --- | --- | --- | --- |
 | `delay_hash` | 0 | 0 | Removed (1 stale doc-comment in `block.hpp` — F-2) |
-| `VDF` | 0 | 0 | Removed (1 stale doc-comment in `messages.hpp` — F-2) |
-| `EVP_MD_CTX` | 8 (all OpenSSL SHA-256 / Ed25519) | 0 | Live use — unrelated to delay-hash |
+| `VDF` | 0 (the C99 `determ-node`'s own VDF module is excluded, rule (d)) | 0 | Removed from the C++ node (1 stale doc-comment in `messages.hpp` — F-2) |
+| `EVP_MD_CTX` | 0 (8 at the original audit, all OpenSSL SHA-256 / Ed25519) | 0 | Gone since the §3.15 migration |
 
 The audit confirms zero functional dependencies on the deleted delay-hash module in the post-removal source tree.
 
@@ -316,7 +325,7 @@ The audit confirms zero functional dependencies on the deleted delay-hash module
 
 ### 5.2 Commit-reveal randomness binding
 
-- **`SelectiveAbort.md`** — FA3 selective-abort defense. The proof of FA3 was previously stated in delay-hash terms (compute-time bound); post-removal it is stated in commit-reveal terms (information-theoretic bound under A2). The conclusion is strengthened.
+- **`SelectiveAbort.md`** — FA3. Its zero-bias claim is withdrawn (correction 2026-09-22): commit-reveal gives commitment binding only, and last-revealer selective abort remains open (S-077).
 - **`S006ContribMsgEquivocation.md`** — S-006 closure detects Phase-1 commit swap attempts. T-2's defeat of $Adv_{randomness}(b)$ and $Adv_{randomness}(c)$ composes with this.
 - **`S030-D2-Analysis.md`** — analyzes the D1/D2 attack family on `compute_block_digest`'s field set. The post-removal field set (with `delay_output` excluded from digest) is documented there. T-3 of this proof composes with S030-D2-Analysis's intersection arguments.
 
@@ -341,7 +350,6 @@ The audit confirms zero functional dependencies on the deleted delay-hash module
 ### 5.7 Closure narrative
 
 - **`docs/SECURITY.md`** — §S-009 / §S-015 / §S-034 closure-status entries cite this proof as the formal justification for the deletion-based closure.
-- **`README.md`** — security section narrates the closure at a higher level; cites SECURITY.md for the detailed status.
 
 ---
 
@@ -357,15 +365,15 @@ The closure is a deletion. There is no behavioral assertion to test, no edge-cas
 
 If a future contributor wishes to re-introduce a delay-hash variant (e.g., for governance time-locks, beacon-chain interop, or any adjacent feature), the soundness analysis must be re-run from scratch:
 
-- **T-2 dominance argument.** The contributor must demonstrate that the new construction is *not* strictly dominated by the K-of-K commit-reveal + rate-limiter stack. Specifically: the contributor must identify an attack class that the new construction defends against but the existing stack does not. This is a high bar — T-2 + T-5 establish that the existing stack covers the information-theoretic *and* the network-layer brute-force surfaces.
-- **T-3 + T-4 no-regression check.** The contributor must show the new construction does not weaken any FA1 / FA3 / L-1..L-4 conclusion.
+- **T-2 dominance argument.** The contributor must identify an attack class that the new construction defends against and the existing K-of-K commit-reveal + rate-limiter stack does not, and prove the defense. One such class exists: the last-revealer veto (S-077), which T-2 + T-5 do not cover.
+- **T-3 + T-4 no-regression check.** The contributor must show the new construction does not weaken any FA1 / L-1..L-4 conclusion (FA3's zero-bias claim is withdrawn).
 - **§1.2 structural defect avoidance.** The contributor must address each of the five structural defects of the original delay-hash module: ASIC asymmetry (use a non-ASIC-amenable VDF — e.g., RSA-based mod-exp or class-group); calibration unenforceability (specify a protocol-level T derivation, not operator-configured); genesis-divergence (include the parameter in `GenesisConfig`); R-arrival spoof (a verification path with per-message cost bounded independently of T); per-iteration EVP allocation (a pre-allocated context reused across iterations).
 
-The two stale doc-comments in `include/determ/chain/block.hpp:377` and `include/determ/net/messages.hpp:17` should also be refreshed when any code change touches those files, since they describe a defunct protocol. They are explicitly tracked as low-priority doc-cleanup items; their continued presence is harmless because no code references them (T-1).
+The two stale doc-comments in `include/determ/chain/block.hpp:659` and `include/determ/net/messages.hpp:17` should also be refreshed when any code change touches those files, since they describe a defunct protocol. They are explicitly tracked as low-priority doc-cleanup items; their continued presence is harmless because no code references them (T-1).
 
 ### F-3 (K-of-K commit binding via `compute_block_digest` is the load-bearing replacement)
 
-The structural property that delay-hash was *intended* to provide — "the attacker cannot grind candidate randomness across abort generations" — is now provided by the K-of-K commit-reveal binding via `compute_block_digest`'s inclusion of `creator_dh_inputs[]`. This is the load-bearing replacement.
+The structural property that delay-hash was *intended* to provide — "the attacker cannot grind candidate randomness across abort generations" — is now provided, for the Phase-1 commitments, by the K-of-K commit-reveal binding via `compute_block_digest`'s inclusion of `creator_dh_inputs[]`. This is the load-bearing replacement. It does not cover the last revealer, who can reject an output by withholding its reveal (S-077).
 
 The binding chain is:
 
@@ -374,7 +382,7 @@ The binding chain is:
 3. The block's Phase-2 signature (each committee member's `BlockSigMsg.ed_sig` over `compute_block_digest`) binds the digest, transitively binding all K Phase-1 commits.
 4. The block's identity (`signing_bytes` → block hash → next-block's `prev_hash`) is also bound to `delay_output` (the post-K-secret-reveal randomness) and `creator_dh_secrets[]` (the K reveals themselves).
 
-The chain composition documented in (1)-(4) means: a Byzantine attempt to mutate any `dh_input_i` requires forging an Ed25519 signature on a new digest with the mutated value — infeasible under standard EUF-CMA. A Byzantine attempt to mutate `delay_output` after Phase-2 closure requires forging an Ed25519 signature on a new block hash — equally infeasible.
+The chain composition documented in (1)-(4) means: a Byzantine attempt to mutate any `dh_input_i` requires forging an Ed25519 signature on a new digest with the mutated value — infeasible under standard EUF-CMA. `delay_output` is not signed by anyone (the digest excludes it, and the block hash is not a signed value); a mutated `delay_output` fails validation instead, because every validator recomputes it from the revealed secrets (Preliminaries §5 V6) after checking that each secret opens its signed commitment (V5, A2).
 
 The full chain is documented in:
 
@@ -387,7 +395,7 @@ Future protocol modifications that touch the K-of-K commit-reveal — e.g., addi
 
 ## 7. Test surface
 
-No specific test. The closure is structural — the removed module has zero remaining call sites (T-1), the K-of-K commit-reveal protocol that replaces it has its own test surface (the 8 regression tests passing post-deletion, plus the larger test suite that's grown to 162+ shell tests as of recent rounds), and the no-regression conclusions (T-3, T-4) inherit from `Safety.md` / `Liveness.md` whose test surfaces are documented in those proofs.
+No specific test. The closure is structural — the removed module has zero remaining call sites (T-1), the K-of-K commit-reveal protocol that replaces it has its own test surface (the 8 regression tests passing post-deletion, plus the rest of the suite), and the no-regression conclusions (T-3, T-4) inherit from `Safety.md` / `Liveness.md` whose test surfaces are documented in those proofs.
 
 The only relevant "test" of the removal is the grep audit in §4, which is reproducible by any reader running the standard project search tool against the working tree.
 
@@ -401,11 +409,11 @@ The only relevant "test" of the removal is the grep audit in §4, which is repro
 
 - **Boneh, D., Bonneau, J., Bünz, B., & Fisch, B.** (2018). *Verifiable Delay Functions*. Advances in Cryptology — CRYPTO 2018. Lecture Notes in Computer Science, vol 10991. Springer, Cham. Cryptology ePrint Archive, Paper 2018/601. (The canonical VDF treatment; the construction family the pre-removal delay-hash module crudely approximated. The paper's class-group construction is the only known VDF that achieves both the sequential-time and uniqueness properties simultaneously; SHA-256 iteration achieves neither rigorously and is vulnerable to ASIC asymmetry as the pre-removal experience confirmed.)
 - **Lenstra, A.K. & Wesolowski, B.** (2015). *A random zoo: sloth, unicorn, and trx*. Cryptology ePrint Archive, Paper 2015/366. (Earlier work on iterated-squaring delay functions; the conceptual ancestor of VDF, and the closest analog to the SHA-256-iteration approach the pre-removal module used. Highlighted the ASIC concern that the Determ implementation later confirmed empirically.)
-- **Pietrzak, K.** (2019). *Simple Verifiable Delay Functions*. ITCS 2019, Innovations in Theoretical Computer Science. Cryptology ePrint Archive, Paper 2018/627. (The Pietrzak VDF — a simpler construction than Boneh et al.'s class-group VDF, but with weaker uniqueness. Considered and rejected during the S-009 alternatives review in favor of the structurally stronger commit-reveal replacement.)
+- **Pietrzak, K.** (2019). *Simple Verifiable Delay Functions*. ITCS 2019, Innovations in Theoretical Computer Science. Cryptology ePrint Archive, Paper 2018/627. (The Pietrzak VDF — a simpler construction than Boneh et al.'s class-group VDF, but with weaker uniqueness. Considered and rejected during the S-009 alternatives review in favor of the simpler commit-reveal replacement, which does not address the last-revealer veto, S-077.)
 
 ### 8.2 SHA-256 preimage assumption
 
-- **Preliminaries.md §2.1** — A2 SHA-256 collision and preimage resistance assumption. The T-2 information-theoretic argument reduces to this.
+- **Preliminaries.md §2.1** — A2 (SHA-256 collision resistance) and A3 (preimage resistance). T-2's binding and hiding reduce to these.
 - **FIPS 180-4** (2015). *Secure Hash Standard*. National Institute of Standards and Technology. (Standardization reference for SHA-256.)
 
 ### 8.3 Removed module's git history
@@ -434,4 +442,4 @@ The expected output is documented in §4.1-§4.6. Deviation from the expected ou
 
 ---
 
-*End of S009DelayHashRemoval.md. The closure is total: T-1 establishes the no-dependency invariant via the §4 audit, T-2 establishes the K-of-K commit-reveal as the load-bearing replacement, T-3 + T-4 establish no safety / liveness regression, and T-5 establishes the rate-limiter as a network-layer "time-cost" composition that strictly dominates the pre-removal delay-hash defense.*
+*End of S009DelayHashRemoval.md. The removal is total: T-1 establishes the no-dependency invariant via the §4 audit, T-2 establishes the K-of-K commit-reveal as the load-bearing replacement for commitment binding (not for the last-revealer veto, S-077), T-3 + T-4 establish no safety / liveness regression, and T-5 establishes the rate-limiter as a network-layer bound on message floods.*

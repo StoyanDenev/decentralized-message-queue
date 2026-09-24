@@ -9,9 +9,11 @@
  *      to hardware monotonic time in production builds, and to a virtual,
  *      manually incremented test clock in DSF builds (-DDETERM_DSF_ENABLED).
  *      Allows instant 1999ms / 2001ms fast-forwarding without sleeping the CPU thread.
- *   2. Virtual Transport Seam: Socket readiness abstraction for epoll/kqueue/IOCP.
- *      Enables simulated EWOULDBLOCK and simulated recv() byte dropping to test
- *      the 1-of-2 straggler fallback deterministically.
+ *   2. Virtual Transport Seam: simulated socket readiness injected ahead of the
+ *      epoll/kqueue event loop (net_event_loop_poll), simulated EWOULDBLOCK and
+ *      recv() byte dropping, so deadline and would-block handling can be
+ *      tested deterministically. (The duel is strictly 2-of-2; there is no
+ *      straggler fallback to test.)
  */
 
 #ifndef DETERMINISTIC_TESTS_DSF_SEAMS_H
@@ -49,7 +51,7 @@ extern "C" {
 #define DSF_EV_ERROR  NET_EV_ERROR
 
 /*
- * Set simulated socket readiness in virtual multiplexer (epoll/kqueue/IOCP)
+ * Set simulated socket readiness reported by net_event_loop_poll in DSF builds
  */
 static inline void dsf_set_socket_ready(int fd, uint32_t flags, void *user_data) {
     determ_dsf_mark_ready(fd, flags, user_data);

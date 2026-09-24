@@ -61,7 +61,7 @@ wire_status_t wire_validate_charset_strict(const uint8_t *field, size_t len, siz
     for (size_t i = 0; i < len; ++i) {
         uint8_t c = field[i];
 
-        /* Surgical elimination of the NUL-Byte Ghost */
+        /* NUL is rejected explicitly (it is also outside the whitelist) */
         if (c == 0x00) {
             return ERR_INVALID_TRANSACTION_FORMAT;
         }
@@ -236,7 +236,8 @@ wire_status_t wire_bundle_vdf_input(const uint8_t *reveal_a, uint32_t len_a,
 
 wire_status_t wire_parse_block_header(const uint8_t *data, size_t data_len,
                                       wire_block_header_t *out_hdr) {
-    if (!data || !out_hdr || data_len < WIRE_BLOCK_HEADER_LEN) {
+    /* Exactly one header: shorter input or trailing bytes are rejected. */
+    if (!data || !out_hdr || data_len != WIRE_BLOCK_HEADER_LEN) {
         return ERR_INVALID_TRANSACTION_FORMAT;
     }
 

@@ -6,10 +6,6 @@
  * Strictly zero-dependency: Zero Asio, Zero nlohmann/json, Zero OpenSSL.
  */
 
-#ifndef _DEFAULT_SOURCE
-#define _DEFAULT_SOURCE
-#endif
-
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -34,7 +30,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <time.h>
 #include <signal.h>
 
 /* BSS-allocated node contexts to prevent stack exhaustion */
@@ -65,7 +60,8 @@ static void print_usage(const char *prog) {
     printf("P2P Gossip Mesh & Storage:\n");
     printf("  --p2p-port <port>         Listen port for P2P gossip mesh\n");
     printf("  --peer <ip:port>          Outbound peer to connect\n");
-    printf("  --data-dir <path>         Directory for persistent block storage (.blocks)\n");
+    printf("  --data-dir <path>         Directory for the experimental C99 block store\n");
+    printf("                           (<path>/manifest.bin, <path>/<height>.blk; not the C++ store)\n");
     printf("  --domain <name>           Node domain advertisement (default: node.local)\n\n");
     printf("HTTP JSON-RPC Server:\n");
     printf("  --rpc-port <port>         Listen port for HTTP JSON-RPC endpoint (e.g. 8545)\n");
@@ -221,7 +217,8 @@ int main(int argc, char *argv[]) {
             printf("Determ Node v2.18 (Strict Zero-Dependency C99 Architecture)\n");
             printf("Experimental two-party computation; PoSW consensus integration is incomplete\n");
             printf("Networking: Native POSIX non-blocking kqueue/epoll (Zero Asio)\n");
-            printf("Storage: Canonical DMF1 Manifest & DBK1 Block Records\n");
+            printf("Storage: experimental C99 block store <dir>/manifest.bin + <dir>/<height>.blk "
+                   "(DMF1/DBK1 records; not the C++ node's <path>.blocks/ store)\n");
             printf("RPC: Bare-Metal HTTP/1.1 In-Place JSON-RPC Transport\n");
             return 0;
         } else if (strcmp(argv[i], "--help") == 0) {
@@ -438,12 +435,6 @@ int main(int argc, char *argv[]) {
         while (g_running) {
             if (mesh_active) peer_mesh_poll(&g_mesh, 20);
             if (rpc_active) http_rpc_server_poll(&g_rpc, 20);
-            if (!mesh_active && !rpc_active) {
-                struct timespec ts;
-                ts.tv_sec = 0;
-                ts.tv_nsec = 20000000L;
-                nanosleep(&ts, NULL);
-            }
         }
     } else {
         printf("Determ Node: No mode specified. Running verification benchmark by default.\n");

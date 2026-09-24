@@ -60,7 +60,8 @@ The proof series references the base cryptographic assumptions defined in this s
 | **A2** | SHA-256 collision resistance | §2.1 |
 | **A3** | SHA-256 preimage / second-preimage resistance | §2.1 |
 | **A4** | CSPRNG uniform secret sampling (`determ_rng_bytes`) | §2.3 |
-| **A5** | ML-DSA-44/65/87 (Post-Quantum) EUF-CMA | §2.4 |
+
+ML-DSA EUF-CMA (§2.5) has no A-label. "A5" already names the pre-launch register item that froze the PQ address form (`PqHashAddressSoundness.md`) and, in the FA series, the PARAM_CHANGE feature (§12, FA10), so a proof that relies on ML-DSA cites §2.5 by name.
 
 **Derived / out-of-band labels (NOT base primitives of this section, retained where already in use):**
 - **A6** — HMAC-SHA-256 PRF assumption. Used only by the RPC-auth + keyfile-at-rest proofs (`S001RpcAuthSoundness.md`, `S004KeyfileAtRest.md`, `S023NodeKeyfileEncryption.md`). HMAC's PRF security reduces to SHA-256's compression-function properties but is cited separately as `A6` for clarity; it is not renumbered.
@@ -84,18 +85,24 @@ Several theorems below use SHA-256 in the **random oracle model** (ROM) for clea
 
 **EUF-CMA.** No polynomial-time adversary, given oracle access to `Sign(sk, ·)` and the public key `pk`, can produce `(m, σ)` with `Verify(pk, m, σ) = 1` for an `m` it never queried, except with probability non-negligibly better than `~2⁻¹²⁸`. Reference: RFC 8032 + Brendel-Cremers-Jackson-Zhao "The Provable Security of Ed25519" (USENIX 2021).
 
-We assume Ed25519 implementations reject low-order points (libsodium / OpenSSL behavior; see RFC 8032 §5.1.7).
+The shipped verifier is the C99 `determ_ed25519_verify` (`src/crypto/ed25519/ed25519.c:327-356`). It rejects a non-canonical public-key encoding (`y ≥ q`) and `S ≥ L`, then checks the group equation. It does **not** reject small-order public keys, so the EUF-CMA bound above covers honestly generated keys only. The rules that keep small-order keys away from value are separate: REGISTER rejects a small-order key (S-068, `src/node/validator.cpp:955-966`), no transaction may come from the Zeroth pool's all-zero key (E1, `:764`), and an anonymous sender whose key has small order is rejected (D10 / S-072, `:931-934`).
 
 ### 2.3 Uniform secret sampling
 
 Phase-1 secrets `s_i ∈ {0,1}²⁵⁶` are drawn from a CSPRNG that is computationally indistinguishable from a true uniform source. In practice, the shipped C99 function `determ_rng_bytes`. Min-entropy of the underlying OS source is assumed to be `≥ 256` bits per draw.
 
-### 2.4 ML-DSA (Post-Quantum)
+### 2.4 What we do not assume
+
+- We do **not** assume hash-based VDFs, iterated SHA-256 sequentiality, or any compute-time bounds on the adversary's hash rate. Commit-reveal gives binding of the Phase-1 commitments (A2) and hiding of honest secrets until Phase 2 (A3), and nothing more: the last Phase-2 revealer can compute `R` before revealing and withhold, so the old zero-bias claim is withdrawn and last-revealer selective abort remains open (`SelectiveAbort.md`, S-077).
+- We do **not** assume a trusted third party, secure clock, or VRF beacon.
+- We do **not** assume an honest majority or an `f < N/3` bound for MD-mode **safety**. The safety results are conditional instead (§3.3): FA1 needs an honest member, following H2, in the committee that decides a height, and same-height committees that intersect; the runtime bound that guarantees intersection (`2K > N(h)`) is open (S-054). For BFT-mode safety and for **liveness**, see §3.3.
+
+### 2.5 ML-DSA (post-quantum)
 
 **EUF-CMA.** No polynomial-time adversary can forge a valid signature on an unqueried message under ML-DSA-44, ML-DSA-65, or ML-DSA-87 signature schemes (FIPS 204 / Dilithium) used in the post-quantum accept-rule. Formally, for parameter set $\kappa \in \{44, 65, 87\}$:
 $$\mathbf{Adv}^{\mathrm{EUF\text{-}CMA}}_{\mathrm{ML\text{-}DSA\text{-}}\kappa}(\mathcal{A}) \le \mathrm{negl}(\lambda)$$
 
-### 2.5 Implementation and fault-model scope
+### 2.6 Implementation and fault-model scope
 
 The definitions below describe the existing C++ committee protocol under their
 stated assumptions. The C99 `determ-node` experiment has not replaced that chain
@@ -131,13 +138,13 @@ A may **not**:
 
 ### 3.3 Honest fraction bounds
 
-For **safety claims** (no two valid blocks at the same height, no cryptographic false-positive in the equivocation predicate, etc.), no upper bound on `f` is assumed. Determ's K-of-K mutual-distrust safety holds even if `f = N` for MD-mode blocks — see Safety theorem (FA1).
+For **safety claims** (no two valid blocks at the same height, no cryptographic false-positive in the equivocation predicate, etc.), no upper bound on `f` is assumed, but the claims are conditional. FA1 T-1 shows that two valid MD-mode blocks at one height, from the same committee, mean every member of that committee signed both (an evidence record since D4, §9). Fork freedom (Corollary T-1.1) further needs one member of that committee to be honest (H2, which binds per round instance). Both rest on same-height committees coinciding or intersecting, and the runtime bound that guarantees intersection, `2K > N(h)`, is open (S-054). A committee whose members are all Byzantine — possible whenever `f ≥ K` — can fork its height.
 
 For **BFT-mode block safety**: `f_h < |K_h|/3` *within the shrunk BFT committee* `|K_h| = ⌈2K/3⌉` is required (standard BFT 1/3 bound applied to the smaller committee). See FA5.
 
 For **liveness claims**: at least one all-honest K-committee must form within bounded round retries, under partial synchrony. See FA4.
 
-The protocol's effective decentralization threshold for an external observer is **`≥ 1` non-Byzantine validator in `V`** (FA1 + FA2 cover this). This is a property of the system, not a protocol assumption.
+FA1 and FA2 each need **one non-Byzantine member in the committee that decides a height**, not merely one in `V`; whether a committee contains one depends on the selection of §6 and on `f`. This is a property of the system, not a protocol assumption.
 
 ---
 
@@ -209,9 +216,9 @@ The number of nonzero signatures must be `≥ k` (MD; no sentinels permitted) or
 
 **V9 — Cumulative rand.** `B.cumulative_rand = SHA256(B_{h-1}.cumulative_rand ‖ B.delay_output)`.
 
-**V10 — Abort certificates.** Each `ae ∈ B.abort_events` carries `K-1` distinct, valid `AbortClaimMsg` signatures from members of the at-event committee against the aborting node.
+**V10 — Abort certificates.** Each `ae ∈ B.abort_events` carries exactly `max(2, K-1)` distinct, valid `AbortClaimMsg` signatures (`chain::abort_claim_quorum`, `include/determ/chain/params.hpp:169-173`) from members of the at-event committee against the aborting node, and its `event_hash` equals the canonical hash re-derived from the parent block and the preceding abort tail (S-074). At `K = 2` the quorum cannot be met, so no `K = 2` block carries an abort event. Enforced by `BlockValidator::check_abort_certs` (`src/node/validator.cpp`).
 
-**V11 — Equivocation events** (restated 2026-08-12, EQV-height-bind). Each `ev ∈ B.equivocation_events` carries `kind ∈ {0, 1}` (0 = BLOCK_DIGEST, 1 = CONTRIB_COMMIT) and, per side, an **opening** `(index, body_root)` plus a signature. The signed digests are not carried; the validator DERIVES them as `D(kind, i, g, r) = SHA256(TAG(kind) ‖ i u64 BE ‖ g u64 BE ‖ r)` with `TAG(0) = "DTM-BLKDIG-v3"`, `TAG(1) = "DTM-CONTRIB-v3"` (g = the signed round generation; the verifier also requires `gen_a = gen_b` — shipped bytes, restated 2026-09-14). Validity requires: `kind ≤ 1`; **`index_a = index_b = ev.block_index`** (the height assert — this is what makes the height signature-bound); `body_root_a ≠ body_root_b`; `sig_a ≠ sig_b`; the equivocator resolves to a registered Ed25519 key; and both signatures verify against the **derived** digests. Enforced by `BlockValidator::check_equivocation_events` (`src/node/validator.cpp:380`). Used in FA6 / FA-Apply-10. The pre-2026-08-12 form (two opaque digests, no index relation) was the S-052 forged-slash hole.
+**V11 — Equivocation events** (restated 2026-08-12, EQV-height-bind). Each `ev ∈ B.equivocation_events` carries `kind ∈ {0, 1}` (0 = BLOCK_DIGEST, 1 = CONTRIB_COMMIT) and, per side, an **opening** `(index, body_root)` plus a signature. The signed digests are not carried; the validator DERIVES them as `D(kind, i, g, r) = SHA256(TAG(kind) ‖ i u64 BE ‖ g u64 BE ‖ r)` with `TAG(0) = "DTM-BLKDIG-v3"`, `TAG(1) = "DTM-CONTRIB-v3"` (g = the signed round generation; the verifier also requires `gen_a = gen_b` — shipped bytes, restated 2026-09-14). Validity requires: `kind ≤ 1`; **`index_a = index_b = ev.block_index`** (the height assert — this is what makes the height signature-bound); `body_root_a ≠ body_root_b`; `sig_a ≠ sig_b`; the equivocator resolves to a registered Ed25519 key; and both signatures verify against the **derived** digests. Enforced per event by `BlockValidator::check_equivocation_event` (`src/node/validator.cpp:467-539`), called from `check_equivocation_events` (`:437-455`), which also applies the step-3b cap and in-block duplicate rejection (§9). Used in FA6 / FA-Apply-10. The pre-2026-08-12 form (two opaque digests, no index relation) was the S-052 forged-slash hole.
 
 **V12 — Cross-shard receipts, source side** (shards only). `B.cross_shard_receipts` matches the cross-shard subset of `B.transactions` one-for-one with field-wise equality, including `(src_shard, dst_shard, tx_hash, from, to, amount, fee, nonce)`. Enforced by `BlockValidator::check_cross_shard_receipts` (`src/node/validator.cpp`). Used in FA7 L-7.1.
 
@@ -315,9 +322,12 @@ sound-and-complete as a consensus rule.
    (`EquivocationSlashing.md` §2 Case (c); `RoundStallValveSoundness.md` C-2) names an
    honest validator. Under D4 that costs nothing on L1 and everything to an L2 policy that
    treats the record as a verdict.
-3. Because deregistration was the record's only natural limiter, an event is now
-   re-includable at 2 Ed25519 verifies per copy. Bounding that is sequence step 3b (a
-   per-block cap + in-block duplicate rejection) and is NOT closed.
+3. Because deregistration was the record's only natural limiter, an event became
+   re-includable at 2 Ed25519 verifies per copy. Sequence step 3b bounds the cost per
+   block: a block carries at most 16 events (`EQUIVOCATION_EVENTS_PER_BLOCK_MAX`,
+   `include/determ/chain/params.hpp:78`) and none twice
+   (`BlockValidator::check_equivocation_events`, `src/node/validator.cpp:437-455`). The
+   verifier does not reject an event that an earlier block already recorded.
 
 ---
 
@@ -370,9 +380,9 @@ The series:
 
 | File | Property |
 |---|---|
-| `Safety.md` (FA1) | Fork freedom: at most one valid block per height. |
+| `Safety.md` (FA1) | Fork freedom: at most one valid block per height, given an honest member per committee and intersecting same-height committees (the runtime `2K > N(h)` bound is open, S-054; §3.3). |
 | `Censorship.md` (FA2) | K-conjunction censorship resistance. |
-| `SelectiveAbort.md` (FA3) | Commit-reveal hybrid argument; no member can bias `R` predictively. |
+| `SelectiveAbort.md` (FA3) | Withdrawn claim (correction 2026-09-22): commitment binding only; last-revealer selective abort remains open (S-077). |
 | `Liveness.md` (FA4) | Probabilistic liveness under (1-p)^K > 0 and synchrony. |
 | `BFTSafety.md` (FA5) | Conditional safety of BFT-mode blocks under `f_h < |K_h|/3` within the BFT committee (`|K_h| = ⌈2K/3⌉`). |
 | `EquivocationSlashing.md` (FA6) | Only Byzantine validators are NAMED by a well-formed event (no cryptographic false positives; the honest re-round / valve pair of §2 Case (c) is the stated exception). Covers both block-digest equivocation and `on_contrib` same-generation Phase-1 equivocation (S-006 closure). Since D4 the event carries no L1 consequence — see §9. |
@@ -381,7 +391,7 @@ The series:
 | `UnderQuorumMerge.md` (FA9) | R7 merge mechanism preserves FA1 + FA7 across BEGIN/END boundaries. |
 | `Governance.md` (FA10) | A5 PARAM_CHANGE multisig soundness (N-of-N whitelist enforcement). |
 | `EconomicSoundness.md` (FA11) | A1 unitary-balance invariant + E1/E3/E4 supply-preservation theorems. |
-| `WalletRecovery.md` (FA12) | A2 distributed-recovery primitive (Shamir + AEAD + OPAQUE adapter). |
+| `WalletRecovery.md` (FA12) | A2 distributed-recovery primitive (Shamir + AEAD passphrase envelopes; the OPAQUE adapter was de-scoped and does not ship). |
 
 **Closure-analysis companion documents (non-FA-track, deep-dives into specific finding closures):**
 

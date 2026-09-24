@@ -98,6 +98,7 @@ bool dda_verify_block_iterations(const dda_tracker_t *tracker, uint64_t block_it
 /*
  * Big-Endian Wire Codec for Consensus Block Header:
  * Serializes block_index, timestamp_ms, and vdf_iterations in Big-Endian format.
+ * Decode accepts exactly CONSENSUS_BLOCK_HEADER_SIZE bytes (-2 otherwise).
  */
 int consensus_block_header_encode(uint8_t *out_buf, size_t buf_cap,
                                   const consensus_block_header_t *header,

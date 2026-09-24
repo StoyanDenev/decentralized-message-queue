@@ -1,0 +1,350 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Determ Contributors
+#pragma once
+#include <determ/chain/block.hpp>
+#include <determ/chain/params.hpp>   // CryptoProfile (the genesis-pinned consensus profile)
+#include <string>
+#include <vector>
+
+namespace determ::chain {
+
+// rev.8 follow-on: validator inclusion policy. Both modes preserve the
+// same decentralization property — K-of-K mutual veto + union tx_root
+// means a single honest validator in the registry, anywhere, eventually
+// gets selected and unions any censored tx into a block. Censorship
+// requires unanimous collusion of EVERY validator that ever rotates onto
+// any committee, which is structurally impossible without 100% adversary
+// capture of the registry.
+//
+// The two modes differ only in HOW validators are admitted to the
+// registry (Sybil-resistance mechanism + disincentive medium):
+//
+//   STAKE_INCLUSION  — admission via locking min_stake. Sybil cost =
+//                      capital lock-up. Disincentive on misbehavior =
+//                      the abort suspension only (the round-1 stake
+//                      deduction was retired 2026-09-16 — D13; equivocation
+//                      carries no L1 stake consequence — D4).
+//
+//   DOMAIN_INCLUSION — admission via registering with a domain name
+//                      (e.g., a DNS name like validator1.example.com).
+//                      min_stake = 0. Sybil cost = domain registration.
+//                      Disincentive on misbehavior = registry
+//                      deregistration (lose all future block rewards;
+//                      re-entry costs a fresh registration).
+//
+// Both modes use the same K-of-K consensus, BFT escalation, delay-hash
+// randomness, and equivocation detection. Choice is purely about which
+// Sybil/disincentive medium suits the deployment.
+enum class InclusionModel : uint8_t {
+    STAKE_INCLUSION  = 0,
+    DOMAIN_INCLUSION = 1,
+};
+
+inline const char* to_string(InclusionModel m) {
+    switch (m) {
+    case InclusionModel::STAKE_INCLUSION:  return "stake-inclusion";
+    case InclusionModel::DOMAIN_INCLUSION: return "domain-inclusion";
+    }
+    return "?";
+}
+
+// ─── Genesis configuration ──────────────────────────────────────────────────
+// A GenesisConfig fully specifies a chain's initial state. Operators distribute
+// the JSON form before bootstrap; everyone confirms the derived genesis hash
+// before they will run nodes against it.
+
+struct GenesisCreator {
+    std::string domain;
+    PubKey      ed_pub{};         // Ed25519 pubkey
+    uint64_t    initial_stake{0}; // staked at genesis; counts toward MIN_STAKE
+    // rev.9 R1: optional region tag, declared at genesis for the initial
+    // creator set (mirrors what later REGISTER txs carry). Empty string =
+    // global pool (backward-compat: existing genesis files unchanged).
+    // Normalized to lowercase ASCII; charset [a-z0-9-_], max 32 bytes.
+    std::string region{};
+};
+
+struct GenesisAllocation {
+    std::string domain;
+    uint64_t    balance{0};
+};
+
+// Protocol-level philosophical anchor inscribed on every Determ deployment
+// unless the operator overrides at genesis-build time. Forms the default
+// value for GenesisConfig::genesis_message. Hash-mixing rule: when the
+// configured message equals this default, the genesis-hash builder skips
+// the mix (backward-compat invariant for pre-message genesis files); when
+// the operator overrides (to "" for explicit no-inscription, or to any
+// custom string), the hash incorporates it and produces a distinct chain
+// identity.
+inline constexpr const char* DEFAULT_GENESIS_MESSAGE =
+    "It is not valuable what you do but the ability to do it is the real value.";
+
+// Maximum byte length for genesis_message (validated at JSON load).
+inline constexpr size_t GENESIS_MESSAGE_MAX_BYTES = 256;
+
+struct GenesisConfig {
+    std::string                     chain_id;
+    // Optional inscribed genesis message — per-deployment cultural anchor,
+    // mission statement, regulatory disclosure, or commemorative text.
+    // Maximum GENESIS_MESSAGE_MAX_BYTES bytes. Defaults to
+    // DEFAULT_GENESIS_MESSAGE (above). Operators may override with any
+    // UTF-8 string up to the cap — license disclosures, news-headline
+    // timestamp anchors, mission statements, etc. Inscribed at genesis-
+    // build time, included in compute_genesis_hash when non-default,
+    // immutable thereafter. Accessible via the GenesisConfig stored at
+    // chain start (RPC exposure via a future `genesis_info` endpoint is a
+    // small follow-on; the field itself is the substrate).
+    std::string                     genesis_message{DEFAULT_GENESIS_MESSAGE};
+    uint32_t                        m_creators{3};
+    // Rev. 3 dual-mode: K = M = strong BFT (full unanimity); K < M = weak
+    // BFT (Phase 2 K-of-M threshold). Phase 1 unanimity unchanged across
+    // modes — censorship resistance is identical.
+    // Constraint (the genesis BAND): m_creators/2 < k_block_sigs <= m_creators,
+    // i.e. 1 <= K <= M AND 2K > M, enforced in GenesisConfig::validate()
+    // (src/chain/genesis.cpp) on both the JSON and the DGC1 load paths. The
+    // lower bound is QUORUM INTERSECTION — a NECESSARY condition, not the
+    // runtime invariant: no accept rule reads m_creators; the K-committee is
+    // drawn from the eligible pool N(h) (validator.cpp check_creator_selection)
+    // and REGISTER leaves N uncapped, so the bound that keeps two same-height
+    // committees from being disjoint (an UNATTRIBUTABLE fork) is 2K > N(h),
+    // which is OPEN (SECURITY.md S-054, DECISION CLOCK R-4). K == M is legal
+    // (unanimity; zero MD margin — BFT escalation may still tolerate a crash).
+    // Default = m_creators (strong).
+    uint32_t                        k_block_sigs{3};
+    // Rev. 4: per-block reward minted to creators alongside fees ("page reward"
+    // from the original Determ spec). Genesis-pinned. 0 = no subsidy (fees only).
+    uint64_t                        block_subsidy{0};
+    // E4: optional cap on total cumulative subsidy ever paid. 0 (default)
+    // preserves the historical perpetual-subsidy behavior — chain mints
+    // `block_subsidy` per block forever. Non-zero installs a finite
+    // self-terminating subsidy fund: once cumulative paid subsidy reaches
+    // this value, subsequent blocks distribute only transaction fees.
+    // Pairs with A1 unitary-balance invariant — accumulated_subsidy_
+    // tracks the actually-paid amount, so the invariant holds across
+    // the exhaustion transition.
+    uint64_t                        subsidy_pool_initial{0};
+    // E3: subsidy distribution mode.
+    //   FLAT     (0, default): each block pays `block_subsidy` evenly across
+    //                          creators. Steady, predictable, current behavior.
+    //   LOTTERY  (1): each block draws from a two-point distribution seeded by
+    //                 the block's `cumulative_rand`. Probability `1/M` of paying
+    //                 `block_subsidy * M`, otherwise 0. Expected value per block
+    //                 equals FLAT subsidy — total issuance schedule unchanged.
+    //                 M = `lottery_jackpot_multiplier` (must be >= 2).
+    // Pairs cleanly with E4 finite subsidy fund: lottery payouts still cap at
+    // remaining pool; once drained, lottery silently stops paying.
+    uint8_t                         subsidy_mode{0};                 // 0=FLAT, 1=LOTTERY
+    uint32_t                        lottery_jackpot_multiplier{0};   // required when LOTTERY, ignored when FLAT
+    // E1: optional Negative Entry Fee (NEF). When > 0, a pseudo-account at
+    // the all-zero anon address (0x0000…0000) is credited with this balance
+    // at genesis. On each REGISTER tx applied, half the current pool balance
+    // is transferred from the pool to the new registrant — bootstrap-time
+    // reward for early registrants. Pool drains geometrically (halves per
+    // registration), asymptotes to 0. Pool exhaustion does NOT block
+    // future REGISTERs; NEF just degrades to 0. 0 (default) preserves
+    // historical behavior (no pool, no NEF). The pool counts toward A1's
+    // genesis_total_; NEF is a balance transfer (pool -> new domain),
+    // not a mint, so the unitary invariant holds trivially.
+    uint64_t                        zeroth_pool_initial{0};
+
+    // Rev. 8 per-height BFT escalation. When `bft_enabled` is true, after
+    // `bft_escalation_threshold` aborts at the same height, the next round
+    // escalates from MD K-of-K to BFT ceil(2K/3) + designated proposer.
+    // False = MD-only (rev.7 behavior; chain may halt on persistent silent
+    // committee member, by design).
+    //
+    // S-045 fix (AbortCascadeLiveness.md §4.3 + T-4): default is 1, not 5. At
+    // M=K (zero MD margin) a single stuck member produces at most K-1 abort
+    // events per height (T-4 counter ceiling), so any default > K-1 froze
+    // escalation below the threshold FOREVER — the common one-dead-node halt.
+    // θ=1 is reached by the FIRST abort event (always forms), so the counter
+    // can never freeze below it. Gate 1 (`avail < k_target`) still bars
+    // premature escalation whenever MD margin exists, and the max(2,K-1) claim
+    // floor (S-044/F-a) means an abort event needs ≥2 honest observers — so θ=1
+    // does NOT let a single Byzantine node force BFT mode (S025 A_premature
+    // stays closed). Lower θ = escalate sooner when genuinely stuck, an
+    // analyzed-sound trade (S025 §5.3).
+    bool                            bft_enabled{true};
+    uint32_t                        bft_escalation_threshold{1};
+
+    // Rev. 8 follow-on: validator inclusion policy. Default is
+    // STAKE_INCLUSION (preserves rev.7/8 stake-based behavior).
+    // DOMAIN_INCLUSION chains pin min_stake = 0 (no stake gate);
+    // equivocation carries no L1 consequence in either mode (D4).
+    InclusionModel                  inclusion_model{InclusionModel::STAKE_INCLUSION};
+    // Min stake threshold for validator eligibility. Default 1000 for
+    // STAKE_INCLUSION; DOMAIN_INCLUSION chains pin this to 0.
+    // Genesis-pinned (mutable post-genesis only via A5 PARAM_CHANGE).
+    uint64_t                        min_stake{1000};
+
+    // D1: per-deployment CONFIDENTIAL-TX (shielded-pool) master switch.
+    // Default TRUE preserves the §3.22/§3.22b/§3.22c SHIELD / UNSHIELD /
+    // CONFIDENTIAL_TRANSFER accept behaviour. A chain that sets this FALSE
+    // rejects all three tx types at the (authoritative) validator accept-rule
+    // (submit + block validation), so no confidential tx is ever included — a
+    // deployment with no need for the CT layer (or under a regulatory ban on
+    // amount-hiding) turns it off wholesale. Genesis-pinned + consensus-critical:
+    // it is mixed into compute_genesis_hash ONLY when disabled (§ make_genesis_block)
+    // so CT-enabled chains keep byte-identical genesis hashes, while a chain that
+    // differs on the flag computes a DIFFERENT hash — two operators cannot silently
+    // diverge (one accepting a CT tx the other rejects). Immutable post-genesis.
+    bool                            confidential_tx_enabled{true};
+
+    // NC-8 profile gating (EncryptedNoteDeliveryDesign.md §5): the deployment
+    // crypto profile, promoted from a params.hpp posture label to a
+    // genesis-pinned CONSENSUS field so the profile-dependent encrypted-note
+    // wiring (delivery placement + recipient-key derivation) is deterministic
+    // per chain. MODERN (default) vs FIPS. Genesis-pinned + consensus-critical:
+    // mixed into compute_genesis_hash + emitted as a `k:crypto_profile` state
+    // leaf ONLY when non-default (FIPS), so MODERN chains are byte-identical to
+    // pre-field chains. Immutable post-genesis.
+    CryptoProfile                   crypto_profile{CryptoProfile::MODERN};
+
+    // A5 Phase 3: economic policy fields promoted from static constants
+    // in params.hpp to genesis-pinned, governance-mutable parameters.
+    // Defaults preserve pre-A5 behavior. Backward-compat: pre-Phase-3
+    // genesis files omit these and pick up the defaults silently;
+    // genesis-hash mix only includes them when they differ from the
+    // default so existing chain identities remain stable.
+    // suspension_slash is INERT since 2026-09-16 (D13): the round-1 abort
+    // stake deduction it sized is retired and no apply path reads it. It
+    // stays because it is genesis-hash-covered (when non-default), a `k:`
+    // state-root leaf, a snapshot field and a PARAM_CHANGE key; removing it
+    // is a genesis-schema change for a later increment.
+    uint64_t                        suspension_slash{10};
+    uint64_t                        unstake_delay{1000};
+
+    // R4: under-quorum merge thresholds. Backward-compat: pre-R4 genesis
+    // files omit these and pick up defaults silently. Genesis-hash mix
+    // skips them when they equal defaults.
+    //   merge_threshold_blocks: consecutive beacon-blocks of
+    //     eligible_in_region(S) < 2K + no SHARD_TIP_S before MERGE_BEGIN
+    //     fires (~2.5 min on the web profile at default).
+    //   revert_threshold_blocks: 2:1 hysteresis on the way back. Default
+    //     200 (~5 min). Higher than merge threshold to bias toward
+    //     stability — once merged, do not flap.
+    //   merge_grace_blocks: gap between block.height and the BEGIN's
+    //     effective_height. Lets shard committees observe the upcoming
+    //     transition before it takes effect.
+    uint32_t                        merge_threshold_blocks{100};
+    uint32_t                        revert_threshold_blocks{200};
+    uint32_t                        merge_grace_blocks{10};
+
+    // Rev. 9 sharding role. SINGLE preserves rev.8 behavior (one chain,
+    // no shards). BEACON / SHARD are the two roles in the sharded
+    // architecture; they're parsed and stored at this level so a single
+    // genesis JSON can describe either an unsharded chain or one chain
+    // within a sharded deployment.
+    ChainRole                       chain_role{ChainRole::SINGLE};
+    ShardId                         shard_id{0};                    // 0 for SINGLE/BEACON
+    uint32_t                        initial_shard_count{1};         // 1 = unsharded
+    uint32_t                        epoch_blocks{1000};             // E (Stage B1)
+    Hash                            shard_address_salt{};           // CSPRNG-generated at build time
+
+    // v2.7 F2 migration gate (per docs/proofs/F2-V210-IMPLEMENTATION-PLAN.md
+    // sub-step 4). Block height at which F2 view-reconciliation activates:
+    //   < v2_7_f2_active_from_height  : producer omits view fields,
+    //                                   validator skips V21..V26
+    //                                   (pre-activation = v1 behavior)
+    //   >= v2_7_f2_active_from_height : producer populates view roots +
+    //                                   lists; validator runs V21..V26
+    // Default 0 = active from genesis (new deployments opt into F2 from
+    // block 1). To preserve byte-identical chain identity for existing
+    // pre-F2 deployments, leave this field absent from existing genesis
+    // files (zero default → field absent from compute_genesis_hash mixin
+    // for back-compat; mixed in only when non-zero).
+    //
+    // Sentinel UINT64_MAX = "never activate F2 on this chain" (operator
+    // explicitly disables; the chain stays on v1 commit shape forever).
+    uint64_t                        v2_7_f2_active_from_height{0};
+
+    // rev.9 R1: per-shard committee region pin. Empty = global pool
+    // (backward-compat — existing deployments hash-stable). Non-empty
+    // restricts this chain's K-committee selection to validators
+    // tagged with the same region. Normalized to lowercase ASCII;
+    // charset [a-z0-9-_], max 32 bytes. Mixed into compute_genesis_hash
+    // so two shards differing only in committee_region have distinct
+    // genesis hashes.
+    std::string                     committee_region{};
+
+    // D3.5e-1 (S-036 Layer 2): the GENESIS-COMMITTED shard→region map for a
+    // BEACON chain — the committed replacement for the node-local
+    // shard_manifest.json whose sole consumer is the on_shard_tip region
+    // filter. Committing it makes the shard-tip verdict's region input part
+    // of the chain identity: two beacon validators can no longer verify
+    // different committees because their manifest FILES differ. Sorted by
+    // shard_id (canonical), each region normalized with the committee_region
+    // rules. Empty = absent (backward-compat — every existing genesis file
+    // hashes byte-identically; the manifest file remains the CURRENT/dev
+    // fallback). Validation at load: non-empty only on chain_role==BEACON,
+    // requires epoch_blocks >= 2 (epoch 1's rand anchor would otherwise be
+    // the genesis block, which BEACON_HEADER gossip can never carry), every
+    // shard_id < initial_shard_count, duplicates rejected. Mixed into
+    // compute_genesis_hash behind its own domain tag when non-empty.
+    std::vector<std::pair<ShardId, std::string>> shard_regions{};
+
+    // A5: governance mode. 0 = uncontrolled (consensus constants are
+    // genesis-pinned and immutable forever; current behavior — preserves
+    // byte-identical hashes for existing genesis files). 1 = governed
+    // (N-of-N keyholder multisig may emit PARAM_CHANGE txs to mutate a
+    // whitelisted parameter set mid-chain).
+    //
+    // Under governed mode, `param_keyholders` lists the deployment's
+    // founder Ed25519 pubkeys (set at genesis-build time, immutable
+    // except via PARAM_CHANGE referencing `param_keyholders` itself).
+    // `param_threshold` is the signature count required to ratify a
+    // PARAM_CHANGE; default = param_keyholders.size() (N-of-N).
+    //
+    // Whitelist of mutable parameter names (validator-enforced; off-list
+    // names rejected even with full N-of-N): `tx_commit_ms`,
+    // `block_sig_ms`, `abort_claim_ms`, `bft_escalation_threshold`,
+    // `SUSPENSION_SLASH`, `MIN_STAKE`, `UNSTAKE_DELAY`,
+    // `param_keyholders`, `param_threshold`. Off-list parameters
+    // (committee size K, consensus mode, sharding mode, chain identity,
+    // crypto primitives) require a new genesis = new chain.
+    uint8_t                         governance_mode{0};
+    std::vector<PubKey>             param_keyholders;
+    uint32_t                        param_threshold{0};
+
+    std::vector<GenesisCreator>     initial_creators;
+    std::vector<GenesisAllocation>  initial_balances;
+
+    // Text VIEW only (D2): the CLI's --json output and the build-time input
+    // shape `genesis-tool build <config.json>` consumes. Nothing at rest.
+    nlohmann::json       to_json() const;
+    static GenesisConfig from_json(const nlohmann::json& j);
+
+    // D2 inc8: the ONE rule set. Every semantic constraint (S-007 sane bounds,
+    // LOTTERY multiplier, governance coupling, beacon_shard_regions
+    // constraints) plus the normalizations (region canonicalization,
+    // shard_regions ordering, governed param_threshold N-of-N default) live
+    // here, so from_json and decode() enforce identical semantics. Idempotent.
+    void                 validate();
+
+    // D2 inc8: the canonical binary container ('DGC1'). The genesis config
+    // FILE is at-rest storage, so load/save are binary-only — no text
+    // fallback, no format sniffing. decode is bounds-checked, EXACT-
+    // consumption, rejects non-canonical regions / non-0-1 booleans /
+    // unsorted-or-duplicate beacon_shard_regions, and ends with validate().
+    // Hash-neutral by construction: compute_genesis_hash mixes field VALUES,
+    // so decode(encode(c)) hashes identically to c (gate GB-3).
+    std::vector<uint8_t> encode() const;
+    static GenesisConfig decode(const uint8_t* data, size_t len);
+
+    static GenesisConfig load(const std::string& path);
+    void                 save(const std::string& path) const;
+};
+
+// Build the canonical genesis block from a config.
+Block make_genesis_block(const GenesisConfig& cfg);
+
+// Deterministic hash of the genesis configuration. Operators pin this in their
+// node config; the node refuses to start against a chain whose block 0 hash
+// disagrees.
+Hash compute_genesis_hash(const GenesisConfig& cfg);
+
+// Legacy zeros-genesis: kept for tests / no-config fallback.
+Block make_genesis(const std::string& seed = "determ-genesis-2026");
+
+} // namespace determ::chain

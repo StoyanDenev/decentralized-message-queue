@@ -1,0 +1,5535 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Determ Contributors
+#include <determ/node/node.hpp>
+#include <determ/crypto/secure_zero.h>
+#include <determ/node/committee_pool.hpp>   // D3.3b-read: frozen committee POOL
+#include <determ/node/shardtip_verify.hpp>  // D3.5e-7b: shared shard-tip verify core
+#include <determ/chain/genesis.hpp>
+#include <determ/chain/params.hpp>
+#include <determ/chain/pq_tx_auth.hpp>   // §3.21 PQ_TRANSFER accept-rule
+#include <determ/chain/enote_scan.hpp>   // NC-8 §5 (inc.3) enote scan (read-only)
+#include <determ/chain/chain_summary.hpp> // RpcIngressGateAudit §3 #6 chain_summary page cap
+#include <determ/crypto/pq_address.hpp>  // §3.21 PQ-native bearer address (S-028)
+#include <determ/crypto/random.hpp>
+#include <determ/crypto/sha256.hpp>
+#include <determ/crypto/rng/rng.h>
+#include <determ/crypto/ed25519/ed25519_group.h>   // S-068: small-order REGISTER key mirror
+#include <set>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <stdexcept>
+#include <algorithm>
+
+namespace determ::node {
+
+namespace fs = std::filesystem;
+using json = nlohmann::json;
+
+// ─── Config ──────────────────────────────────────────────────────────────────
+
+json Config::to_json() const {
+    json j;
+    j["domain"]          = domain;
+    j["data_dir"]        = data_dir;
+    j["listen_port"]     = listen_port;
+    j["rpc_port"]        = rpc_port;
+    j["rpc_localhost_only"] = rpc_localhost_only;
+    j["rpc_auth_secret"] = rpc_auth_secret;
+    j["rpc_rate_per_sec"] = rpc_rate_per_sec;
+    j["rpc_rate_burst"]   = rpc_rate_burst;
+    j["gossip_rate_per_sec"] = gossip_rate_per_sec;
+    j["gossip_rate_burst"]   = gossip_rate_burst;
+    j["bootstrap_peers"] = bootstrap_peers;
+    j["beacon_peers"]    = beacon_peers;
+    j["shard_peers"]     = shard_peers;
+    j["key_path"]        = key_path;
+    j["chain_path"]      = chain_path;
+    j["snapshot_path"]   = snapshot_path;
+    j["shard_manifest_path"] = shard_manifest_path;
+    j["genesis_path"]    = genesis_path;
+    j["genesis_hash"]    = genesis_hash;
+    j["m_creators"]              = m_creators;
+    j["k_block_sigs"]            = k_block_sigs;
+    j["bft_enabled"]             = bft_enabled;
+    j["bft_escalation_threshold"]= bft_escalation_threshold;
+    j["chain_role"]              = static_cast<uint8_t>(chain_role);
+    j["sharding_mode"]           = static_cast<uint8_t>(sharding_mode);
+    j["shard_id"]                = shard_id;
+    j["initial_shard_count"]     = initial_shard_count;
+    j["epoch_blocks"]            = epoch_blocks;
+    j["tx_commit_ms"]    = tx_commit_ms;
+    j["block_sig_ms"]    = block_sig_ms;
+    j["abort_claim_ms"]  = abort_claim_ms;
+    j["region"]          = region;
+    j["committee_region"]= committee_region;
+    j["log_quiet"]       = log_quiet;
+    return j;
+}
+
+Config Config::from_json(const json& j) {
+    Config c;
+    c.domain          = j.value("domain",         "");
+    c.data_dir        = j.value("data_dir",       "");
+    c.listen_port     = j.value("listen_port",    uint16_t{7777});
+    c.rpc_port        = j.value("rpc_port",       uint16_t{7778});
+    c.rpc_auth_secret = j.value("rpc_auth_secret", std::string{});
+    c.rpc_rate_per_sec = j.value("rpc_rate_per_sec", 0.0);
+    c.rpc_rate_burst   = j.value("rpc_rate_burst",   0.0);
+    c.gossip_rate_per_sec = j.value("gossip_rate_per_sec", 0.0);
+    c.gossip_rate_burst   = j.value("gossip_rate_burst",   0.0);
+    // S-001: default to localhost-only. Absent field in legacy configs
+    // gets the secure default; operators must opt-in to all-interfaces.
+    c.rpc_localhost_only = j.value("rpc_localhost_only", true);
+    c.bootstrap_peers = j.value("bootstrap_peers", std::vector<std::string>{});
+    c.beacon_peers    = j.value("beacon_peers",    std::vector<std::string>{});
+    c.shard_peers     = j.value("shard_peers",     std::vector<std::string>{});
+    c.key_path        = j.value("key_path",       "");
+    c.chain_path      = j.value("chain_path",     "");
+    c.snapshot_path   = j.value("snapshot_path",  "");
+    c.shard_manifest_path = j.value("shard_manifest_path", "");
+    c.genesis_path    = j.value("genesis_path",   "");
+    c.genesis_hash    = j.value("genesis_hash",   "");
+    c.m_creators      = j.value("m_creators",     uint32_t{3});
+    c.k_block_sigs    = j.value("k_block_sigs",   c.m_creators);   // default = strong
+    c.bft_enabled              = j.value("bft_enabled",              true);
+    c.bft_escalation_threshold = j.value("bft_escalation_threshold", uint32_t{1});  // S-045: default 1 (was 5)
+    c.chain_role               = static_cast<ChainRole>(j.value("chain_role", uint8_t{0}));
+    // A6: sharding_mode persisted alongside chain_role. Default
+    // CURRENT preserves byte-identical behavior for pre-A6 configs that
+    // lack the field — those were necessarily running CURRENT semantics
+    // (rev.9 sharding) since EXTENDED requires R1+R2 plumbing that
+    // didn't exist when those configs were written.
+    c.sharding_mode            = static_cast<ShardingMode>(j.value("sharding_mode", uint8_t{1}));
+    c.shard_id                 = j.value("shard_id",                 ShardId{0});
+    c.initial_shard_count      = j.value("initial_shard_count",      uint32_t{1});
+    c.epoch_blocks             = j.value("epoch_blocks",             uint32_t{1000});
+    c.tx_commit_ms    = j.value("tx_commit_ms",   uint32_t{200});
+    c.block_sig_ms    = j.value("block_sig_ms",   uint32_t{200});
+    c.abort_claim_ms  = j.value("abort_claim_ms", uint32_t{200});
+    // rev.9 R1: optional region tags. Empty defaults preserve byte-
+    // identical behavior with pre-R1 configs.
+    c.region          = j.value("region",          std::string{});
+    c.committee_region= j.value("committee_region",std::string{});
+    c.log_quiet       = j.value("log_quiet",        false);
+    return c;
+}
+
+Config Config::load(const std::string& path) {
+    std::ifstream f(path);
+    if (!f) throw std::runtime_error("Cannot open config: " + path);
+    return from_json(json::parse(f));
+}
+
+void Config::save(const std::string& path) const {
+    fs::create_directories(fs::path(path).parent_path());
+    std::ofstream f(path);
+    if (!f) throw std::runtime_error("Cannot write config: " + path);
+    f << to_json().dump(2);
+}
+
+// ─── Node ────────────────────────────────────────────────────────────────────
+
+namespace {
+// §Q2 injection guard: the transport is bound to its loop, so a harness
+// must inject both or neither — mixing an injected one with an owned
+// default would pair a transport with the WRONG loop.
+void check_injection_pair(net::EventLoop* loop, net::Transport* transport) {
+    if ((loop == nullptr) != (transport == nullptr))
+        throw std::invalid_argument(
+            "Node: inject loop and transport together or not at all");
+}
+} // namespace
+
+Node::Node(const Config& cfg, determ::time::Clock& clock,
+           net::EventLoop* loop, net::Transport* transport,
+           determ::crypto::RngSource& rng)
+    : cfg_((check_injection_pair(loop, transport), cfg))
+    , clock_(clock)
+    , rng_(rng)
+    , owned_loop_(loop ? nullptr
+                       : std::make_unique<net::NativeEventLoop>())
+    , owned_transport_(
+          transport ? nullptr
+                    : std::make_unique<net::NativeTransport>(
+                          static_cast<net::NativeEventLoop&>(*owned_loop_)))
+    , loop_(loop ? *loop : *owned_loop_)
+    , transport_(transport ? *transport : *owned_transport_)
+    , gossip_(transport_)
+    , contrib_timer_(loop_)
+    , block_sig_timer_(loop_) {
+
+    validator_.set_k_block_sigs(cfg.k_block_sigs);
+    validator_.set_m_pool(cfg.m_creators);
+    // §Q1: the validator's freshness gate reads the SAME injected clock the
+    // node stamps proposer_time/abort-ts with (RealClock default => byte-
+    // identical; a virtual clock keeps stamping + validation consistent).
+    validator_.set_clock(clock_);
+
+    key_ = crypto::load_node_key(cfg_.key_path, cfg_.key_passphrase);
+    if (!cfg_.key_passphrase.empty()) {
+        determ_secure_zero(&cfg_.key_passphrase[0], cfg_.key_passphrase.size());
+        cfg_.key_passphrase.clear();
+    }
+
+    // Rev. 4: genesis is the source of truth for chain-wide constants
+    // (M, K, block_subsidy). Load it FIRST so chain replay during load uses
+    // the correct subsidy when crediting creators — and, since S-078, every
+    // other replay-relevant parameter (the chain_params set below).
+    uint64_t genesis_subsidy = 0;
+    uint64_t genesis_subsidy_pool_initial = 0;        // E4 (S-078: replay-relevant)
+    uint8_t  genesis_subsidy_mode = 0;                // E3 (same)
+    uint32_t genesis_lottery_jackpot_multiplier = 0;  // E3 (same)
+    uint64_t genesis_min_stake = 1000;
+    chain::CryptoProfile genesis_crypto_profile = chain::CryptoProfile::MODERN; // NC-8 profile gating
+    uint64_t genesis_suspension_slash = 10;
+    uint64_t genesis_unstake_delay    = 1000;
+    uint32_t genesis_merge_threshold  = 100;
+    uint32_t genesis_revert_threshold = 200;
+    uint32_t genesis_merge_grace      = 10;
+    chain::InclusionModel genesis_inclusion = chain::InclusionModel::STAKE_INCLUSION;
+    uint64_t genesis_f2_active = 0;  // v2.7 F2 / S-016 migration gate (genesis-pinned)
+    std::optional<chain::GenesisConfig> gcfg_opt;
+    if (!cfg_.genesis_path.empty()) {
+        auto gcfg = chain::GenesisConfig::load(cfg_.genesis_path);
+        if (gcfg.k_block_sigs == 0 || gcfg.k_block_sigs > gcfg.m_creators)
+            throw std::runtime_error(
+                "genesis: invalid k_block_sigs (must satisfy 1 <= K <= M)");
+        cfg_.m_creators              = gcfg.m_creators;
+        cfg_.k_block_sigs            = gcfg.k_block_sigs;
+        cfg_.bft_enabled             = gcfg.bft_enabled;
+        cfg_.bft_escalation_threshold= gcfg.bft_escalation_threshold;
+        cfg_.chain_role              = gcfg.chain_role;
+        cfg_.shard_id                = gcfg.shard_id;
+        cfg_.initial_shard_count     = gcfg.initial_shard_count;
+        cfg_.epoch_blocks            = gcfg.epoch_blocks;
+        // rev.9 R2: genesis is the source of truth for committee_region.
+        // The cfg_ copy is what check_if_selected reads; the validator
+        // mirror is set immediately below.
+        cfg_.committee_region        = gcfg.committee_region;
+        genesis_subsidy              = gcfg.block_subsidy;
+        genesis_subsidy_pool_initial = gcfg.subsidy_pool_initial;
+        genesis_subsidy_mode         = gcfg.subsidy_mode;
+        genesis_lottery_jackpot_multiplier = gcfg.lottery_jackpot_multiplier;
+        genesis_min_stake            = gcfg.min_stake;
+        genesis_crypto_profile       = gcfg.crypto_profile;
+        genesis_suspension_slash     = gcfg.suspension_slash;
+        genesis_unstake_delay        = gcfg.unstake_delay;
+        genesis_merge_threshold      = gcfg.merge_threshold_blocks;
+        genesis_revert_threshold     = gcfg.revert_threshold_blocks;
+        genesis_merge_grace          = gcfg.merge_grace_blocks;
+        genesis_inclusion            = gcfg.inclusion_model;
+        genesis_f2_active            = gcfg.v2_7_f2_active_from_height;
+        validator_.set_k_block_sigs(cfg_.k_block_sigs);
+        validator_.set_m_pool(cfg_.m_creators);
+        validator_.set_bft_enabled(cfg_.bft_enabled);
+        validator_.set_bft_escalation_threshold(cfg_.bft_escalation_threshold);
+        validator_.set_epoch_blocks(cfg_.epoch_blocks);
+        validator_.set_shard_id(cfg_.shard_id);
+        validator_.set_committee_region(cfg_.committee_region);
+        validator_.set_sharding_mode(cfg_.sharding_mode);
+        validator_.set_chain_role(cfg_.chain_role);   // D3.6 / S-036: beacon-only MERGE_EVENT gate
+        // D1: mirror the CT master switch from genesis (authoritative source).
+        // Default true => CT accepted (unchanged); a genesis that disabled it
+        // makes the validator reject SHIELD/UNSHIELD/CONFIDENTIAL_TRANSFER.
+        validator_.set_confidential_tx_enabled(gcfg.confidential_tx_enabled);
+        // §Q1: keep the validator's freshness gate on the node's injected
+        // clock across reconfig too (RealClock default => byte-identical).
+        validator_.set_clock(clock_);
+        // A5: governance state mirrored from genesis. Uncontrolled
+        // chains pass mode=0 + empty keyholders, which makes the
+        // validator reject any PARAM_CHANGE outright (the default).
+        validator_.set_governance_mode(gcfg.governance_mode);
+        validator_.set_param_keyholders(gcfg.param_keyholders);
+        validator_.set_param_threshold(gcfg.param_threshold);
+
+        // A5 Phase 2: install Chain → Validator parameter-changed hook.
+        // When a staged PARAM_CHANGE activates at a block boundary, the
+        // chain calls back for each (name, value) pair so the validator
+        // state mirrors any field that lives outside the chain's own
+        // instance state. Chain-local fields (MIN_STAKE → min_stake_)
+        // already updated themselves; here we only handle the validator-
+        // side fields.
+        chain_.set_param_changed_hook(
+            [this](const std::string& name,
+                     const std::vector<uint8_t>& value) {
+                if (name == "bft_escalation_threshold" && value.size() == 8) {
+                    uint64_t v = 0;
+                    for (int i = 0; i < 8; ++i) v |= uint64_t(value[i]) << (8 * i);
+                    validator_.set_bft_escalation_threshold(static_cast<uint32_t>(v));
+                } else if (name == "param_threshold" && value.size() == 8) {
+                    uint64_t v = 0;
+                    for (int i = 0; i < 8; ++i) v |= uint64_t(value[i]) << (8 * i);
+                    validator_.set_param_threshold(static_cast<uint32_t>(v));
+                } else if (name == "param_keyholders") {
+                    // Wire format: [count: u8] count × { ed_pub: 32B }
+                    if (!value.empty()) {
+                        uint8_t n = value[0];
+                        if (value.size() == size_t(1) + size_t(n) * 32) {
+                            std::vector<PubKey> ks;
+                            ks.reserve(n);
+                            for (uint8_t i = 0; i < n; ++i) {
+                                PubKey pk{};
+                                std::copy_n(value.begin() + 1 + i * 32, 32,
+                                            pk.begin());
+                                ks.push_back(pk);
+                            }
+                            validator_.set_param_keyholders(std::move(ks));
+                        }
+                    }
+                }
+                // A5 Phase 4: producer timing fields. Reads happen at
+                // timer-scheduling time inside on_phase_1_done /
+                // on_phase_2_done, so any update here is picked up on
+                // the next round. These do not need to live on Chain
+                // (replay doesn't depend on timing); cfg_ is the
+                // canonical runtime carrier.
+                else if (name == "tx_commit_ms" && value.size() == 8) {
+                    uint64_t v = 0;
+                    for (int i = 0; i < 8; ++i) v |= uint64_t(value[i]) << (8 * i);
+                    cfg_.tx_commit_ms = static_cast<uint32_t>(v);
+                }
+                else if (name == "block_sig_ms" && value.size() == 8) {
+                    uint64_t v = 0;
+                    for (int i = 0; i < 8; ++i) v |= uint64_t(value[i]) << (8 * i);
+                    cfg_.block_sig_ms = static_cast<uint32_t>(v);
+                }
+                else if (name == "abort_claim_ms" && value.size() == 8) {
+                    uint64_t v = 0;
+                    for (int i = 0; i < 8; ++i) v |= uint64_t(value[i]) << (8 * i);
+                    cfg_.abort_claim_ms = static_cast<uint32_t>(v);
+                }
+                // MIN_STAKE / UNSTAKE_DELAY / SUSPENSION_SLASH are
+                // chain-local: the chain wrote them itself before this
+                // hook fired, so no mirror needed here.
+            });
+
+        // A6 startup gate: enforce that the operator-selected sharding
+        // mode is consistent with the genesis being loaded. Defense in
+        // depth — genesis-tool already rejects most of these at build
+        // time, but a node can be pointed at any genesis file at start
+        // time. Mismatch here means the operator picked the wrong
+        // profile for this chain (or the genesis was tampered with);
+        // refusing to start is the safe response.
+        switch (cfg_.sharding_mode) {
+        case ShardingMode::NONE:
+            if (gcfg.chain_role != ChainRole::SINGLE) {
+                throw std::runtime_error(
+                    "sharding_mode=none requires chain_role=single, "
+                    "but genesis declares chain_role="
+                    + std::string(to_string(gcfg.chain_role)));
+            }
+            if (!gcfg.committee_region.empty()) {
+                throw std::runtime_error(
+                    "sharding_mode=none rejects non-empty "
+                    "committee_region (got '" + gcfg.committee_region
+                    + "') — region is meaningless in single-chain "
+                      "deployments");
+            }
+            for (auto& gc : gcfg.initial_creators) {
+                if (!gc.region.empty()) {
+                    throw std::runtime_error(
+                        "sharding_mode=none rejects per-creator region "
+                        "tag (creator '" + gc.domain + "' has region='"
+                        + gc.region + "')");
+                }
+            }
+            // D3.3b-read (RP-4): NONE is a single-chain posture, so a genesis
+            // with initial_shard_count>1 is nonsensical AND would spuriously
+            // arm the shard_count>1 committee-checkpoint fold + selection pin on
+            // a chain the operator declared single. Fail closed. (CURRENT
+            // multishard stays valid — the pin gates on the chain-visible
+            // shard_count()>1, not sharding_mode, and handles it correctly.)
+            if (gcfg.initial_shard_count > 1) {
+                throw std::runtime_error(
+                    "sharding_mode=none forbids initial_shard_count>1 (got "
+                    + std::to_string(gcfg.initial_shard_count)
+                    + "); shard_count>1 requires sharding_mode=current or extended");
+            }
+            break;
+        case ShardingMode::CURRENT:
+            // CURRENT accepts BEACON/SHARD/SINGLE chain_role. The
+            // committee_region must be empty (no regional grouping in
+            // CURRENT — that's exactly what EXTENDED is for). Per-
+            // creator region is tolerated silently for forward compat
+            // with chains that ship region tags but don't yet use them.
+            if (!gcfg.committee_region.empty()) {
+                throw std::runtime_error(
+                    "sharding_mode=current rejects non-empty "
+                    "committee_region (got '" + gcfg.committee_region
+                    + "') — regional committees require "
+                      "sharding_mode=extended");
+            }
+            break;
+        case ShardingMode::EXTENDED:
+            // EXTENDED requires the cascading-merge invariant: a
+            // regional shard deployment with fewer than 3 shards is
+            // degenerate (the under-quorum merge mechanism that
+            // justifies the EXTENDED mode needs at least 3 shards to
+            // make a meaningful modular fold). Re-checked here as
+            // defense in depth on top of the genesis-tool guard.
+            //
+            // Originally drafted as a proposed S-038 mitigation; the
+            // S-038 number in SECURITY.md was later reassigned to
+            // "state_root verification gate dormant". The invariant
+            // itself is documented inline in SECURITY.md §6.5 T-004
+            // and README §16.5.
+            if (gcfg.initial_shard_count < 3) {
+                throw std::runtime_error(
+                    "sharding_mode=extended requires initial_shard_count "
+                    ">= 3 (got " + std::to_string(gcfg.initial_shard_count)
+                    + ") — cascading-merge invariant "
+                      "(see SECURITY.md §6.5 + README §16.5)");
+            }
+            break;
+        }
+
+        // rev.9 B2c.2-full: SHARD chains source committee rand from the
+        // beacon's chain (zero-trust: both sides derive the same committee
+        // from the same beacon-anchored rand). Provider returns nullopt
+        // when beacon headers haven't reached the requested height yet —
+        // validator falls back to local chain (early bootstrap; shard
+        // registry mirrors beacon at genesis, so behavior is identical
+        // until headers begin to land).
+        if (cfg_.chain_role == ChainRole::SHARD) {
+            validator_.set_external_epoch_rand_provider(
+                [this](uint64_t epoch_start_height) -> std::optional<Hash> {
+                    // D3.5e-3: anchor = BEACON block INDEX epoch_start-1;
+                    // beacon_headers_[j] == INDEX j+1, so that block is at
+                    // position epoch_start-2. MUST equal current_epoch_rand's
+                    // formula EXACTLY (shard producer/validator consistency).
+                    if (epoch_start_height < 2) return std::nullopt;
+                    if (epoch_start_height - 1 > beacon_headers_.size())
+                        return std::nullopt;
+                    return beacon_headers_[epoch_start_height - 2].cumulative_rand;
+                });
+        }
+
+        // R2: BEACON-role nodes optionally load a shard manifest to learn
+        // per-shard committee_region. Required under EXTENDED (where region
+        // enforcement matters); optional under CURRENT (where every shard
+        // has committee_region == "" anyway). Manifest path defaults to
+        // <data_dir>/shard_manifest.json if cfg_.shard_manifest_path is empty.
+        // D3.5e-2: a genesis-committed shard→region map SATISFIES the EXTENDED
+        // manifest requirement — the manifest FILE becomes optional (loaded
+        // only for the conflict check below). The legacy manifest-required
+        // path is unchanged when the genesis carries no map.
+        const bool has_committed_map =
+            (cfg_.chain_role == ChainRole::BEACON
+             && !gcfg.shard_regions.empty());
+        if (cfg_.chain_role == ChainRole::BEACON) {
+            std::string mpath = cfg_.shard_manifest_path;
+            if (mpath.empty() && !cfg_.data_dir.empty())
+                mpath = cfg_.data_dir + "/shard_manifest.json";
+            bool extended =
+                (cfg_.sharding_mode == ShardingMode::EXTENDED);
+            std::ifstream mf(mpath);
+            if (!mf) {
+                if (extended && !has_committed_map) {
+                    throw std::runtime_error(
+                        "beacon (EXTENDED) requires a shard→region map: either "
+                        "the genesis-committed `beacon_shard_regions` "
+                        "(authoritative, S-036 Layer 2) or a shard_manifest at '"
+                        + mpath + "'. Neither found. Set shard_manifest_path in "
+                        "config.json or pass --shard-manifest <path>.");
+                }
+                // CURRENT / NONE (or EXTENDED with a committed map): skip.
+            } else {
+                json mj;
+                try { mj = json::parse(mf); }
+                catch (std::exception& e) {
+                    throw std::runtime_error(
+                        std::string("shard_manifest parse error: ") + e.what());
+                }
+                if (!mj.is_object() || !mj.contains("shards")
+                    || !mj["shards"].is_array()) {
+                    throw std::runtime_error(
+                        "shard_manifest: expected {\"shards\": [...]}");
+                }
+                std::set<ShardId> seen;
+                for (auto& entry : mj["shards"]) {
+                    if (!entry.is_object()) {
+                        throw std::runtime_error(
+                            "shard_manifest: each entry must be an object");
+                    }
+                    ShardId sid = entry.value("shard_id", ShardId{0});
+                    std::string region = entry.value("committee_region", "");
+                    // Normalize + validate region (same rules as
+                    // genesis-load + REGISTER apply elsewhere).
+                    for (auto& c : region) {
+                        if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+                    }
+                    if (region.size() > 32) {
+                        throw std::runtime_error(
+                            "shard_manifest: region too long (shard_id="
+                            + std::to_string(sid) + ", "
+                            + std::to_string(region.size()) + " > 32 bytes)");
+                    }
+                    for (char c : region) {
+                        bool ok = (c >= 'a' && c <= 'z')
+                               || (c >= '0' && c <= '9')
+                               || c == '-' || c == '_';
+                        if (!ok) {
+                            throw std::runtime_error(
+                                "shard_manifest: region for shard_id="
+                                + std::to_string(sid)
+                                + " contains forbidden character (charset is [a-z0-9-_])");
+                        }
+                    }
+                    if (!seen.insert(sid).second) {
+                        throw std::runtime_error(
+                            "shard_manifest: duplicate shard_id="
+                            + std::to_string(sid));
+                    }
+                    shard_committee_regions_[sid] = region;
+                }
+                std::cout << "[node] loaded shard_manifest with "
+                          << shard_committee_regions_.size() << " entries from "
+                          << mpath << "\n";
+            }
+        }
+
+        // D3.5e-2 (S-036 Layer 2): the GENESIS-COMMITTED shard→region map is
+        // AUTHORITATIVE when present — the committed replacement for the
+        // node-local shard_manifest.json (whose region input to on_shard_tip
+        // was un-committed, so two beacons could silently verify different
+        // committees). A BEACON that carries `beacon_shard_regions` in its
+        // genesis uses it as the source of truth; a coexisting manifest FILE
+        // that DISAGREES is a startup fail-close (the operator must not leave
+        // a stale file that contradicts chain identity). The legacy
+        // manifest-only path is unchanged when the genesis carries no map, so
+        // every existing EXTENDED test is byte-neutral until the map is built
+        // in by `genesis-tool build-sharded` (D3.5e-1) + the verdict pin
+        // consumes it (D3.5e-4).
+        if (has_committed_map) {
+            std::map<ShardId, std::string> committed;
+            for (auto& [sid, region] : gcfg.shard_regions)
+                committed[sid] = region;
+            if (!shard_committee_regions_.empty()
+                && shard_committee_regions_ != committed) {
+                throw std::runtime_error(
+                    "beacon: the shard_manifest file conflicts with the "
+                    "genesis-committed beacon_shard_regions map. Remove the "
+                    "manifest file — the committed map is authoritative "
+                    "(S-036 Layer 2); a stale file that disagrees with chain "
+                    "identity is a startup error, not a silent override.");
+            }
+            shard_committee_regions_ = std::move(committed);
+            std::cout << "[node] shard→region map: "
+                      << shard_committee_regions_.size()
+                      << " entries from GENESIS (committed, authoritative)\n";
+        }
+        // D3.5e-7d: mirror the (now-final) shard→region map into the validator so
+        // check_shardtip_witnesses region-filters the frozen source pool + binds
+        // rec.region against the SAME authoritative view on_shard_tip used —
+        // committed map when present, else the manifest-loaded map (both fixed at
+        // startup; genesis-constant, replay-safe, no wire). Empty on every
+        // non-beacon / unsharded node → every lookup yields "" (global pool),
+        // and the check never runs there anyway (records only fold on a
+        // BEACON+EXTENDED chain).
+        validator_.set_beacon_shard_regions(shard_committee_regions_);
+
+        // D3.5e-7d ops warning (adversarial-review low finding): as of e-7d the
+        // shard→region map is CONSENSUS-CRITICAL — check_shardtip_witnesses binds
+        // rec.region against it at block accept. On the LEGACY manifest-only path
+        // (no genesis-committed beacon_shard_regions), the map is node-local with
+        // NO cross-node consistency enforcement, so a divergent/stale
+        // shard_manifest.json silently stalls this node the first time a distress
+        // record for a mis-mapped shard folds. The committed map (build-sharded
+        // genesis) is immune. Warn loudly so an operator migrating regions can't
+        // ship a silent split-brain; the committed map is the supported path.
+        if (gcfg.chain_role == ChainRole::BEACON
+            && !has_committed_map && !shard_committee_regions_.empty()) {
+            std::cerr << "[node] WARNING: EXTENDED beacon using a MANIFEST-ONLY "
+                         "shard→region map (no genesis-committed beacon_shard_regions). "
+                         "As of D3.5e-7d this map is consensus-critical (bound at block "
+                         "accept); a shard_manifest.json that disagrees with the "
+                         "producing committee will stall this node at distress-fold "
+                         "time. Prefer a genesis-committed map (genesis-tool "
+                         "build-sharded).\n";
+        }
+
+        gcfg_opt = std::move(gcfg);
+    }
+
+    Hash genesis_shard_salt{};
+    uint32_t genesis_shard_count = 1;
+    ShardId  genesis_my_shard    = 0;
+    if (gcfg_opt.has_value()) {
+        genesis_shard_salt  = gcfg_opt->shard_address_salt;
+        genesis_shard_count = gcfg_opt->initial_shard_count;
+        genesis_my_shard    = gcfg_opt->shard_id;
+    }
+    // D3.4/D3.3b (RP-4): the epoch-committee fold + `cc:` state leaf (and the
+    // read-side committee pin it feeds) are EXTENDED-only. The Chain layer can't
+    // see sharding_mode, so its fold gates on epoch_blocks_ > 0 — hand it a
+    // non-zero epoch length ONLY under EXTENDED. A CURRENT chain, INCLUDING
+    // multi-shard CURRENT (PROFILE_REGIONAL = SHARD+CURRENT, shard_count>1), then
+    // keeps chain_.epoch_blocks_ == 0 → the fold never fires → no `cc:` leaf →
+    // state_root byte-identical, and committee_pin_active stays false (no
+    // checkpoint) → the read pin falls back to present-head. epoch_blocks_ on the
+    // Chain is consumed ONLY by the D3.3b fold; current_epoch_index() reads
+    // cfg_.epoch_blocks at the node, and the validator keeps its own copy.
+    const uint32_t chain_epoch_blocks =
+        (cfg_.sharding_mode == ShardingMode::EXTENDED) ? cfg_.epoch_blocks : 0;
+    // S-078: ONE parameter set, built from the genesis just parsed (or the
+    // defaults when no genesis_path is configured), handed to Chain::load so
+    // the store REPLAY is seeded with it BEFORE the first block re-applies,
+    // and applied unchanged to the genesis-bootstrap chain below. Every field
+    // here is either a `k:` state-root leaf or a fold/floor input, so a
+    // post-load setter is too late: the replay's S-033 recompute has already
+    // compared each stored block's declared state_root against a chain that
+    // carried the in-class defaults (min_stake 1000, MODERN, FLAT subsidy,
+    // ...), and any non-default genesis threw on its first restart. No setter
+    // for these fields runs after load: the values the replay ends with are
+    // the committed ones (a governance PARAM_CHANGE activated during the
+    // replay must not be reset to the genesis value afterwards).
+    chain::Chain::Params chain_params;
+    chain_params.block_subsidy              = genesis_subsidy;
+    chain_params.subsidy_pool_initial       = genesis_subsidy_pool_initial;
+    chain_params.subsidy_mode               = genesis_subsidy_mode;
+    chain_params.lottery_jackpot_multiplier = genesis_lottery_jackpot_multiplier;
+    chain_params.min_stake                  = genesis_min_stake;
+    chain_params.crypto_profile             = genesis_crypto_profile;  // NC-8 profile gating
+    chain_params.suspension_slash           = genesis_suspension_slash;
+    chain_params.unstake_delay              = genesis_unstake_delay;
+    chain_params.merge_threshold_blocks     = genesis_merge_threshold;
+    chain_params.revert_threshold_blocks    = genesis_revert_threshold;
+    chain_params.merge_grace_blocks         = genesis_merge_grace;
+    chain_params.shard_count                = genesis_shard_count;
+    chain_params.shard_salt                 = genesis_shard_salt;
+    chain_params.my_shard_id                = genesis_my_shard;
+    chain_params.epoch_blocks               = chain_epoch_blocks;  // D3.3b (EXTENDED-only, see above)
+    chain_params.k_block_sigs               = cfg_.k_block_sigs;   // S-051 floor K
+    chain_ = chain::Chain::load(cfg_.chain_path, chain_params);
+
+    if (chain_.empty()) {
+        // rev.9 B6.basic: prefer snapshot bootstrap when configured.
+        // Skips block-by-block replay; state is restored directly from
+        // the snapshot's accounts/stakes/registrants/dedup maps. Tail
+        // headers in the snapshot become blocks_; subsequent blocks
+        // apply normally. The snapshot's claimed head_hash is verified
+        // against compute_hash() on the tail head (rejects loudly on
+        // mismatch). Genesis bootstrap is skipped when snapshot loads
+        // successfully — no need for the original genesis to be present.
+        if (!cfg_.snapshot_path.empty()
+            && std::filesystem::exists(cfg_.snapshot_path)) {
+            try {
+                // D2 inc8: at-rest snapshots are the canonical binary DSN1
+                // container — raw bytes, no format sniffing, no text fallback.
+                std::ifstream sf(cfg_.snapshot_path, std::ios::binary);
+                std::string sbytes((std::istreambuf_iterator<char>(sf)),
+                                    std::istreambuf_iterator<char>());
+                // SnapshotRestoreGateAudit A1-revalidate: this is the node's
+                // operator-opt-in snapshot adoption — require the A1 unitary-balance
+                // identity so a corrupt/tampered snapshot fails cleanly HERE rather
+                // than wedging the node on its first post-restore block apply.
+                chain_ = chain::Chain::decode_state(
+                    reinterpret_cast<const uint8_t*>(sbytes.data()),
+                    sbytes.size(), /*require_supply_invariant=*/true);
+                // restore_from_snapshot reads constants from the
+                // snapshot itself; they should match what genesis
+                // would set, but we do not require gcfg_opt here.
+                std::cout << "[node] restored from snapshot "
+                          << cfg_.snapshot_path
+                          << " block_index=" << chain_.head().index
+                          << " head=" << to_hex(chain_.head_hash())
+                          << " accounts=" << chain_.accounts().size()
+                          << " stakes=" << chain_.stakes().size()
+                          << " registrants=" << chain_.registrants().size()
+                          << "\n";
+                // Persist as the working chain.json so subsequent
+                // restarts see a populated chain (they'll re-apply
+                // the tail headers — apply on already-applied state
+                // is a no-op for genesis-skipped paths since there's
+                // no prior state to overwrite). Note: the snapshot
+                // file remains the canonical state seed; do not
+                // delete it. D2 inc8: the block store is the only
+                // at-rest chain form, so one write does it.
+                chain_.save_incremental(cfg_.chain_path);
+                goto chain_loaded;
+            } catch (std::exception& e) {
+                std::cerr << "[node] snapshot restore failed: " << e.what()
+                          << "; falling back to genesis bootstrap\n";
+            }
+        }
+
+        // No on-disk chain: bootstrap from genesis config if provided, else
+        // fall back to the legacy zeros-genesis.
+        if (gcfg_opt.has_value()) {
+            chain::Block g = chain::make_genesis_block(*gcfg_opt);
+            std::string actual_hash = to_hex(g.compute_hash());
+            if (!cfg_.genesis_hash.empty() && actual_hash != cfg_.genesis_hash)
+                throw std::runtime_error(
+                    "genesis hash mismatch: config pinned " + cfg_.genesis_hash
+                  + " but loaded genesis hashes to " + actual_hash);
+            chain_ = chain::Chain(std::move(g));
+            // S-078: the SAME parameter set the store replay is seeded with
+            // (chain_params above), so a restart replays under exactly the
+            // values this bootstrap produced under. Block 0's apply reads
+            // none of these fields, so seeding after the genesis ctor here
+            // and before the replay in load() are equivalent.
+            chain_.set_params(chain_params);
+            const char* mode = (cfg_.k_block_sigs == cfg_.m_creators)
+                              ? "strong" : "hybrid";
+            std::cout << "[node] genesis loaded from " << cfg_.genesis_path
+                      << " hash=" << actual_hash
+                      << " role=" << to_string(cfg_.chain_role)
+                      << " shard_id=" << cfg_.shard_id
+                      << " M=" << cfg_.m_creators
+                      << " K=" << cfg_.k_block_sigs
+                      << " subsidy=" << genesis_subsidy
+                      << " mode=" << mode
+                      << " inclusion=" << to_string(genesis_inclusion)
+                      << " min_stake=" << genesis_min_stake << "\n";
+        } else {
+            chain_ = chain::Chain(chain::make_genesis());
+            std::cerr << "[node] WARNING: no genesis_path configured; "
+                         "using legacy zeros-genesis (chain cannot bootstrap)\n";
+        }
+    } else if (!cfg_.genesis_hash.empty()) {
+        std::string actual_hash = to_hex(chain_.at(0).compute_hash());
+        if (actual_hash != cfg_.genesis_hash)
+            throw std::runtime_error(
+                "stored chain genesis " + actual_hash
+              + " does not match pinned " + cfg_.genesis_hash);
+    }
+
+chain_loaded:
+    // v2.7 F2 / S-016 migration gate (genesis-pinned). Set after all chain_
+    // construction paths (load / snapshot-restore / genesis-bootstrap / legacy)
+    // converge here, so every path picks it up. 0 = active from genesis;
+    // UINT64_MAX = never (chain stays on the v1 commit shape).
+    chain_.set_f2_active_from_height(genesis_f2_active);
+    // S-051: the genesis-consistent committee size K = the eligibility-floor
+    // threshold, ALL sharding modes (the reproduced halt was on unsharded
+    // clusters). Same convergence-label discipline as f2 above: K is config-
+    // pinned, NOT persisted in snapshots, and restore_from_snapshot at the
+    // branch above REPLACES chain_ — so only this post-convergence site (plus
+    // the load() param, which must precede the internal replay's fold-in)
+    // guarantees every construction path carries K before the first
+    // eligibility read (build_from_chain below) or live fold.
+    chain_.set_k_block_sigs(cfg_.k_block_sigs);
+    registry_ = NodeRegistry::build_from_chain(chain_, chain_.height());
+
+    gossip_.set_hello(cfg_.domain, cfg_.listen_port);
+    gossip_.set_chain_identity(cfg_.chain_role, cfg_.shard_id);
+    // S-014 (gossip side): per-peer-IP token bucket. 0/0 disables (default).
+    gossip_.set_rate_limit(cfg_.gossip_rate_per_sec, cfg_.gossip_rate_burst);
+    // S-027: propagate operator log-volume flag to the gossip layer
+    // so the chatty per-connection diagnostic lines respect it.
+    gossip_.set_log_quiet(cfg_.log_quiet);
+    gossip_.on_block         = [this](auto& b)   { on_block(b); };
+    gossip_.on_tx            = [this](auto& tx)  { on_tx(tx); };
+    gossip_.on_contrib       = [this](auto& c)   { on_contrib(c); };
+    gossip_.on_block_sig     = [this](auto& s)   { on_block_sig(s); };
+    gossip_.on_abort_claim   = [this](auto& a)   { on_abort_claim(a); };
+    gossip_.on_abort_event   = [this](auto bi, auto& ph, auto& e)
+                                  { on_abort_event(bi, ph, e); };
+    gossip_.on_equivocation_evidence = [this](auto& ev)
+                                  { on_equivocation_evidence(ev); };
+    gossip_.on_beacon_header  = [this](auto& b)  { on_beacon_header(b); };
+    gossip_.on_shard_tip      = [this](auto sid, auto& t) { on_shard_tip(sid, t); };
+    gossip_.on_cross_shard_receipt_bundle =
+        [this](auto sid, auto& src_block, auto& relay) {
+            on_cross_shard_receipt_bundle(sid, src_block, relay);
+        };
+    gossip_.on_snapshot_request = [this](auto headers, auto peer) {
+        on_snapshot_request(headers, peer);
+    };
+    gossip_.on_headers_request = [this](auto from, auto count, auto peer) {
+        on_headers_request(from, count, peer);
+    };
+    gossip_.on_get_chain     = [this](auto idx, auto cnt, auto peer)
+                                  { on_get_chain(idx, cnt, peer); };
+    gossip_.on_chain_response = [this](auto& blocks, auto has_more, auto peer)
+                                  { on_chain_response(blocks, has_more, peer); };
+    gossip_.on_status_request  = [this](auto peer)
+                                  { on_status_request(peer); };
+    gossip_.on_status_response = [this](auto h, auto& gh, auto peer)
+                                  { on_status_response(h, gh, peer); };
+}
+
+Node::~Node() {
+    stop();
+    // stop() racing a mid-startup run() can leave threads spawned AFTER
+    // its joins ran (they start into the stopped loop and exit at once,
+    // but stay joinable). Sweep them so no joinable std::thread reaches
+    // member destruction (std::terminate); both sweeps are no-ops on the
+    // normal path where stop() already joined everything.
+    join_loop_threads();
+    save_stop_.store(true);
+    save_cv_.notify_all();
+    if (save_thread_.joinable()) save_thread_.join();
+}
+
+// inc.3: the network-setup steps shared by run() and start_external().
+// gossip listen + connect the bootstrap/role peer lists. Factored out of
+// run() verbatim (same order) so run() stays byte-identical.
+void Node::listen_and_connect() {
+    gossip_.listen(cfg_.listen_port);
+
+    auto connect_addrs = [this](const std::vector<std::string>& addrs) {
+        for (auto& addr : addrs) {
+            auto colon = addr.rfind(':');
+            if (colon == std::string::npos) continue;
+            std::string host = addr.substr(0, colon);
+            uint16_t port = static_cast<uint16_t>(std::stoi(addr.substr(colon + 1)));
+            gossip_.connect(host, port);
+        }
+    };
+    connect_addrs(cfg_.bootstrap_peers);
+    // rev.9 B2c.5c: shard-role nodes connect to beacon nodes; beacon-role
+    // nodes (optionally) connect to shard nodes. The role-based gossip
+    // filter (B2c.5b) ensures cross-chain peers don't pollute intra-chain
+    // state. SINGLE-role chains ignore both lists.
+    if (cfg_.chain_role == ChainRole::SHARD) connect_addrs(cfg_.beacon_peers);
+    if (cfg_.chain_role == ChainRole::BEACON) connect_addrs(cfg_.shard_peers);
+}
+
+// inc.3: arm the startup grace timer (shared by run() and start_external()).
+// The grace NativeTimer routes through loop_, so under a virtual-time loop it
+// fires only when the driver advances logical time to 1500ms.
+void Node::arm_startup_grace() {
+    // Initial sync probe with a startup grace period: give bootstrap peers
+    // a chance to connect before we engage consensus. Without this, a fresh
+    // multi-node cluster fires the first round before peers are reachable,
+    // the contrib phase aborts (broadcast goes nowhere), and per-node
+    // generations diverge; recovery never converges.
+    auto grace = std::make_shared<net::NativeTimer>(loop_);
+    grace->arm(std::chrono::milliseconds(1500), [this, grace] {
+        std::unique_lock<std::shared_mutex> lk(state_mutex_);
+        if (gossip_.peer_count() == 0) {
+            state_ = SyncState::IN_SYNC;
+            check_if_selected();
+            return;
+        }
+        ++status_requests_sent_;
+        gossip_.broadcast(net::make_status_request());
+    });
+}
+
+void Node::run() {
+    running_ = true;
+    listen_and_connect();
+
+    {
+        // Spawn under the same mutex join_loop_threads() takes: a
+        // cross-thread stop() racing this startup section must not
+        // iterate threads_ while it grows. If stop() wins the lock first,
+        // these threads start into an already-stopped loop and exit
+        // immediately; run()'s tail join collects them.
+        std::lock_guard<std::mutex> lk(threads_join_mutex_);
+        unsigned n = std::max(1u, std::thread::hardware_concurrency());
+        for (unsigned i = 0; i < n; ++i)
+            threads_.emplace_back([this] { loop_.run(); });
+    }
+
+    // A9 / S-031 follow-on: spawn the async chain.save worker.
+    // Sits idle on save_cv_ until enqueue_save() flips save_pending_.
+    // See save_worker_loop() below for the loop body. The thread is
+    // joined in stop() after save_stop_ is set and save_cv_ is notified.
+    save_thread_ = std::thread([this] { save_worker_loop(); });
+
+    arm_startup_grace();
+
+    join_loop_threads();
+}
+
+// inc.3: the no-self-thread entry — see the node.hpp contract. Identical
+// startup to run() (listen + connect + grace arm) but spawns NO loop worker
+// threads, NO async save worker, and does NOT block. The caller drives loop_
+// (a virtual-time VirtualEventLoop) itself via run_until_idle() /
+// advance_to_next_timer(), so a scenario replays byte-identically with no
+// wall-clock worker concurrency. Persistence is off in this mode (no save
+// worker); stop() still performs the final synchronous save if called.
+void Node::start_external() {
+    running_ = true;
+    listen_and_connect();
+    arm_startup_grace();
+}
+
+void Node::join_loop_threads() {
+    std::lock_guard<std::mutex> lk(threads_join_mutex_);
+    for (auto& t : threads_) if (t.joinable()) t.join();
+}
+
+void Node::stop() {
+    if (running_.exchange(false)) {
+        loop_.stop();
+        join_loop_threads();
+
+        // A9 / S-031 follow-on: wind down the save worker. Signal stop,
+        // notify the cv, join. After join, run one final synchronous
+        // save below to guarantee the chain.json on disk reflects the
+        // most-recent applied state (the worker may have been waiting
+        // when stop was called, with a save_pending flag set but not
+        // yet acted on, or may have completed an earlier save before
+        // the last apply landed).
+        save_stop_.store(true);
+        save_cv_.notify_all();
+        if (save_thread_.joinable()) save_thread_.join();
+
+        // v2.20: wind down streaming subscribers — parked writers wake,
+        // deliver a final error{code=shutdown} frame, close; in-flight
+        // writes are broken by a socket close so the joins are bounded.
+        shutdown_subscribers("shutdown");
+
+        // Final synchronous save covers two cases:
+        //  1. save_pending_ was set when stop fired — worker exits
+        //     loop before processing the flag.
+        //  2. An apply landed between the worker's last save and
+        //     stop() — no pending flag, but disk is stale.
+        // Both are made-good by writing once more here. D2 inc8: there is
+        // exactly ONE store now — the binary block store + manifest. The
+        // legacy full chain.json graceful-stop artifact is gone; offline
+        // consumers pull `determ chain-export --json` instead.
+        chain_.save_incremental(cfg_.chain_path);
+    }
+}
+
+// A9 / S-031 follow-on: async chain.save worker loop. Waits on
+// save_cv_ until either save_pending_ flips true (work to do) or
+// save_stop_ flips true (shutdown). On wake-with-work: clear the
+// flag, take state_mutex_'s shared_lock, call chain_.save(),
+// release the lock. Multiple notify_one calls during a running
+// save coalesce: the flag stays set, and one additional save fires
+// after the running one completes.
+//
+// Lock semantics: chain_.save() under shared_lock is concurrent with
+// RPC readers (which already hold shared_lock for their queries).
+// It DOES serialize against the next apply's unique_lock acquisition.
+// On long chains where serialize+write dominates, the next apply
+// blocks until the save finishes — same as the pre-fix behavior in
+// the limit, but with the difference that the save is no longer
+// holding the unique_lock through the disk write. The async path
+// helps most when RPCs dominate the workload (readers proceed in
+// parallel with the save), and is a stepping stone to the eventual
+// one-file-per-block model (Phase 2D) which makes save O(1).
+void Node::save_worker_loop() {
+    while (true) {
+        bool do_save = false;
+        {
+            std::unique_lock<std::mutex> lk(save_mutex_);
+            save_cv_.wait(lk, [&]() {
+                return save_pending_.load() || save_stop_.load();
+            });
+            if (save_stop_.load()) {
+                // Don't process the in-flight flag here — stop() will
+                // run the final synchronous save after we exit, so any
+                // pending work is covered. This avoids a race where the
+                // worker reads chain_ while stop() is destroying state.
+                return;
+            }
+            // Clear the flag while still holding save_mutex_ so an
+            // enqueue_save() arriving NOW will re-set the flag and the
+            // next iteration will run again. This guarantees no
+            // missed save.
+            save_pending_.store(false);
+            do_save = true;
+        }
+        if (!do_save) continue;
+        try {
+            std::shared_lock<std::shared_mutex> slk(state_mutex_);
+            // B1 chain-storage-v1 / D2 inc8: store-only, unconditionally.
+            // The staged "also rewrite the full chain.json below height
+            // 4096" branch is gone with the legacy writer — the O(1)
+            // incremental store is now the single hot path at every height.
+            // Live reads use RPC; offline reads use `determ chain-export`.
+            chain_.save_incremental(cfg_.chain_path);
+        } catch (std::exception& e) {
+            std::cerr << "[save worker] save failed: " << e.what() << "\n";
+            // Don't terminate the loop — transient disk failures
+            // (full disk, locked file) should retry on the next
+            // enqueue_save signal. The chain in memory is fine; only
+            // the on-disk persistence is at risk.
+        }
+    }
+}
+
+void Node::enqueue_save() {
+    {
+        std::lock_guard<std::mutex> lk(save_mutex_);
+        save_pending_.store(true);
+    }
+    save_cv_.notify_one();
+}
+
+// ─── Consensus ───────────────────────────────────────────────────────────────
+
+bool Node::in_sync() const {
+    return state_ == SyncState::IN_SYNC;
+}
+
+// Caller must hold state_mutex_. Computes the K-committee for the current
+// height (rotating subset of the M-pool) and, if we are one of them, kicks
+// off Round 1. Gated by in_sync().
+//
+// K-committee model:
+//   - cfg_.m_creators = registered pool size guideline (genesis-pinned).
+//   - cfg_.k_block_sigs = committee size per block (genesis-pinned, K ≤ M).
+//   - K = M  → strong mode: every registered creator always on committee.
+//   - K < M  → hybrid mode: rotating committee from the eligible pool.
+//   tx_root is always the union of K hash lists (K-conjunction censorship
+//   within the committee), independent of mode.
+void Node::check_if_selected() {
+    if (!in_sync())                       return;
+    if (phase_ != ConsensusPhase::IDLE)   return;
+
+    // rev.9 R2: filter the eligible pool by this chain's
+    // committee_region BEFORE running select_m_creators. Empty region
+    // (the default) yields the full pool — pre-R2 behavior preserved
+    // exactly. Non-empty restricts the pool to validators whose
+    // self-declared region matches.
+    // D3.3b-read: on EXTENDED the POOL comes from the frozen committee
+    // checkpoint for the current epoch (so the committee this producer selects
+    // EQUALS the one the checkpoint records + every validator re-derives). On
+    // SINGLE/epoch-0/absent this is byte-identical to registry_.eligible_in_region.
+    EpochIndex cur_epoch = current_epoch_index();
+    auto nodes = select_committee_pool(chain_, registry_, cur_epoch, cfg_.committee_region);
+    // R4 Phase 4: under-quorum stress branch. When this shard absorbs
+    // refugees from another shard (per Chain::merge_state_), extend
+    // the eligible pool with validators tagged with each refugee's
+    // region. The validator (check_creator_selection) mirrors this
+    // logic so what we propose here remains acceptable to others.
+    for (auto& [refugee_shard, refugee_region] :
+         chain_.shards_absorbed_by(cfg_.shard_id)) {
+        (void)refugee_shard;
+        if (refugee_region.empty() || refugee_region == cfg_.committee_region)
+            continue;
+        auto refugees = select_committee_pool(chain_, registry_, cur_epoch, refugee_region);
+        for (auto& r : refugees) {
+            bool dup = false;
+            for (auto& n : nodes) if (n.domain == r.domain) { dup = true; break; }
+            if (!dup) nodes.push_back(r);
+        }
+    }
+    size_t k_target = cfg_.k_block_sigs;       // committee size per round (MD)
+
+    // Build the available pool: registry minus any domains already aborted in
+    // this height's current_aborts_. This is the local-aborts equivalent of
+    // chain-baked suspension — needed because suspension only kicks in once a
+    // block finalizes and bakes the abort_events into the chain.
+    std::set<std::string> excluded;
+    for (auto& ae : current_aborts_) excluded.insert(ae.aborting_node);
+    std::vector<std::string> avail_domains;
+    for (auto& nd : nodes) {
+        if (excluded.count(nd.domain)) continue;
+        avail_domains.push_back(nd.domain);
+    }
+
+    // rev.8 escalation. If the pool is too small to form a K-of-K committee
+    // AND bft_enabled AND we've hit the abort threshold, fall back to a
+    // smaller committee with size ceil(2K/3). The committee will run in
+    // BFT mode (validator enforces). Both round-1 and round-2 aborts count
+    // toward escalation (any kind of abort indicates a stuck round). Note:
+    // suspension (registry.cpp) still counts only round-1 to avoid
+    // Phase-2-timing-skew false-positive suspensions.
+    size_t total_aborts = current_aborts_.size();
+    size_t k_bft = chain::bft_committee_size(cfg_.k_block_sigs);   // ceil(2K/3)
+    size_t k_use = k_target;
+    chain::ConsensusMode round_mode = chain::ConsensusMode::MUTUAL_DISTRUST;
+    if (avail_domains.size() < k_target
+        && cfg_.bft_enabled
+        && total_aborts >= cfg_.bft_escalation_threshold
+        && avail_domains.size() >= k_bft) {
+        k_use      = k_bft;
+        round_mode = chain::ConsensusMode::BFT;
+    }
+    if (avail_domains.size() < k_use) return;
+    current_round_mode_ = round_mode;
+
+    // rev.9 (B1): committee derives from per-shard, per-epoch seed (stable
+    // for the duration of an epoch), then mixes in any in-flight abort
+    // hashes so re-selection within an epoch still depends on the abort
+    // sequence. With S=1 SINGLE the salt is fixed; behavior is the same
+    // as rev.8 within a single epoch.
+    Hash epoch_rand = current_epoch_rand();
+    Hash rand = crypto::epoch_committee_seed(epoch_rand, cfg_.shard_id);
+    for (auto& ae : current_aborts_) {
+        rand = crypto::SHA256Builder{}.append(rand).append(ae.event_hash).finalize();
+    }
+
+    try {
+        current_creator_indices_ = crypto::select_m_creators(rand, avail_domains.size(), k_use);
+    } catch (...) { return; }
+
+    current_creator_domains_.clear();
+    for (size_t idx : current_creator_indices_)
+        current_creator_domains_.push_back(avail_domains[idx]);
+
+    auto it = std::find(current_creator_domains_.begin(),
+                        current_creator_domains_.end(), cfg_.domain);
+    if (it == current_creator_domains_.end()) return;
+
+    start_contrib_phase();
+}
+
+// Phase 1: snapshot mempool, generate fresh dh_input, sign & broadcast our
+// ContribMsg. Other ContribMsgs may already be buffered from peers; we keep
+// them (they were already gen-checked on receipt). reset_round handles
+// cross-round cleanup; this function is also reachable on first-ever
+// startup, where the maps are already empty.
+void Node::start_contrib_phase() {
+    phase_ = ConsensusPhase::CONTRIB;
+    // Keep pending_contribs_ — pre-phase arrivals (received during the
+    // IN_SYNC ramp-up) are valid for this gen.
+    pending_block_sigs_.clear();
+    buffered_block_sigs_.clear();
+
+    uint64_t block_index = chain_.height();
+    Hash     prev_hash   = chain_.empty() ? Hash{} : chain_.head_hash();
+
+    std::vector<Hash> snap;
+    snap.reserve(tx_store_.size());
+    for (auto& [h, _] : tx_store_) snap.push_back(h);
+
+    // rev.9 S-009: generate a fresh Phase-1 secret. The contribmsg's
+    // dh_input is now SHA256(secret || my_pubkey) — a commit, not the
+    // raw secret. The secret is held locally until Phase 2, when it's
+    // revealed in our BlockSigMsg.dh_secret. Selective-abort defense
+    // shifts to SHA-256 preimage resistance: an attacker cannot
+    // extract any honest member's secret from its commit during
+    // Phase 1, so they cannot precompute the eventual delay_output
+    // (which depends on all K secrets).
+    Hash my_secret{};
+    // §3.15 / A4 RNG seam: the ONE per-round draw that enters block content,
+    // routed through the injected rng_ (RealRng = verbatim determ_rng_bytes on
+    // the production path, so the daemon's bytes are unchanged; a harness may
+    // inject a deterministic SeededRng for a byte-replayable schedule). Entropy
+    // failure stays fatal — a predictable dh_secret breaks the commit-reveal.
+    if (rng_.fill(my_secret.data(), 32) != 0)
+        throw std::runtime_error("OS entropy source failed for dh_secret");
+    current_round_secret_ = my_secret;
+    Hash my_commit = crypto::SHA256Builder{}
+        .append(my_secret)
+        .append(key_.pub.data(), key_.pub.size())
+        .finalize();
+
+    // v2.7 F2 / S-016 (site 1): at/after the genesis-pinned activation height,
+    // commit to this node's view of the eligible inbound cross-shard receipt
+    // keys. build_body carries the per-creator view roots into the block and the
+    // validator recomputes the creator commit with them (so the F2-bound sig
+    // verifies); the equivocation detector compares the v1 CORE commit only, so
+    // a view that legitimately changes across re-rounds is not self-flagged.
+    // Empty pool / pre-activation -> empty list -> zero root -> v1 commit.
+    std::vector<Hash> f2_inbound_view, f2_eq_view, f2_abort_view;
+    if (block_index >= chain_.f2_active_from_height()) {
+        auto elig = inbound_receipts_eligible_for_inclusion();
+        f2_inbound_view.reserve(elig.size());
+        for (const auto& r : elig)
+            f2_inbound_view.push_back(hash_cross_shard_receipt(r));
+        std::sort(f2_inbound_view.begin(), f2_inbound_view.end());
+        if (f2_inbound_view.size() > F2_VIEW_LIST_CAP)
+            f2_inbound_view.resize(F2_VIEW_LIST_CAP);
+        // v2.7 F2 / S-030-D2: commit to this node's view of the equivocation /
+        // abort evidence pools, symmetric to the inbound view above. build_body
+        // reconciles the committee-wide UNION (F2-SPEC Q1 — vs inbound's
+        // intersection) and the validator enforces subset(union). Same re-round
+        // safety as inbound: the equivocation DETECTOR in on_contrib compares the
+        // v1 CORE commit (no view roots), so a view that grows across re-rounds is
+        // never self-flagged as equivocation.
+        f2_eq_view.reserve(pending_equivocation_evidence_.size());
+        for (const auto& e : pending_equivocation_evidence_)
+            f2_eq_view.push_back(hash_equivocation_event(e));
+        std::sort(f2_eq_view.begin(), f2_eq_view.end());
+        if (f2_eq_view.size() > F2_VIEW_LIST_CAP) f2_eq_view.resize(F2_VIEW_LIST_CAP);
+        f2_abort_view.reserve(current_aborts_.size());
+        for (const auto& a : current_aborts_)
+            f2_abort_view.push_back(hash_abort_event(a));
+        std::sort(f2_abort_view.begin(), f2_abort_view.end());
+        if (f2_abort_view.size() > F2_VIEW_LIST_CAP) f2_abort_view.resize(F2_VIEW_LIST_CAP);
+    }
+    // S-030-D2 timestamp reconciliation: commit this node's local wall-clock
+    // into the Phase-1 ContribMsg (signed). The assembler medians the K
+    // committed times into the canonical block timestamp at build_body, and
+    // compute_block_digest binds it. clock_.unix_seconds() > 0 on any real
+    // clock so the reconciliation gate (all proposer_times non-zero) fires on
+    // production blocks. (A DSF VirtualClock must be seeded to a realistic
+    // non-zero epoch: proposer_time == 0 is the legacy sentinel that DISABLES
+    // reconciliation, unbinding the timestamp — see virtual_clock.hpp.)
+    // D3.5d-ii (S-036 Layer 1): commit this beacon's Phase-1 view of the shard-tip
+    // records eligible to fold. INDEPENDENT of the f2_active_from_height gate above
+    // (D3.5d-i split validate_contrib_view_roots into two independent presence-gated
+    // groups, so this works below F2 activation) and gated BEACON && EXTENDED via the
+    // helper. The FULL-CONTENT hash (hash_shard_tip = SHA256(rec.encode())) so a
+    // source equivocating on (shard,height) yields two different hashes. The SAME
+    // helper feeds build_body's fold candidates → the assembler can materialize every
+    // intersection member (the anti-wedge invariant). Empty on every non-beacon path
+    // → make_contrib leaves view_shardtip_root zero → byte-identical commitment.
+    // Snapshot the eligible candidate set ONCE here (Phase-1) and reuse it at every
+    // build_body site this round — see round_shard_tip_candidates_ (node.hpp). The
+    // signed view below is derived from the SAME snapshot, so the committee
+    // intersection ⊆ this node's signed view == its candidate set, and the fold
+    // (intersection ∩ candidates == intersection) is identical across co-signers.
+    round_shard_tip_candidates_ = shard_tip_records_eligible_for_inclusion();
+    // D3.5e-7c: freeze the aligned WITNESSES for this round's candidates at the same
+    // Phase-1 instant (the same anti-wedge rationale as the candidate snapshot —
+    // pending_shard_tip_witnesses_ is pruned asynchronously by on_shard_tip
+    // mid-round). Every candidate has its witness by construction (record + witness
+    // are written atomically under one key in on_shard_tip).
+    round_shard_tip_witnesses_.clear();
+    for (const auto& rec : round_shard_tip_candidates_) {
+        auto wit = pending_shard_tip_witnesses_.find({rec.source_shard_id, rec.height});
+        if (wit != pending_shard_tip_witnesses_.end())
+            round_shard_tip_witnesses_[wit->first] = wit->second;
+    }
+    std::vector<Hash> f2_shardtip_view;
+    {
+        f2_shardtip_view.reserve(round_shard_tip_candidates_.size());
+        for (const auto& rec : round_shard_tip_candidates_)
+            f2_shardtip_view.push_back(hash_shard_tip(rec));
+        std::sort(f2_shardtip_view.begin(), f2_shardtip_view.end());
+        if (f2_shardtip_view.size() > F2_VIEW_LIST_CAP)
+            f2_shardtip_view.resize(F2_VIEW_LIST_CAP);
+    }
+    ContribMsg my_contrib = make_contrib(key_, cfg_.domain,
+                                          block_index, prev_hash,
+                                          current_aborts_.size(),
+                                          snap, my_commit,
+                                          f2_eq_view, f2_abort_view, f2_inbound_view,
+                                          static_cast<uint64_t>(clock_.unix_seconds()),
+                                          f2_shardtip_view);
+    pending_contribs_[cfg_.domain] = my_contrib;
+    gossip_.broadcast(net::make_contrib(my_contrib));
+
+    contrib_timer_.arm(std::chrono::milliseconds(cfg_.tx_commit_ms), [this] {
+        std::unique_lock<std::shared_mutex> lk(state_mutex_);
+        handle_contrib_timeout();
+    });
+
+    // Pre-phase arrivals may already complete the committee (S-058: the same
+    // completeness predicate as on_contrib, never the map's size).
+    if (committee_contribs_complete_locked())
+        enter_block_sig_phase();
+}
+
+// Transition Phase 1 → Phase 2 once K Phase-1 contribs have arrived.
+// Derive tx_root + delay_seed (from the K commits) and a placeholder
+// delay_output = SHA256(delay_seed). The block's final delay_output is
+// recomputed from the revealed Phase-2 secrets via compute_block_rand
+// (rev.9 S-009 commit-reveal); this placeholder only matters as a
+// per-round identifier in BlockSigMsg.
+//
+// The actual phase change + sig broadcast is deferred via loop_.post().
+// This breaks the synchronous call chain on M=K=1 chains where
+// finalize_round → apply_block → check_if_selected → start_contrib
+// would otherwise recurse without bound.
+void Node::enter_block_sig_phase() {
+    if (phase_ != ConsensusPhase::CONTRIB) return;
+
+    std::vector<std::vector<Hash>> ordered_lists;
+    std::vector<Hash>              ordered_dh_inputs;
+    for (auto& d : current_creator_domains_) {
+        auto it = pending_contribs_.find(d);
+        if (it == pending_contribs_.end()) return;
+        ordered_lists.push_back(it->second.tx_hashes);
+        ordered_dh_inputs.push_back(it->second.dh_input);
+    }
+    // Only now — with every committee member's contrib in hand — is the
+    // Phase-1 timer released. S-058 (2026-09-14): it used to be cancelled
+    // BEFORE the completeness loop, so a call with a member still missing
+    // returned with the round's only recovery timer dead — a permanent wedge
+    // of every committee member reachable by one contrib from a registered
+    // NON-member (on_contrib admits any registry signer and counted it).
+    contrib_timer_.cancel();
+    current_tx_root_    = compute_tx_root(ordered_lists);
+    current_delay_seed_ = compute_delay_seed(chain_.height(),
+        chain_.empty() ? Hash{} : chain_.head_hash(),
+        current_tx_root_, ordered_dh_inputs);
+
+    Hash placeholder = crypto::sha256(current_delay_seed_);
+    loop_.post([this, placeholder] {
+        std::unique_lock<std::shared_mutex> lk(state_mutex_);
+        if (phase_ != ConsensusPhase::CONTRIB) return;
+        start_block_sig_phase(placeholder);
+
+        // Replay any block_sigs that arrived before this transition.
+        auto buffered = std::move(buffered_block_sigs_);
+        buffered_block_sigs_.clear();
+        for (auto& m : buffered) on_block_sig_locked(m);
+    });
+}
+
+chain::ConsensusMode Node::current_mode() const {
+    return current_round_mode_;
+}
+
+EpochIndex Node::current_epoch_index() const {
+    if (cfg_.epoch_blocks == 0) return 0;
+    return chain_.height() / cfg_.epoch_blocks;
+}
+
+uint32_t Node::current_source_eligible_count() const {
+    // D3.4 / S-036: only a SHARD-role producer under EXTENDED self-reports a
+    // region-eligible count. A BEACON is not a "source shard" (it aggregates,
+    // it doesn't attest its own quorum); SINGLE/NONE is unsharded; and CURRENT
+    // — even MULTI-shard CURRENT (PROFILE_REGIONAL is chain_role==SHARD +
+    // sharding_mode==CURRENT with shard_count>1) — is NOT part of the S-036
+    // under-quorum-merge model and must stay byte-identical. So the gate keys on
+    // sharding_mode==EXTENDED, NOT chain_.shard_count()>1 (§9.2-pt2 / RP-4): a
+    // bare shard_count()>1 gate would fire on CURRENT-multishard and diverge its
+    // hash/digest/JSON, breaking every regional golden AND hard-forking a
+    // rolling upgrade of a live regional cluster. All non-EXTENDED roles return
+    // 0 → Block::eligible_count is elided from JSON + the digest, byte-identical.
+    // The count is the CONTEMPORANEOUS present-head eligibility (the distress
+    // metric — how many validators are available for this region NOW), NOT the
+    // epoch-frozen selection pool (D3.3b): finding-2 keeps these distinct. It is
+    // a pure function of registry_ at the current head, so every honest member
+    // of the committee derives the identical value and the K-of-K digest agrees.
+    if (cfg_.chain_role != ChainRole::SHARD)          return 0;
+    if (cfg_.sharding_mode != ShardingMode::EXTENDED) return 0;
+    return static_cast<uint32_t>(
+        registry_.eligible_in_region(cfg_.committee_region).size());
+}
+
+std::vector<chain::ShardTipRecord>
+Node::shard_tip_records_eligible_for_inclusion() const {
+    std::vector<chain::ShardTipRecord> out;
+    // RP-4/§9.5: gate on BEACON && EXTENDED, NEVER shard_count()>1 — a
+    // CURRENT-multishard PROFILE_REGIONAL beacon must stay byte-identical.
+    if (cfg_.chain_role != ChainRole::BEACON)          return out;
+    if (cfg_.sharding_mode != ShardingMode::EXTENDED)  return out;
+    // F-1 emission policy (owner-decided): DISTRESS-triggered — a source shard is
+    // recorded only when its contemporaneous eligible_count fell below the merge
+    // quorum 2K (K == the chain-wide committee size cfg_.k_block_sigs). A healthy
+    // source (eligible_count >= 2K) is NOT folded, so a healthy EXTENDED beacon
+    // emits an empty shard_tip_records set = byte-identical to a pre-D3.5 EXTENDED
+    // block. eligible_count is D3.4 digest-bound (source-signed) and k_block_sigs is
+    // genesis-fixed, so this predicate is deterministic across the beacon committee.
+    // (Sparse-healthy liveness cadence — a periodic proof-of-life record — is a
+    // future additive refinement; it does not affect safety.) Records are returned
+    // in (source_shard_id, height) map order → canonical.
+    const uint64_t distress_threshold = 2ull * cfg_.k_block_sigs;
+    for (auto& kv : pending_shard_tip_records_) {
+        if (kv.second.eligible_count >= distress_threshold) continue;
+        // D3.5e-7c producer emission gate (the honest-beacon self-stall fix): only
+        // fold a record whose SOURCE epoch has a pinned `cc:[E_s]` checkpoint — the
+        // exact precondition the e-7d universal witness re-verification requires.
+        // Epoch-0 / cc-pruned records are unwitnessable (their committee cannot be
+        // re-derived from committed state; the D3.6 fail-closed posture) so an
+        // honest beacon must never fold them, else every honest validator rejects
+        // its block. Producer (building H, head H−1) and validator (validating H,
+        // head H−1) evaluate committee_pin_active over the IDENTICAL committed
+        // prefix → they agree by construction → no self-stall, no fork. A skipped
+        // DISTRESS record stays buffered and is re-considered every round; the
+        // on_shard_tip prune RETAINS it past the W window until its epoch pins or
+        // becomes hopeless (ring-evicted / >ring ahead — the fail-closed drops),
+        // and a DEAD shard's final records are intentionally retained as merge
+        // evidence (its tip stops advancing, so the source-relative prune never
+        // fires — bounded at ≤ W records for that shard).
+        const EpochIndex Es = cfg_.epoch_blocks
+            ? (kv.second.height / cfg_.epoch_blocks) : 0;
+        if (!committee_pin_active(chain_, Es)) continue;
+        out.push_back(kv.second);
+    }
+    return out;
+}
+
+Hash Node::current_epoch_rand() const {
+    if (chain_.empty()) return Hash{};
+    if (cfg_.epoch_blocks == 0) return chain_.head().cumulative_rand;
+    uint64_t epoch_start = current_epoch_index() * cfg_.epoch_blocks;
+
+    // rev.9 B2c.2-full: SHARD producers source rand from beacon headers,
+    // not their own chain — both sides of the cross-chain relationship
+    // (this shard producing, beacon validating tips) must derive the
+    // same committee. Bootstrap fallback (no header yet) → local chain;
+    // shard registry mirrors beacon at genesis so it produces a valid
+    // committee until the first beacon header lands.
+    //
+    // D3.5e-3 (S-036 Layer 2) — anchor OFF-BY-ONE FIX: the epoch rand anchor
+    // is BEACON block INDEX epoch_start-1 (the convention the beacon's
+    // on_shard_tip, the `cc:` fold chain.cpp, and the epoch-boundary comment
+    // below all share). `beacon_headers_[j]` holds beacon block INDEX j+1
+    // (on_beacon_header appends from expected index 1), so INDEX epoch_start-1
+    // sits at position epoch_start-2. The prior `beacon_headers_[epoch_start-1]`
+    // read INDEX epoch_start — one block too FAR, so every epoch>=1 shard-tip
+    // would fail the beacon's epoch_start-1 verification (never observed: no
+    // test crosses an EXTENDED epoch boundary with a live beacon+shard pair).
+    // The validator provider (node.cpp ~379) uses the IDENTICAL formula, so the
+    // shard's own producer/validator agree and its consensus stays fork-free;
+    // the only change is that the beacon-derived committee now MATCHES the
+    // beacon. When the anchor header has not yet arrived the shard falls back to
+    // its own chain rand below — the beacon then fail-closes that (non-derivable)
+    // tip (a liveness loss, never a false accept) until header persistence +
+    // wait-for-anchor land as the named B2c.2-full follow-on.
+    if (cfg_.chain_role == ChainRole::SHARD
+        && epoch_start >= 2
+        && epoch_start - 1 <= beacon_headers_.size()) {
+        return beacon_headers_[epoch_start - 2].cumulative_rand;
+    }
+
+    if (epoch_start == 0)        return chain_.head().cumulative_rand;
+    if (epoch_start > chain_.height()) return chain_.head().cumulative_rand;
+    return chain_.at(epoch_start - 1).cumulative_rand;
+}
+
+std::string Node::current_proposer_domain() const {
+    if (current_mode() != chain::ConsensusMode::BFT) return "";
+    if (current_creator_domains_.empty()) return "";
+    // Epoch-relative + shard-salted rand keeps proposer derivation
+    // consistent with committee selection (Stage B1). Within an epoch the
+    // proposer rotates only via abort_events.
+    Hash epoch_rand = current_epoch_rand();
+    Hash seed = crypto::epoch_committee_seed(epoch_rand, cfg_.shard_id);
+    size_t idx = proposer_idx(seed, current_aborts_,
+                                current_creator_domains_.size());
+    if (idx >= current_creator_domains_.size()) return "";
+    return current_creator_domains_[idx];
+}
+
+void Node::start_block_sig_phase(const Hash& delay_output) {
+    if (phase_ == ConsensusPhase::BLOCK_SIG) return;
+    phase_ = ConsensusPhase::BLOCK_SIG;
+    current_delay_output_ = delay_output;
+
+    // Build a candidate block to compute the digest we sign over. We need
+    // to produce the same digest every node will compute, so we order
+    // contribs by selection order and tag the same mode + proposer.
+    std::vector<ContribMsg> ordered_contribs;
+    for (auto& d : current_creator_domains_) {
+        auto it = pending_contribs_.find(d);
+        if (it == pending_contribs_.end()) return;
+        ordered_contribs.push_back(it->second);
+    }
+    auto mode     = current_mode();
+    auto proposer = current_proposer_domain();
+    std::vector<chain::CrossShardReceipt> inbound_snapshot
+        = inbound_receipts_eligible_for_inclusion();
+    chain::Block tentative = build_body(tx_store_, chain_, current_aborts_,
+                                         current_creator_domains_,
+                                         ordered_contribs, delay_output,
+                                         cfg_.m_creators, mode, proposer,
+                                         pending_equivocation_evidence_,
+                                         inbound_snapshot,
+                                         /*ordered_secrets=*/{},
+                                         current_source_eligible_count(),
+                                         round_shard_tip_candidates_, round_shard_tip_witnesses_,
+                                         tx_admit_locked(), eq_admit_locked());
+
+    // v2.1 / S-033 activation: populate state_root from the post-apply
+    // state. Dry-run apply on a Chain copy to compute the commitment
+    // without mutating the live chain. Other K committee members
+    // perform the same computation and either agree (matching root)
+    // or fail apply-time verification (different root → throw). The
+    // root is bound into compute_hash (via signing_bytes when non-zero),
+    // so the next block's prev_hash transitively authenticates this
+    // state commitment.
+    //
+    // Cost: O(state size) — bounded by the same primitive that closes
+    // S-032 (chain.compute_state_root reads cached fields where
+    // available). The Chain copy is bounded by std::map heap allocation
+    // for the four primary state maps. v2.4 (A9 atomic-apply overlay/
+    // delta model) has shipped and reduces the per-apply copy via lazy
+    // snapshotting + lock-free reader views; the tentative-chain copy
+    // here is the cheaper sibling path used during build-body's
+    // dry-run digest computation, where overlay infrastructure isn't
+    // worth the extra plumbing for a one-shot dry run.
+    {
+        chain::Chain tentative_chain = chain_;
+        // Chain::append() runs apply_transactions internally. It also
+        // checks prev_hash consistency, which matches what the real
+        // apply would check. tentative.state_root is zero at this
+        // point, so the state_root verification inside apply_transactions
+        // short-circuits (zero == zero is the "not set" path).
+        tentative_chain.append(tentative);
+        tentative.state_root = tentative_chain.compute_state_root();
+    }
+    Hash digest = compute_block_digest(tentative);
+
+    BlockSigMsg my_sig = make_block_sig(key_, cfg_.domain,
+                                         tentative.index,
+                                         delay_output, digest,
+                                         current_round_secret_);
+    pending_block_sigs_[cfg_.domain] = my_sig;
+    pending_secrets_[cfg_.domain]    = current_round_secret_;
+    gossip_.broadcast(net::make_block_sig(my_sig));
+
+    block_sig_timer_.arm(std::chrono::milliseconds(cfg_.block_sig_ms), [this] {
+        std::unique_lock<std::shared_mutex> lk(state_mutex_);
+        handle_block_sig_timeout();
+    });
+
+    if (pending_block_sigs_.size() == current_creator_domains_.size())
+        try_finalize_round();
+}
+
+void Node::try_finalize_round() {
+    // Phase 1 unanimity preserved in both modes: all K contribs required.
+    std::vector<ContribMsg> ordered_contribs;
+    for (auto& d : current_creator_domains_) {
+        auto cit = pending_contribs_.find(d);
+        if (cit == pending_contribs_.end()) return;
+        ordered_contribs.push_back(cit->second);
+    }
+
+    auto mode     = current_mode();
+    auto proposer = current_proposer_domain();
+
+    // BFT mode: only the designated proposer finalizes (eliminates
+    // silent-fork race where different peers pick different K-subsets of
+    // sigs).
+    if (mode == chain::ConsensusMode::BFT && cfg_.domain != proposer) return;
+
+    // Phase 2: build a sentinel-aligned block_sigs vector. Position i is
+    // creators[i]'s sig if they signed, else Signature{} (zero sentinel).
+    Signature zero_sig{};
+    std::vector<Signature> ordered_block_sigs(current_creator_domains_.size(), zero_sig);
+    size_t signed_count = 0;
+    for (size_t i = 0; i < current_creator_domains_.size(); ++i) {
+        auto sit = pending_block_sigs_.find(current_creator_domains_[i]);
+        if (sit != pending_block_sigs_.end()) {
+            ordered_block_sigs[i] = sit->second.ed_sig;
+            ++signed_count;
+        }
+    }
+
+    size_t required = required_block_sigs(mode, current_creator_domains_.size());
+    if (signed_count < required) return;     // not enough yet, wait
+    block_sig_timer_.cancel();
+
+    // BFT requires the proposer's own sig present (sentinel-zero at the
+    // proposer's index would be illegal — validator rejects).
+    if (mode == chain::ConsensusMode::BFT) {
+        auto pit = std::find(current_creator_domains_.begin(),
+                              current_creator_domains_.end(), proposer);
+        if (pit == current_creator_domains_.end()) return;
+        size_t pidx = pit - current_creator_domains_.begin();
+        if (ordered_block_sigs[pidx] == zero_sig) return;
+    }
+
+    std::vector<chain::CrossShardReceipt> inbound_snapshot
+        = inbound_receipts_eligible_for_inclusion();
+
+    // rev.9 S-009: gather K revealed secrets in committee selection order.
+    // build_body uses these to populate creator_dh_secrets and recompute
+    // delay_output via compute_block_rand. We require all K secrets here
+    // (in MD mode); in BFT mode missing positions are filled with zero
+    // sentinels, but the proposer's secret (and all signers' secrets)
+    // must be present so the delay_output binds.
+    std::vector<Hash> ordered_secrets(current_creator_domains_.size(), Hash{});
+    for (size_t i = 0; i < current_creator_domains_.size(); ++i) {
+        auto sit = pending_secrets_.find(current_creator_domains_[i]);
+        if (sit != pending_secrets_.end()) ordered_secrets[i] = sit->second;
+    }
+
+    chain::Block body = build_body(tx_store_, chain_, current_aborts_,
+                                    current_creator_domains_,
+                                    ordered_contribs,
+                                    current_delay_output_,
+                                    cfg_.m_creators, mode, proposer,
+                                    pending_equivocation_evidence_,
+                                    inbound_snapshot,
+                                    ordered_secrets,
+                                    current_source_eligible_count(),
+                                    round_shard_tip_candidates_, round_shard_tip_witnesses_,
+                                    tx_admit_locked(), eq_admit_locked());
+    body.creator_block_sigs = std::move(ordered_block_sigs);
+
+    // S-038 closure: populate body.state_root with the post-apply state
+    // commitment so the S-033 verification gate actually fires for this
+    // block. Pre-S-038, build_body left body.state_root = Hash{} (zero
+    // default), and chain.cpp's apply-time check at line ~1430 short-
+    // circuited the comparison ("if (b.state_root != zero) verify"). The
+    // S-033 mitigation was data-layer-ready (compute_state_root works,
+    // state_proof RPC works, snapshot tail-header carries it via
+    // signing_bytes when non-zero) but the gate was dormant because the
+    // producer never put a non-zero value in the field.
+    //
+    // The state_root must reflect the post-apply state. We compute it on
+    // a tentative chain copy (same pattern as the digest dry-run above)
+    // because apply_block_locked needs the field populated BEFORE it
+    // runs its compare-against-local-recompute check. Note that
+    // block_digest excludes state_root (§4.3) so the K committee sigs
+    // already gathered are unaffected by this assignment; only the
+    // block_hash (compute_hash, via signing_bytes) binds it.
+    {
+        chain::Chain tentative_chain = chain_;
+        tentative_chain.append(body);  // body.state_root still zero, so verify short-circuits inside append
+        body.state_root = tentative_chain.compute_state_root();
+    }
+
+    apply_block_locked(body);
+    gossip_.broadcast(net::make_block(body));
+}
+
+// S7: timeout fires only emit a claim. The round advances when M-1 matching
+// claims (signed by distinct claimers) arrive — see try_advance_on_claims.
+namespace {
+    std::string find_first_missing(
+        const std::vector<std::string>& creators,
+        const std::function<bool(const std::string&)>& is_present)
+    {
+        for (auto& d : creators) if (!is_present(d)) return d;
+        return {};
+    }
+}
+
+// S-047 retry payload (header note). Order matters: abort events first —
+// in CHAIN order, so a generation-behind receiver adopts them sequentially
+// (each adoption re-derives the committee the NEXT event's claimers were
+// drawn from) — then contribs, then sigs. We relay EVERY stored entry,
+// not just our own: a committee member that died mid-round may have
+// delivered its contrib/sig to SOME peers only (per-peer write ordering),
+// and the peers it missed can never receive it from the author again —
+// the reproduced deadlock is one live member in phase 2 (has the dead
+// node's contrib) and the other stuck in phase 1 (doesn't), claiming in
+// different (round, missing) buckets so the 2-claim quorum can never
+// assemble. Relaying is protocol-sound: every entry is signed by its
+// AUTHOR and re-verified at the receiver; a relay cannot forge, only
+// re-deliver. Everything here is a stored original — re-serialization is
+// byte-identical, so every receiver path dedups (event_hash match,
+// contrib core-commit match, sig digest match) instead of reading
+// equivocation.
+void Node::rebroadcast_round_state_locked() {
+    Hash prev = chain_.empty() ? Hash{} : chain_.head_hash();
+    for (auto& ae : current_aborts_)
+        gossip_.broadcast(net::make_abort_event(ae, chain_.height(), prev));
+    for (auto& [_, c] : pending_contribs_)
+        gossip_.broadcast(net::make_contrib(c));
+    for (auto& [_, s] : pending_block_sigs_)
+        gossip_.broadcast(net::make_block_sig(s));
+}
+
+// S-050 stall valve. The S-047 retry re-DELIVERS round messages, but a
+// round can wedge on deterministic mutual REJECTION, which re-delivery
+// cannot heal. Reproduced live (test-fa-partition-virtual under CI-grade
+// CPU contention, 2026-07-15): two abort quorums for the same round formed
+// CONCURRENTLY against different creators; the hash-chained abort tail
+// then forked by ADOPTION ORDER across nodes, the re-derived committees
+// and delay_outputs diverged, every BlockSig was dropped as
+// "mismatched delay_output", and — with only one claim-eligible node left
+// per height view — the max(2,K-1) abort-claim quorum became
+// unsatisfiable. An absorbing livelock on a CLEAN network.
+//
+// The valve makes the wedge non-absorbing via a TWO-WINDOW trip rule,
+// each window driven by an observed failure mode of a simpler design:
+//
+//   SOFT (5 s): no block applied AND the abort tail IMMOBILE — the
+//     deterministic-reject fork livelock's signature (nothing moves at
+//     all). Abort-tail movement (a quorum formed or an event adopted)
+//     restarts the soft window: killing a round mid-abort-recovery
+//     resets it back to the base committee that still CONTAINS the dead/
+//     unreachable member the abort was routing around, and the recovery
+//     restarts from zero — a reproduced valve-induced groundhog loop.
+//   HARD (30 s): no block applied, PERIOD. An abort-churn loop (abort →
+//     reselect → abort, zero blocks forever) extends the soft window
+//     indefinitely, so churn alone must not defer the valve forever.
+//
+// Both windows are WALL-CLOCK, not tick counts, so the trip points do not
+// scale with the configured timer period (a 25-tick threshold validated
+// at 200 ms timers silently became 25 s at 1 s timers — too slow to
+// converge inside a liveness budget). The tick minimum only certifies
+// that round timers are genuinely firing.
+//
+// Blocks self-certify (a block's abort events are validated from the block
+// itself, never from the receiver's round state), so a local scratch reset
+// cannot affect safety; the cost is at worst a re-issued volley. A reset
+// node with an empty tail re-adopts a peer's abort events from the S-047
+// relay in that peer's CHAIN order — converging on one history instead of
+// holding a fork. The valve also broadcasts a STATUS_REQUEST (the startup
+// probe is one-shot, node.cpp arm_startup_grace) and arms stalled_resync_
+// so start_sync_if_behind treats any positive gap as sync-worthy: a stall
+// is equally the signature of a node stranded 1-2 blocks behind after a
+// missed block broadcast, which the normal tolerance-5 window ignores.
+static constexpr size_t kRoundStallMinTicks   = 3;
+static constexpr auto   kRoundStallSoftWindow = std::chrono::seconds(5);
+static constexpr auto   kRoundStallHardWindow = std::chrono::seconds(30);
+
+bool Node::maybe_stall_reset_locked() {
+    // Windows measured on the INJECTED clock's non-digest scheduling read
+    // (clock.hpp: "timeouts, freshness deltas") — RealClock delegates
+    // verbatim to steady_clock::now() so production behavior is identical,
+    // and a virtual-time harness can trip the valve deterministically by
+    // advancing its VirtualClock (the §Q1 injectable-time discipline).
+    const auto now = clock_.steady_now();
+    if (round_stall_ticks_++ == 0) {
+        stall_since_       = now;
+        stall_soft_since_  = now;
+        stall_abort_count_ = current_aborts_.size();
+    }
+    // Abort machinery advancing? Give the recovery room (soft restart) —
+    // unless the hard window says this is churn that never lands a block.
+    if (current_aborts_.size() != stall_abort_count_ &&
+        now - stall_since_ < kRoundStallHardWindow) {
+        stall_abort_count_ = current_aborts_.size();
+        stall_soft_since_  = now;
+        return false;
+    }
+    if (round_stall_ticks_ < kRoundStallMinTicks) return false;
+    if (now - stall_soft_since_ < kRoundStallSoftWindow &&
+        now - stall_since_     < kRoundStallHardWindow) return false;
+    round_stall_ticks_ = 0;              // restart the cycle after firing
+    std::cout << "[node] S-050 round stall (no block; abort tail immobile "
+                 "or hard window): resetting round state, re-probing peers\n";
+    contrib_timer_.cancel();
+    block_sig_timer_.cancel();
+    current_aborts_.clear();
+    reset_round();
+    stalled_resync_ = true;
+    ++status_requests_sent_;
+    gossip_.broadcast(net::make_status_request());
+    check_if_selected();
+    return true;
+}
+
+void Node::handle_contrib_timeout() {
+    // Stale queued expiry: cancel() can lose against an already-popped
+    // deadline (timer_service.hpp header) — the phase gate makes that
+    // window harmless.
+    if (phase_ != ConsensusPhase::CONTRIB) return;
+    if (maybe_stall_reset_locked()) return;   // S-050 valve consumed this expiry
+    std::string missing = find_first_missing(current_creator_domains_,
+        [&](const std::string& d) {
+            return pending_contribs_.find(d) != pending_contribs_.end();
+        });
+    if (missing.empty()) return;
+    if (std::find(current_creator_domains_.begin(),
+                  current_creator_domains_.end(), cfg_.domain)
+        == current_creator_domains_.end()) return;
+
+    // S-047 (found by test-fa-liveness-virtual's failover phase): the
+    // round must RETRY its one-shot broadcasts. Two reproduced permanent
+    // wedges: (a) a claim volley lost/mistimed while a committee member
+    // is dead leaves the live members stuck in CONTRIB forever (never
+    // IDLE, so never re-selected; off-committee nodes' in_creators guard
+    // drops the claims); (b) a contrib or hash-chained abort EVENT missed
+    // during a height/generation transient splits the committee across
+    // phases/generations that then mutually drop each other's messages
+    // (the aborts_gen gate + the adoption committee check). The retry
+    // tick re-broadcasts the full round state (abort tail + own contrib
+    // + own sig — all byte-identical, receiver-deduped, no S-006 false
+    // positive) and re-claims; the timer chain is cut by
+    // enter_block_sig_phase/reset_round's cancel + the phase gate.
+    rebroadcast_round_state_locked();
+    contrib_timer_.arm(std::chrono::milliseconds(cfg_.tx_commit_ms), [this] {
+        std::unique_lock<std::shared_mutex> lk(state_mutex_);
+        handle_contrib_timeout();
+    });
+
+    if (cfg_.domain == missing) return;     // we don't claim against ourselves
+
+    Hash prev_hash = chain_.empty() ? Hash{} : chain_.head_hash();
+    AbortClaimMsg my_claim = make_abort_claim(key_, cfg_.domain,
+        chain_.height(), uint8_t{1}, prev_hash, missing);
+    pending_claims_[{1, missing}][cfg_.domain] = my_claim;
+    gossip_.broadcast(net::make_abort_claim(my_claim));
+
+    std::cout << "[node] phase1 timeout, claim against " << missing << "\n";
+}
+
+void Node::handle_block_sig_timeout() {
+    // rev.8 mode-aware: in MD mode, finalize only on full K-of-K (today's
+    // behavior). In BFT mode, only the designated proposer finalizes, on
+    // ≥ Q sigs where Q = ceil(2·k_bft/3) within the BFT-shrunk committee
+    // of size k_bft = ceil(2K/3). At K=3 the two-level shrinkage is
+    // degenerate (Q=k_bft=2); at K=6 Q=3 within k_bft=4. The committee
+    // size passed to required_block_sigs is current_creator_domains_.size()
+    // which is already the shrunk k_bft in BFT mode (start_new_round sets
+    // k_use = k_bft when escalation gates fire — see ~L768). Designated
+    // proposer eliminates the silent-fork race (different peers picking
+    // different K-subsets).
+    if (phase_ != ConsensusPhase::BLOCK_SIG) return;   // stale queued expiry
+    if (maybe_stall_reset_locked()) return;   // S-050 valve consumed this expiry
+    auto mode = current_mode();
+    size_t required = required_block_sigs(mode, current_creator_domains_.size());
+    if (pending_block_sigs_.size() >= required) {
+        try_finalize_round();   // try_finalize_round itself enforces proposer-only in BFT
+        // A BFT non-proposer (or a missing-proposer-sig corner) leaves the
+        // round open even with enough sigs — fall through to the S-047
+        // retry/claim path instead of returning, or the round wedges with
+        // a dead proposer exactly like the one-shot phase-1 volley did.
+        if (phase_ != ConsensusPhase::BLOCK_SIG) return;   // finalized
+    }
+
+    std::string missing = find_first_missing(current_creator_domains_,
+        [&](const std::string& d) {
+            return pending_block_sigs_.find(d) != pending_block_sigs_.end();
+        });
+    if (std::find(current_creator_domains_.begin(),
+                  current_creator_domains_.end(), cfg_.domain)
+        == current_creator_domains_.end()) return;
+
+    // S-047 retry (see handle_contrib_timeout): re-broadcast the full
+    // round state — including our CONTRIB, not just the sig: a peer that
+    // missed it during a height transient is stuck in phase 1 and can
+    // only be healed by a phase-2 member re-sending phase-1 state.
+    rebroadcast_round_state_locked();
+    block_sig_timer_.arm(std::chrono::milliseconds(cfg_.block_sig_ms), [this] {
+        std::unique_lock<std::shared_mutex> lk(state_mutex_);
+        handle_block_sig_timeout();
+    });
+
+    if (missing.empty()) return;
+    if (cfg_.domain == missing) return;
+
+    Hash prev_hash = chain_.empty() ? Hash{} : chain_.head_hash();
+    AbortClaimMsg my_claim = make_abort_claim(key_, cfg_.domain,
+        chain_.height(), uint8_t{2}, prev_hash, missing);
+    pending_claims_[{2, missing}][cfg_.domain] = my_claim;
+    gossip_.broadcast(net::make_abort_claim(my_claim));
+
+    std::cout << "[node] phase2 timeout, " << pending_block_sigs_.size()
+              << "/" << cfg_.k_block_sigs << " sigs, claim against "
+              << missing << "\n";
+}
+
+void Node::on_abort_claim(const AbortClaimMsg& msg) {
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+
+    if (msg.block_index != chain_.height()) return;
+    Hash prev_hash = chain_.empty() ? Hash{} : chain_.head_hash();
+    if (msg.prev_hash != prev_hash) return;
+
+    // Both claimer and missing must be in the current selected creator set.
+    auto in_creators = [&](const std::string& d) {
+        return std::find(current_creator_domains_.begin(),
+                         current_creator_domains_.end(), d)
+            != current_creator_domains_.end();
+    };
+    if (!in_creators(msg.claimer))         return;
+    if (!in_creators(msg.missing_creator)) return;
+    if (msg.claimer == msg.missing_creator) return;
+
+    // D3.3b-read STEP 3: resolve the claimer's key frozen-first (a frozen
+    // committee member that drifted present-head mid-epoch still verifies).
+    auto ck = resolve_committee_member_pubkey(chain_, registry_,
+                                              current_epoch_index(), msg.claimer);
+    if (!ck) return;
+
+    Hash digest = make_abort_claim_message(msg.block_index, msg.round,
+                                             msg.prev_hash, msg.missing_creator);
+    if (!crypto::verify(*ck, digest.data(), digest.size(), msg.ed_sig)) {
+        std::cerr << "[node] invalid AbortClaim sig from " << msg.claimer << "\n";
+        return;
+    }
+
+    // Bucket by (round, missing_creator). Each claimer contributes at most
+    // one claim per bucket; equivocation across buckets is detectable later.
+    auto& bucket = pending_claims_[{msg.round, msg.missing_creator}];
+    if (bucket.find(msg.claimer) != bucket.end()) return;  // dup
+    bucket[msg.claimer] = msg;
+
+    // Quorum check: max(2, K-1) distinct signers, all from
+    // current_creator_domains_, none equal to missing_creator.
+    // S-044 fix (F-a, AbortCascadeLiveness.md §4.1): the floor of 2 is a
+    // no-op for K>=3 (K-1>=2 already) but makes the K=2 quorum unsatisfiable
+    // (only one eligible claimer exists against a given missing member),
+    // so no single-claim abort event can form — trading K=2's wedge-by-
+    // cascade for a crash-stop halt-by-single-death. The validator mirror
+    // (validator.cpp check_abort_certs) and the gossip-adoption path
+    // (on_abort_event) apply the identical floor.
+    size_t needed = chain::abort_claim_quorum(current_creator_domains_.size());
+    if (bucket.size() < needed) return;
+
+    // Build the AbortEvent with the claim quorum. S-074: its identity is
+    // CANONICAL — timestamp = the parent block's (chain time, not this
+    // node's clock) and event_hash = canonical_abort_event_hash — so every
+    // survivor assembles the byte-identical event and no assembler chooses
+    // the post-abort committee; the validator and the adoption path
+    // recompute and reject anything else.
+    if (chain_.empty()) return;
+    chain::AbortEvent ev;
+    ev.round         = msg.round;
+    ev.aborting_node = msg.missing_creator;
+    ev.timestamp     = chain_.head().timestamp;
+    ev.event_hash    = chain::canonical_abort_event_hash(
+        ev, current_aborts_.empty() ? nullptr : &current_aborts_.back(),
+        crypto::epoch_committee_seed(current_epoch_rand(), cfg_.shard_id), chain_.height());
+    // D2-inc3: typed claim list (bucket is keyed by claimer, so the order
+    // is deterministic — std::map iteration).
+    for (auto& [_, c] : bucket) {
+        chain::AbortClaim ac;
+        ac.block_index     = c.block_index;
+        ac.round           = c.round;
+        ac.prev_hash       = c.prev_hash;
+        ac.missing_creator = c.missing_creator;
+        ac.claimer         = c.claimer;
+        ac.ed_sig          = c.ed_sig;
+        ev.claims.push_back(std::move(ac));
+    }
+    current_aborts_.push_back(ev);
+
+    std::cout << "[node] abort quorum (round " << int(msg.round)
+              << ") against " << msg.missing_creator
+              << " (" << bucket.size() << " claims)\n";
+
+    // rev.8 follow-on: broadcast the assembled AbortEvent so peers that
+    // missed a claim can adopt it and advance their abort generation in
+    // lock-step. Without this, peers stuck with only their own claim stay
+    // out-of-sync forever (the original claim isn't re-broadcast).
+    Hash bcast_prev = chain_.empty() ? Hash{} : chain_.head_hash();
+    gossip_.broadcast(net::make_abort_event(ev, chain_.height(), bcast_prev));
+
+    reset_round();
+    check_if_selected();
+}
+
+void Node::on_abort_event(uint64_t block_index, const Hash& prev_hash,
+                            const chain::AbortEvent& ev) {
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+
+    if (chain_.empty()) return;              // no height 0 round exists (S-074 reads the head)
+    if (block_index != chain_.height()) return;
+    Hash my_prev = chain_.head_hash();
+    if (prev_hash != my_prev) return;
+
+    // Already adopted? Idempotent: ignore duplicates.
+    for (auto& existing : current_aborts_) {
+        if (existing.event_hash == ev.event_hash) return;
+    }
+
+    // S-074: adopt only the CANONICAL next event of this height's tail (the
+    // same rule the validator enforces) — a variant with a chosen hash or
+    // timestamp would seat a committee of the sender's choosing and split
+    // the tail across adopters. Checked BEFORE the claim signatures so a
+    // re-sent variant costs one hash, not max(2, K-1) verifications under
+    // the lock. A chained event whose predecessor we have not adopted yet
+    // mismatches here and arrives again, in chain order, through the S-047
+    // relay (which runs on committee members with an armed round timer).
+    if (ev.timestamp != chain_.head().timestamp
+        || ev.event_hash != chain::canonical_abort_event_hash(
+               ev, current_aborts_.empty() ? nullptr : &current_aborts_.back(),
+               crypto::epoch_committee_seed(current_epoch_rand(), cfg_.shard_id),
+               chain_.height())) {
+        std::cerr << "[node] dropped non-canonical abort event against "
+                  << ev.aborting_node << " (S-074)\n";
+        return;
+    }
+    // The accused must be in the CURRENT (re-derived) committee — the rule
+    // check_abort_certs applies ("aborting_node not in selected set") and
+    // on_abort_claim applies to claims. Without it a replay of an already-
+    // excluded member's public claims, chained canonically, is adoptable and
+    // yields a tail no block can carry (S-074 review). An empty committee
+    // (not yet in sync) adopts nothing.
+    if (std::find(current_creator_domains_.begin(), current_creator_domains_.end(),
+                  ev.aborting_node) == current_creator_domains_.end()) return;
+
+    // Validate the K-1 claim quorum carried inline. We can do this
+    // independently of whether we ever heard the individual AbortClaimMsgs
+    // ourselves — that's the whole point of this message. (D2-inc3: the
+    // list is TYPED — a malformed claims blob already threw at the parse
+    // boundary, so there is no shape check left to do here.)
+    // S-044 (F-a): identical max(2, K-1) floor as the formation path.
+    size_t needed = chain::abort_claim_quorum(current_creator_domains_.size());
+    if (ev.claims.size() < needed) return;
+
+    std::set<std::string> seen_claimers;
+    for (auto& m_ : ev.claims) {
+        if (m_.block_index     != block_index)       return;
+        if (m_.round           != ev.round)          return;
+        if (m_.prev_hash       != prev_hash)         return;
+        if (m_.missing_creator != ev.aborting_node)  return;
+        if (m_.claimer == m_.missing_creator)        return;
+        // Claimer must be in current committee to be authoritative
+        if (std::find(current_creator_domains_.begin(),
+                       current_creator_domains_.end(),
+                       m_.claimer) == current_creator_domains_.end()) return;
+        if (!seen_claimers.insert(m_.claimer).second) return;
+
+        auto ck = resolve_committee_member_pubkey(chain_, registry_,
+                                                  current_epoch_index(), m_.claimer);
+        if (!ck) return;
+        Hash digest = make_abort_claim_message(m_.block_index, m_.round,
+                                                  m_.prev_hash, m_.missing_creator);
+        if (!crypto::verify(*ck, digest.data(), digest.size(), m_.ed_sig))
+            return;
+    }
+    if (seen_claimers.size() < needed) return;
+
+    // Adopt and advance.
+    current_aborts_.push_back(ev);
+    std::cout << "[node] adopted gossiped abort event (round " << int(ev.round)
+              << ") against " << ev.aborting_node << "\n";
+
+    reset_round();
+    check_if_selected();
+}
+
+// rev.8 follow-on: peer-gossiped equivocation evidence. Validate the
+// two-signature proof against the equivocator's registered key. If valid
+// and not already pooled, accept into pending_equivocation_evidence_ for
+// inclusion in the next block we produce.
+void Node::on_equivocation_evidence(const chain::EquivocationEvent& ev) {
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+
+    // EQV-height-bind + EQV-gen-bind: same check set as the validator gate
+    // (BlockValidator::check_equivocation_events) — unknown kind, the height
+    // assert, the round assert, degenerate openings/sigs, then both signatures
+    // verified against digests DERIVED from the carried (index, gen,
+    // body_root) openings.
+    if (ev.kind > 1) return;
+    if (ev.index_a != ev.block_index || ev.index_b != ev.block_index) return;
+    if (ev.gen_a != ev.gen_b)             return;
+    if (ev.body_root_a == ev.body_root_b) return;
+    if (ev.sig_a == ev.sig_b)             return;
+
+    // D3.3b-read STEP 3: frozen-first, present-head fallback (a non-committee /
+    // cross-epoch equivocator still resolves present-head, so its evidence verifies).
+    auto ek = resolve_committee_member_pubkey(chain_, registry_,
+                                              current_epoch_index(), ev.equivocator);
+    if (!ek) return;
+
+    auto compose = [&](uint64_t index, uint64_t gen, const Hash& body_root) {
+        return ev.kind == chain::EquivocationEvent::KIND_BLOCK_DIGEST
+                   ? compose_block_digest(index, gen, body_root)
+                   : compose_contrib_commitment(index, gen, body_root);
+    };
+    Hash digest_a = compose(ev.index_a, ev.gen_a, ev.body_root_a);
+    Hash digest_b = compose(ev.index_b, ev.gen_b, ev.body_root_b);
+    if (!crypto::verify(*ek, digest_a.data(), digest_a.size(), ev.sig_a))
+        return;
+    if (!crypto::verify(*ek, digest_b.data(), digest_b.size(), ev.sig_b))
+        return;
+
+    // MEM-equiv-evidence-blockindex-amplification: dedup on the equivocator
+    // alone (NOT the attacker-chosen, unsigned block_index) so one valid
+    // double-sign cannot be replayed with varying block_index into unbounded
+    // pool entries. See node::same_equivocation_identity.
+    if (pending_equivocation_contains(pending_equivocation_evidence_, ev))
+        return; // dup — this equivocator is already pooled (will be recorded)
+    pending_equivocation_evidence_.push_back(ev);
+    std::cout << "[node] adopted gossiped equivocation evidence: equivocator="
+              << ev.equivocator << " at h=" << ev.block_index << "\n";
+}
+
+// rev.9 B2c.2: shard receives a beacon block via gossip from a peering
+// beacon node and validates it under zero-trust assumptions:
+//   1. Sequential index (gap detection requires BEACON_HEADER_REQUEST;
+//      out-of-order arrivals are dropped — caller will retry via gossip).
+//   2. prev_hash chains to the previously-validated header (or to the
+//      shard's pinned beacon-genesis-hash for the first header — the
+//      beacon-genesis pinning is a B2c.5 follow-on; B2c.2 trusts the
+//      first header's prev_hash if no prior context).
+//   3. consensus_mode is MD (beacon doesn't escalate to BFT — beacons
+//      always run K-of-K).
+//   4. Committee signatures via the ONE shared verifier verify_committee_sigs
+//      (DECISION-LOG 2026-07-31 Hole 2): creators NON-EMPTY, every non-zero
+//      creator_block_sigs entry verifies against the corresponding creator's
+//      Ed25519 key, signed_count >= cfg_.k_block_sigs (build-sharded gives
+//      beacon and shards the same K), and signed_count == creators.size().
+//      The shard derives the validator pool from chain_.registrants()
+//      since shard genesis shares initial_creators with beacon (via
+//      genesis-tool build-sharded). This is correct at genesis time;
+//      tracking pool deltas from beacon REGISTER/STAKE txs is B2c.2-full.
+//   5. cumulative_rand authentication (DECISION-LOG 2026-08-12 Q1). The step-4
+//      signatures cover compute_block_digest, which EXCLUDES cumulative_rand,
+//      delay_output and creator_dh_secrets — so K-of-K alone left the header's
+//      randomness (the very value this path feeds into shard committee
+//      selection) rewritable by a MITM. The shared validator seam
+//      check_header_rand_binding re-runs the three apply-path gates that bind
+//      it: commit-reveal on creator_dh_secrets, delay_seed/delay_output
+//      re-derivation, and cumulative_rand == SHA256(prev_rand || delay_output)
+//      against the PREVIOUS TRACKED HEADER's rand. No wire or digest change.
+//
+// SINGLE / BEACON roles ignore this message.
+void Node::on_beacon_header(const chain::Block& b) {
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+    if (cfg_.chain_role != ChainRole::SHARD) return;
+
+    // 1. Sequential index check.
+    uint64_t expected_index = beacon_headers_.empty()
+        ? 1
+        : beacon_headers_.back().index + 1;
+    if (b.index != expected_index) return;     // dup or gap; sync fallback is B2c.2-full
+
+    // 2. prev_hash chain check (skipped for first header; beacon-genesis
+    //    pinning is B2c.5).
+    if (!beacon_headers_.empty()) {
+        if (b.prev_hash != beacon_headers_.back().compute_hash()) {
+            std::cerr << "[node] beacon header prev_hash mismatch at h=" << b.index << "\n";
+            return;
+        }
+    }
+
+    // 3. Beacon must run MD (K-of-K, no escalation).
+    if (b.consensus_mode != chain::ConsensusMode::MUTUAL_DISTRUST) {
+        std::cerr << "[node] beacon header at h=" << b.index
+                  << " has unexpected consensus_mode (beacons run MD only)\n";
+        return;
+    }
+
+    // 4. Committee-signature verification through the ONE shared verifier
+    //    (verify_committee_sigs — DECISION-LOG 2026-07-31 Hole 2; the same
+    //    core verify_shard_tip_committee_sig_root routes through). The
+    //    shard's registry mirrors the beacon's at genesis time (build-sharded
+    //    shares initial_creators + K); for B2c.2-minimal the shard's local
+    //    registry is the pool. The verifier adds the floor the hand-rolled
+    //    loop lacked: NON-EMPTY creators and signed_count >= cfg_.k_block_sigs
+    //    — an empty or under-K creators list can no longer be the VEHICLE that
+    //    passes the K-of-K checks vacuously.
+    //
+    //    SCOPE (B3 — do not over-read this fix): the K-of-K creator_block_sigs
+    //    sign compute_block_digest, which does NOT cover b.cumulative_rand,
+    //    b.delay_output or b.creator_dh_secrets (those are bound into
+    //    signing_bytes/compute_hash but not the signature digest). Step 5
+    //    below closes that — this step alone does not.
+    auto reg = NodeRegistry::build_from_chain(chain_, chain_.height());
+    std::map<std::string, PubKey> member_pub;
+    for (auto& nd : reg.sorted_nodes()) member_pub[nd.domain] = nd.pubkey;
+
+    Hash digest = compute_block_digest(b);
+    auto signed_count = verify_committee_sigs(
+        member_pub, b.creators, b.creator_block_sigs, digest,
+        cfg_.k_block_sigs,
+        "beacon header at h=" + std::to_string(b.index));
+    if (!signed_count) return;
+
+    // K-of-K beacon: every committee member must have signed (no zero
+    // sentinels permitted in MD mode).
+    if (*signed_count != b.creators.size()) {
+        std::cerr << "[node] beacon header at h=" << b.index
+                  << ": incomplete K-of-K (signed=" << *signed_count
+                  << ", required=" << b.creators.size() << ")\n";
+        return;
+    }
+
+    // 5. Q1 (DECISION-LOG 2026-08-12) — authenticate cumulative_rand, the
+    //    field this whole ingest path exists to deliver (it feeds
+    //    current_epoch_rand / the validator's external epoch-rand provider,
+    //    i.e. shard committee selection). Step 4's signatures do NOT cover it,
+    //    so a MITM could previously rewrite it on an otherwise-valid header
+    //    without breaking a single signature.
+    //
+    //    No new verifier logic and no wire/digest change: the ONE shared
+    //    validator seam re-runs the same three apply-path gates that bind the
+    //    field (commit-reveal on creator_dh_secrets -> delay_seed/delay_output
+    //    -> cumulative_rand). The full soundness argument, and the FIRST-HEADER
+    //    RULE for the std::nullopt case, live on
+    //    BlockValidator::check_header_rand_binding in validator.hpp.
+    //
+    //    prev_rand is the PREVIOUS TRACKED BEACON HEADER's cumulative_rand —
+    //    NOT chain_.head() (that is this shard's own, unrelated chain).
+    //    beacon_headers_ is strictly contiguous from index 1 and b.index was
+    //    pinned to back().index + 1 in step 1, so back() IS b's predecessor.
+    //    Empty => b is the first header (index 1), whose predecessor is the
+    //    beacon genesis block this shard does not pin (B2c.5): the seam then
+    //    runs the two chain-independent links and skips only the last.
+    //
+    //    The key resolver is the SAME member_pub map step 4 verified the
+    //    signatures against, so this check cannot resolve a different key than
+    //    the signature check did and false-reject an honest header.
+    std::optional<Hash> prev_rand;
+    if (!beacon_headers_.empty())
+        prev_rand = beacon_headers_.back().cumulative_rand;
+    if (auto r = validator_.check_header_rand_binding(
+            b, prev_rand,
+            [&member_pub](const std::string& domain) -> std::optional<PubKey> {
+                auto it = member_pub.find(domain);
+                if (it == member_pub.end()) return std::nullopt;
+                return it->second;
+            });
+        !r.ok) {
+        std::cerr << "[node] beacon header at h=" << b.index
+                  << " rejected: " << r.error << " (randomness binding)\n";
+        return;
+    }
+
+    beacon_headers_.push_back(b);
+    std::cout << "[node] verified beacon header #" << b.index
+              << " (K-of-K=" << *signed_count << ")\n";
+}
+
+// rev.9 B2c.3: beacon receives a shard's newly-applied block via gossip
+// from a peering shard node. The beacon validates under zero-trust:
+//   1. shard_id within configured range.
+//   2. Sequential index (vs prior tip we have for this shard).
+//   3. prev_hash chains to prior tip.
+//   4. consensus_mode is permitted (MD always, BFT only when bft_enabled).
+//   5. tip.creators matches the shard committee the BEACON derives from
+//      its own validator pool + epoch_committee_seed(beacon_cum_rand,
+//      shard_id), with abort_event hashes mixed in. This is the key
+//      check: the beacon doesn't trust shard claims about who's on the
+//      committee; it derives independently.
+//   6. K-of-K (MD) or ceil(2K/3) (BFT) signatures verify against the
+//      committee from step 5.
+// Validated tips populate latest_shard_tips_; beacon block production
+// (Stage B3+) reads from this for shard_summaries[].
+//
+// SINGLE / SHARD roles ignore this message.
+void Node::on_shard_tip(ShardId shard_id, const chain::Block& tip) {
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+    if (cfg_.chain_role != ChainRole::BEACON) return;
+
+    // 1. Shard ID range.
+    if (cfg_.initial_shard_count > 0 && shard_id >= cfg_.initial_shard_count) return;
+
+    // 2. + 3. Sequential + prev_hash chain.
+    auto it = latest_shard_tips_.find(shard_id);
+    if (it != latest_shard_tips_.end()) {
+        if (tip.index <= it->second.index) return;          // older or dup
+        if (tip.index != it->second.index + 1) return;      // gap; sync fallback is B2c.3-full
+        if (tip.prev_hash != it->second.compute_hash()) {
+            std::cerr << "[node] shard tip prev_hash mismatch: shard=" << shard_id
+                      << " block=" << tip.index << "\n";
+            return;
+        }
+    }
+
+    // 4. consensus_mode permitted.
+    if (tip.consensus_mode == chain::ConsensusMode::BFT && !cfg_.bft_enabled) return;
+
+    // 4b. D3.5e-7c LEAF guard: a SOURCE tip never carries shard_tip_records (only a
+    // BEACON producer folds them) nor shard_tip_witnesses (only a BEACON producer
+    // attaches them). Reject a tip carrying either — closing the POISON-WITNESS
+    // vector: a Byzantine source committee could otherwise K-of-K-sign a tip whose
+    // non-empty records/witnesses ride into this beacon's witness buffer, get
+    // carried in a folded beacon block, and make that block UNPARSEABLE on every
+    // honest node (the Block::from_json depth-1 leaf guard throws) — a beacon
+    // liveness attack. Fail-closed here, before any buffering.
+    if (!tip.shard_tip_records.empty() || !tip.shard_tip_witnesses.empty()) {
+        std::cerr << "[node] shard tip: non-leaf tip (carries records/witnesses) "
+                     "rejected: shard=" << shard_id << " block=" << tip.index << "\n";
+        return;
+    }
+
+    // 5. Derive expected committee. Epoch is determined by shard's block index.
+    EpochIndex shard_epoch = (cfg_.epoch_blocks > 0)
+        ? (tip.index / cfg_.epoch_blocks)
+        : 0;
+
+    auto beacon_reg = NodeRegistry::build_from_chain(chain_, chain_.height());
+    // R2 / D3.5e-1: the shard's committee_region comes from the beacon's
+    // shard→region map. Under D3.5e-2 that map is the GENESIS-COMMITTED
+    // beacon_shard_regions (authoritative); a missing entry yields "" (global
+    // pool), preserving CURRENT-mode backward-compat.
+    std::string shard_region;
+    {
+        auto it = shard_committee_regions_.find(shard_id);
+        if (it != shard_committee_regions_.end()) shard_region = it->second;
+    }
+
+    // 6. D3.5e-4 + D3.5e-7b — derive the FROZEN source committee, verify the K-of-K
+    // sigs against its frozen ed_pubs, and compute the committee_sig_root, via the
+    // ONE shared decision point (verify_shard_tip_committee_sig_root, extracted
+    // VERBATIM from here). The universal fold re-verification gate (e-7d
+    // BlockValidator::check_shardtip_witnesses) calls the SAME helper, so the
+    // beacon's contemporaneous verdict and every honest node's later re-verification
+    // can never derive a different committee or root. nullopt (with a diagnostic on
+    // stderr) ⇒ committee/sig failure ⇒ drop the tip. On the pinned path the pool +
+    // rand are frozen `cc:[shard_epoch]` (present-head-independent, the Layer-2
+    // reconstructibility property); off it (epoch 0 / pruned / CURRENT) the present-
+    // head fallback keeps it byte-identical to pre-D3.5e.
+    auto csr = verify_shard_tip_committee_sig_root(
+        chain_, beacon_reg, shard_epoch,
+        static_cast<uint64_t>(cfg_.epoch_blocks),
+        shard_region, shard_id, cfg_.k_block_sigs, cfg_.bft_enabled, tip);
+    if (!csr) return;
+
+    // D3.5e-6 (S-036 Layer 2): the SIGNED source-shard binding. The K-of-K sigs
+    // just verified cover compute_block_digest(tip), which binds tip.source_shard_id
+    // (eligible_count != 0 ⇒ EXTENDED source block, the D3.4/e-6 gate). Two shards
+    // sharing a committee_region share this exact beacon-derived pool, so a tip
+    // validly signed by region R's committee FOR shard A would otherwise verify
+    // byte-for-byte when gossiped under a region-mate shard B's id. Reject any tip
+    // whose committee-attested source_shard_id != the claimed gossip shard id. Gated
+    // on eligible_count != 0 so a CURRENT-multishard beacon's tips (eligible_count 0,
+    // source_shard_id unbound) stay byte-identical to pre-e6 behavior.
+    if (tip.eligible_count != 0 && tip.source_shard_id != shard_id) {
+        std::cerr << "[node] shard tip: signed source_shard_id ("
+                  << tip.source_shard_id << ") != claimed shard (" << shard_id
+                  << ") — cross-shard tip replay rejected\n";
+        return;
+    }
+
+    latest_shard_tips_[shard_id] = tip;
+
+    // D3.5d-ii (S-036 Layer 1): record the contemporaneously-verified tip into the
+    // ACCUMULATING buffer so it can be F2-reconciled across the beacon committee and
+    // folded into a beacon block (D3.5c). Gated EXTENDED (BEACON is guaranteed by the
+    // early return above); a CURRENT-multishard PROFILE_REGIONAL beacon never accrues
+    // records → byte-identical. committee_sig_root (*csr) is a deterministic PURE
+    // FUNCTION of the just-verified tip (no beacon-local state), so every honest
+    // beacon co-signer builds a byte-identical record → the full-content
+    // reconcile_intersection converges (the anti-wedge invariant). See §9.6.
+    if (cfg_.sharding_mode == ShardingMode::EXTENDED) {
+        chain::ShardTipRecord rec{
+            shard_id, tip.index, tip.eligible_count, *csr, shard_region };
+        pending_shard_tip_records_[{shard_id, tip.index}] = rec;
+        // D3.5e-7c: buffer the FULL tip as the record's WITNESS, atomically beside
+        // the record (same key). The tip is a LEAF (guard 4b), so carrying it in a
+        // folded beacon block can never trip the from_json depth-1 guard. This is
+        // what build_body attaches index-aligned so every honest node can re-verify
+        // the record against the frozen cc:[E] committee (the S-036 CLOSED-maker).
+        pending_shard_tip_witnesses_[{shard_id, tip.index}] = tip;
+
+        // Source-tip-relative staleness prune: drop this shard's records more than
+        // revert_threshold_blocks below its own tip (past the fold/revert window, so
+        // already committed or permanently ineligible). NEVER a fixed count ring (which
+        // could drop a still-in-window intersection member) and NEVER on fold-in (a
+        // reverted-then-reappended block must re-materialize the identical set).
+        // The witness buffer is pruned in LOCKSTEP (same keys) so record ↔ witness
+        // stay atomically paired.
+        //
+        // D3.5e-7c RETENTION (adversarial-review finding): a pin-BLOCKED DISTRESS
+        // record past the W window is TEMPORARILY ineligible, not permanently — the
+        // e-7c emission gate holds it back only until the BEACON's OWN cc:[Es] fold
+        // catches up, and under sustained source>beacon height skew (> W blocks)
+        // plain W eviction would drop every record before its epoch ever pins,
+        // suppressing a legitimate distress merge indefinitely. So a distress record
+        // is retained past W until its source epoch either PINS (normal semantics
+        // resume: it folds, then evicts) or becomes HOPELESS: (a) the beacon passed
+        // Es but the ring evicted cc:[Es] — folds only append the current boundary
+        // epoch, so it can never reappear; or (b) Es is more than the ring size
+        // AHEAD of the beacon's newest fold — bounds retention memory under
+        // unbounded skew, symmetric with (a)'s past-side posture. Both hopeless
+        // cases are the documented fail-closed drop (deployment-tuning obligation:
+        // keep beacon cadence within ~ring×epoch_blocks of the shards). Healthy
+        // records (never fold candidates) and the epoch_blocks==0 legacy config
+        // (nothing ever pins) keep the plain W eviction. Node-local buffer policy —
+        // consensus-safe: the F2 intersection reconciles any per-member divergence.
+        const uint64_t W = chain_.revert_threshold_blocks();
+        const uint64_t distress_threshold = 2ull * cfg_.k_block_sigs;
+        const auto& ccs = chain_.committee_checkpoints();
+        const EpochIndex e_max = ccs.empty() ? 0 : ccs.rbegin()->first;
+        for (auto it = pending_shard_tip_records_.lower_bound({shard_id, uint64_t{0}});
+             it != pending_shard_tip_records_.end() && it->first.first == shard_id; ) {
+            if (it->first.second + W <= tip.index) {
+                bool retain = false;
+                if (cfg_.epoch_blocks > 0
+                    && it->second.eligible_count < distress_threshold) {
+                    const EpochIndex Es = it->first.second / cfg_.epoch_blocks;
+                    const bool pinned   = committee_pin_active(chain_, Es);
+                    const bool hopeless =
+                        (!ccs.empty() && e_max >= Es && !ccs.count(Es))
+                        || (Es > e_max + chain::Chain::kCommitteeCheckpointRing);
+                    retain = !pinned && !hopeless;
+                }
+                if (retain) { ++it; continue; }
+                pending_shard_tip_witnesses_.erase(it->first);
+                it = pending_shard_tip_records_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    // signed_count for the diagnostic — the count of non-zero K-of-K sigs the helper
+    // just verified (identical value; recomputed here since the loop moved into the
+    // shared verify core).
+    size_t signed_count = 0;
+    { Signature zero_sig{};
+      for (const auto& s : tip.creator_block_sigs) if (!(s == zero_sig)) ++signed_count; }
+    std::cout << "[node] verified shard tip: shard=" << shard_id
+              << " block=" << tip.index << " sigs=" << signed_count << "\n";
+}
+
+// S-016 Option 2 (partial): time-ordered admission for inbound
+// cross-shard receipts. CROSS_SHARD_RECEIPT_LATENCY blocks must pass
+// between local first-observation and inclusion in a produced block;
+// this gives the bundle gossip enough time to propagate to every
+// K-committee member so they all see the same eligible set when they
+// build their tentative block (no K-of-K abort from pool divergence).
+//
+// 3 blocks at the web profile (200ms) is ~600ms of gossip headroom —
+// roughly 5-6 intra-region RTTs — which empirically drives the
+// round-retry probability to negligible without piling unnecessary
+// latency on the cross-shard transfer's user-visible path. Tunable;
+// if a deployment's gossip lag is larger, raise this.
+//
+// Full deterministic agreement across committee members requires
+// v2.7 F2's Phase-1 intersection rule on inbound_keys (Option 1).
+// This Option 2 partial closes the practical round-retry surface
+// without the block-format change F2 requires.
+static constexpr uint64_t CROSS_SHARD_RECEIPT_LATENCY = 3;
+
+std::vector<chain::CrossShardReceipt>
+Node::inbound_receipts_eligible_for_inclusion() const {
+    std::vector<chain::CrossShardReceipt> out;
+    out.reserve(pending_inbound_receipts_.size());
+    uint64_t now = chain_.height();
+    for (auto& kv : pending_inbound_receipts_) {
+        auto fit = pending_inbound_first_seen_.find(kv.first);
+        // No first-seen record (shouldn't happen — receipts and
+        // first-seen are populated together) → admit conservatively.
+        // Drop instead of admit would silently delay forever.
+        if (fit == pending_inbound_first_seen_.end()) {
+            out.push_back(kv.second);
+            continue;
+        }
+        // Underflow-safe age check: now - first_seen >= latency
+        // rewritten as first_seen + latency <= now to avoid wrapping
+        // when first_seen happens to exceed now (impossible in
+        // practice but cheap to defend against).
+        if (fit->second + CROSS_SHARD_RECEIPT_LATENCY <= now) {
+            out.push_back(kv.second);
+        }
+    }
+    return out;
+}
+
+// rev.9 B3.3: cross-shard receipt bundle handler.
+//   * BEACON: relay (re-broadcast to all peers); does not apply.
+//   * SHARD: filter src_block.cross_shard_receipts to those addressed
+//     to this shard, dedupe against pending_inbound_receipts_, store.
+//   * SINGLE: ignore.
+// Full K-of-K verification of the source block against the source-
+// shard committee is deferred to B3.4 (where the destination producer
+// bakes verified receipts into a block and apply credits `to`). For
+// B3.3 the receipt is held in pending_inbound_receipts_ as untrusted
+// transit data — it doesn't affect any state until B3.4 verifies +
+// credits.
+void Node::on_cross_shard_receipt_bundle(ShardId src_shard,
+                                            const chain::Block& src_block,
+                                            const net::Message& relay) {
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+
+    if (cfg_.chain_role == ChainRole::BEACON) {
+        // Relay: re-broadcast to peers other than the sender. The
+        // existing GossipNet::broadcast hits all peers; loop avoidance
+        // here is best-effort (peers de-dupe at apply by tx_hash key).
+        gossip_.broadcast(relay);
+        return;
+    }
+    if (cfg_.chain_role != ChainRole::SHARD) return;
+
+    // Don't ingest our own emitted bundle.
+    if (src_shard == cfg_.shard_id) return;
+
+    size_t added = 0;
+    for (auto& r : src_block.cross_shard_receipts) {
+        if (r.dst_shard != cfg_.shard_id) continue;
+        if (r.src_shard != src_shard)     continue;     // sanity
+        auto key = std::make_pair(r.src_shard, r.tx_hash);
+        if (pending_inbound_receipts_.count(key)) continue;     // already buffered
+        // MEM-inbound-receipt-pool cap: this pool is UNAUTHENTICATED transit data
+        // (B3.4 defers source-side verification) and junk receipts are never
+        // pruned, so bound it (drop-newest) to defeat a distinct-tx_hash flood.
+        // Break: once at cap no new key can be added; a later dup is already
+        // present, so stopping here is correct. See the decl comment on
+        // MAX_PENDING_INBOUND_RECEIPTS.
+        if (pending_inbound_receipts_.size() >= MAX_PENDING_INBOUND_RECEIPTS)
+            break;
+        pending_inbound_receipts_[key] = r;
+        // S-016 Option 2: record first-seen height so build_body's
+        // snapshot construction can skip receipts that haven't soaked
+        // long enough for gossip to have propagated to every K-committee
+        // member.
+        pending_inbound_first_seen_[key] = chain_.height();
+        ++added;
+    }
+    if (added > 0 && !cfg_.log_quiet) {
+        std::cout << "[node] inbound receipt bundle: src_shard=" << src_shard
+                  << " block=" << src_block.index
+                  << " accepted=" << added
+                  << " pending_total=" << pending_inbound_receipts_.size() << "\n";
+    }
+}
+
+// rev.9 B6.basic: serve a snapshot to a requesting peer. Empty chains
+// silently skip (nothing useful to send). Otherwise build the snapshot
+// via Chain::serialize_state and reply directly to the requester.
+void Node::on_snapshot_request(uint32_t header_count,
+                                  std::shared_ptr<net::Peer> peer) {
+    nlohmann::json snap;
+    {
+        std::unique_lock<std::shared_mutex> lk(state_mutex_);
+        if (chain_.empty()) return;     // nothing to serve
+        snap = chain_.serialize_state(header_count);
+    }
+    if (peer) peer->send(net::make_snapshot_response(snap));
+    std::cout << "[node] served snapshot to peer "
+              << (peer ? peer->address() : std::string("?"))
+              << " (block_index=" << snap.value("block_index", uint64_t{0})
+              << ")\n";
+}
+
+// v2.2 light-client header-sync over gossip. Reuses rpc_headers
+// (which already handles the slicing + stripping + block_hash
+// computation + 256-element cap) so the gossip path and the RPC
+// path return byte-identical envelopes. Lock is held inside
+// rpc_headers (shared_lock); we don't need to re-acquire here.
+void Node::on_headers_request(uint64_t from_index, uint32_t count,
+                                  std::shared_ptr<net::Peer> peer) {
+    if (!peer) return;
+    nlohmann::json envelope = rpc_headers(from_index, count);
+    peer->send(net::make_headers_response(envelope));
+    if (!cfg_.log_quiet) {
+        std::cout << "[node] served headers to peer "
+                  << peer->address()
+                  << " (from=" << from_index
+                  << " requested=" << count
+                  << " returned=" << envelope.value("count", uint64_t{0})
+                  << ")\n";
+    }
+}
+
+void Node::reset_round() {
+    pending_contribs_.clear();
+    pending_block_sigs_.clear();
+    buffered_block_sigs_.clear();
+    pending_claims_.clear();
+    pending_secrets_.clear();
+    current_round_secret_ = Hash{};
+    current_tx_root_     = Hash{};
+    current_delay_seed_  = Hash{};
+    current_delay_output_= Hash{};
+    phase_ = ConsensusPhase::IDLE;
+    // S-050 note: the stall counter is deliberately NOT cleared here.
+    // reset_round runs on every abort transition, and an abort-churn loop
+    // (abort → reselect → abort, zero blocks) must not suppress the valve —
+    // only a BLOCK APPLY (post_append_bookkeeping_locked) clears it.
+}
+
+// ─── Event Handlers ──────────────────────────────────────────────────────────
+
+void Node::apply_block_locked(const chain::Block& b) {
+    // Skip duplicates silently. With M creators each broadcasting the block
+    // and the gossip mesh fanning it out across peer connections, every
+    // node receives each block ~M times. After the first apply, b.index <
+    // chain_.height() and the duplicate's prev_hash no longer matches our
+    // head — used to log "invalid block: prev_hash mismatch" spam.
+    if (b.index < chain_.height()) {
+        // rev.8 equivocation detection + evidence assembly. If the
+        // incoming block's hash differs from the block we already have at
+        // b.index, AND it carries a non-empty bft_proposer (BFT-mode
+        // block), that proposer signed two different digests for the
+        // same height IN THE SAME ROUND — equivocation. Extract proof: the
+        // (index, gen, body_root) opening + sig of side a from the stored
+        // block, side b from the incoming block, both by the same proposer key
+        // (EQV-height-bind + EQV-gen-bind, kind=BLOCK_DIGEST). A cross-round
+        // pair at one height is refused inside detect_equivocation. Push to evidence pool, gossip.
+        // rev.8 equivocation detection + evidence assembly. The pure,
+        // SIZE-GUARDED assembly is factored into node::detect_equivocation
+        // (BlockIngress EQV-assemble-OOB): this duplicate/old-height branch
+        // runs BEFORE any validate() call, so a peer's block with a
+        // creator_block_sigs shorter than the proposer's creators-position
+        // would otherwise drive an out-of-bounds read when the assembler
+        // extracted the second signature. The pool dedup + gossip + log
+        // (Node-side effects) stay here.
+        if (!b.bft_proposer.empty()) {
+            if (auto ev_opt = detect_equivocation(
+                    chain_.at(b.index), b,
+                    cfg_.chain_role == ChainRole::SHARD,
+                    cfg_.shard_id,
+                    beacon_headers_.empty() ? 0 : beacon_headers_.back().index)) {
+                const chain::EquivocationEvent& ev = *ev_opt;
+                // Add to pool if this equivocator is not already pooled
+                // (equivocator-only identity — MEM-equiv-evidence-blockindex).
+                if (!pending_equivocation_contains(pending_equivocation_evidence_, ev)) {
+                    pending_equivocation_evidence_.push_back(ev);
+                    gossip_.broadcast(net::make_equivocation_evidence(ev));
+                    std::cerr << "[node] EQUIVOCATION evidence built at h="
+                              << b.index << " equivocator=" << ev.equivocator
+                              << " (gossiped; will be baked into next block)\n";
+                }
+            }
+        }
+        // A4 / S-048: the HEAD height (and only the head height — depth-1) is
+        // reorg-eligible. A competitor at b.index == height()-1 that shares
+        // the head's parent and wins Chain::resolve_fork replaces the head;
+        // everything else in this branch stays a duplicate/stale drop.
+        if (chain_.height() >= 2 && b.index == chain_.height() - 1)
+            maybe_reorg_to_locked(b);
+        return;
+    }
+
+    // S-050 straggler recovery (DECISION-LOG 2026-08-12). A block whose index
+    // is beyond our immediate next (b.index > height(); the normal next block
+    // is index == height() and falls through to validate below) proves a peer
+    // minted past our head while we are missing >= 1 block. validate() would
+    // reject it for prev_hash mismatch with NO catch-up, permanently stranding
+    // an idle non-committee follower: such a node arms no round timer, so the
+    // S-050 stall valve (handle_*_timeout) never fires for it, and no other
+    // path re-issues a STATUS_REQUEST. Trigger the SAME tolerance-0 catch-up
+    // the valve uses (stalled_resync_ + one STATUS_REQUEST). Recovery is purely
+    // message-driven — it needs no clock advance, so it works in production
+    // wall-clock time, not just under the test's virtual clock. GUARD: fire at
+    // most once per stall episode (!stalled_resync_), so a stream of future or
+    // duplicated blocks cannot turn this into a STATUS_REQUEST re-broadcast
+    // amplifier; stalled_resync_ clears on the next successful append
+    // (post_append_bookkeeping_locked), re-arming detection. No new message
+    // type, accept-rule, digest, or state — pure liveness, additive.
+    if (b.index > chain_.height()) {
+        if (!stalled_resync_) {
+            stalled_resync_ = true;
+            ++status_requests_sent_;
+            gossip_.broadcast(net::make_status_request());
+        }
+        return;
+    }
+
+    auto reg = NodeRegistry::build_from_chain(chain_, b.index);
+    auto res = validator_.validate(b, chain_, reg);
+    if (!res.ok) {
+        std::cerr << "[node] invalid block: " << res.error << "\n";
+        return;
+    }
+
+    chain_.append(b);
+    post_append_bookkeeping_locked(b);
+}
+
+// A4.2: the post-append bookkeeping shared by the normal accept path and the
+// reorg path — factored VERBATIM out of apply_block_locked (same order), so
+// the normal path is byte-identical. See the decl comment in node.hpp.
+void Node::post_append_bookkeeping_locked(const chain::Block& b) {
+    // Drop applied txs from the mempool, keyed by both indices.
+    for (auto& tx : b.transactions) {
+        tx_store_.erase(tx.hash);
+        tx_by_account_nonce_.erase({tx.from, tx.nonce});
+    }
+
+    // Sweep stale-nonce txs (M11): any mempool entry whose nonce is now
+    // behind the chain's next_nonce can never be included.
+    for (auto it = tx_store_.begin(); it != tx_store_.end(); ) {
+        if (it->second.nonce < chain_.next_nonce(it->second.from)) {
+            tx_by_account_nonce_.erase({it->second.from, it->second.nonce});
+            it = tx_store_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    registry_ = NodeRegistry::build_from_chain(chain_, chain_.height());
+    current_aborts_.clear();
+    contrib_timer_.cancel();
+    block_sig_timer_.cancel();
+    reset_round();
+    // S-050: a block applied — the ONLY event that counts as progress for
+    // the stall valve (abort transitions deliberately don't clear it).
+    round_stall_ticks_ = 0;
+    stalled_resync_    = false;
+
+    // Drop equivocation evidence that was just baked into this block —
+    // the record is on chain (apply reads nothing from it, D4). Matched
+    // by equivocator, the same identity the pending dedup uses.
+    for (auto& ev : b.equivocation_events) {
+        pending_equivocation_evidence_.erase(
+            std::remove_if(pending_equivocation_evidence_.begin(),
+                            pending_equivocation_evidence_.end(),
+                [&](const chain::EquivocationEvent& e) {
+                    // Same equivocator-only identity the dedup uses.
+                    return same_equivocation_identity(e, ev);
+                }),
+            pending_equivocation_evidence_.end());
+    }
+    // rev.9 B3.4: prune inbound receipts that this block credited.
+    // Apply (above) already inserted into chain.applied_inbound_receipts_;
+    // here we drop the matching pending entries so the producer doesn't
+    // re-propose them next round. The on-chain dedup set is canonical;
+    // pending is just a fast path for inclusion.
+    for (auto& r : b.inbound_receipts) {
+        auto key = std::make_pair(r.src_shard, r.tx_hash);
+        pending_inbound_receipts_.erase(key);
+        pending_inbound_first_seen_.erase(key);  // S-016: keep parallel-map in sync
+    }
+    // A9 / S-031 follow-on: async chain.save off the hot path.
+    // Previously: chain_.save(cfg_.chain_path) ran synchronously under
+    // state_mutex_'s unique_lock, blocking the next apply on the
+    // disk-write duration (O(N) JSON serialize + fsync per block).
+    // Now: enqueue_save sets save_pending_ and notifies; the worker
+    // thread does the serialize+write under shared_lock (concurrent
+    // with RPC readers). Apply hot path returns immediately. Crash
+    // window between apply and save is recovered via peer gossip
+    // on restart — same correctness as pre-fix.
+    enqueue_save();
+
+    // v2.20: fan out this block's DAPP_CALLs (+ heartbeat cadence) to
+    // streaming subscribers. Enqueue-and-notify only — no socket I/O on
+    // the apply hot path; the per-subscriber writer threads do the
+    // sending. Fires on ALL apply paths (self-produced, gossiped,
+    // sync), synchronously with the logical state change — subscribers
+    // see the chain's logical head, decoupled from disk persistence.
+    on_block_finalized_for_subscribers(b);
+
+    // S-027: gate the per-block accept line behind log_quiet=false. Block
+    // index + creator-count is chain-public state but the line dominates
+    // log volume on a healthy chain (one per ~tx_commit_ms). Operators
+    // who want fewer logs set log_quiet=true; WARN/ERROR diagnostics
+    // continue to surface regardless.
+    if (!cfg_.log_quiet) {
+        std::cout << "[node] accepted block #" << b.index
+                  << " creators=" << b.creators.size() << "\n";
+    }
+
+    // rev.9 B5: epoch boundary observability. When this block opens a
+    // new epoch (height % epoch_blocks == 1, since the epoch's "rand
+    // anchor" is the block at index = epoch_index * epoch_blocks - 1
+    // and committee selection at the next round reads it), log the
+    // transition + the freshly-derived committee. Operators can use
+    // this to trace rotation.
+    if (!cfg_.log_quiet
+        && cfg_.epoch_blocks > 0
+        && chain_.height() > 0
+        && (chain_.height() - 1) % cfg_.epoch_blocks == 0
+        && chain_.height() > 1) {
+        // S-027: gate this observability line behind log_quiet=false, like the
+        // per-block accept line above — operators who want fewer logs (and every
+        // quiet in-process harness) should not see it.
+        EpochIndex new_epoch = current_epoch_index();
+        size_t pool_size = NodeRegistry::build_from_chain(
+                                chain_, chain_.height()).size();
+        std::cout << "[node] epoch boundary: epoch_index=" << new_epoch
+                  << " pool_size=" << pool_size
+                  << " (next-round committee will derive from this height's rand)\n";
+    }
+
+    // rev.9 B2c.1: beacon nodes broadcast each newly-applied block as a
+    // BEACON_HEADER so peering shard nodes can light-validate it. SINGLE
+    // / SHARD roles do nothing — this gossip is beacon-emitted only.
+    if (cfg_.chain_role == ChainRole::BEACON) {
+        gossip_.broadcast(net::make_beacon_header(b));
+    }
+    // rev.9 B2c.3: shard nodes broadcast each newly-applied block as a
+    // SHARD_TIP so peering beacon nodes can validate the committee K-of-K
+    // and update latest_shard_tips_. SINGLE / BEACON roles do nothing.
+    if (cfg_.chain_role == ChainRole::SHARD) {
+        gossip_.broadcast(net::make_shard_tip(cfg_.shard_id, b));
+        // rev.9 B3.3: emit cross-shard receipts bundle when the block
+        // produced any outbound receipts. Beacon peers relay the
+        // bundle to other shards; destination shards filter on
+        // dst_shard == my_shard_id and queue inbound receipts for
+        // B3.4 (apply-side credit).
+        if (!b.cross_shard_receipts.empty()) {
+            gossip_.broadcast(
+                net::make_cross_shard_receipt_bundle(cfg_.shard_id, b));
+        }
+    }
+
+    check_if_selected();
+}
+
+// A4 / S-048 (BoundedReorgDesign.md A4.2): same-height fork choice + depth-1
+// head reorg. Precondition (enforced by the caller): b.index == height()-1
+// and height() >= 2. Called under state_mutex_.
+void Node::maybe_reorg_to_locked(const chain::Block& incoming) {
+    // ── Structural gates (NO state mutation) ────────────────────────────────
+    // (1) A genuine same-height fork shares the head's PARENT. Anything else
+    //     is a stale/foreign block — drop (the pre-A4 behavior).
+    const chain::Block& cur = chain_.head();
+    if (incoming.prev_hash != cur.prev_hash) return;
+    // (2) Distinct content — a byte-identical duplicate is not a fork.
+    const Hash cur_hash = cur.compute_hash();
+    const Hash inc_hash = incoming.compute_hash();
+    if (cur_hash == inc_hash) return;
+    // (3) Deterministic winner (S-029 ranking: heaviest sig set → fewer
+    //     abort_events → smallest block hash). Every honest peer evaluates the
+    //     SAME pure function of the two blocks, so all converge on one winner
+    //     regardless of arrival order. If our head wins, keep it.
+    const chain::Block& winner = chain::Chain::resolve_fork(cur, incoming);
+    if (&winner != &incoming) return;
+    // (3b) Cheap pre-revert well-formedness (adversarial-review finding 4:
+    //      resolve_fork ranks on the COUNT of non-zero block sigs without
+    //      verifying them, so a Byzantine peer could pad a malformed block to
+    //      win the tie-break and force the O(state) revert + re-apply before
+    //      the post-revert crypto check rejects it). A legitimate block has
+    //      exactly one sig slot per creator; reject a size-mismatched block
+    //      here, with NO revert. (Full sig verification stays post-revert —
+    //      the competitor is a sibling of our head, so it cannot pass
+    //      check_prev_hash until the chain is actually at H-1; padding WITHIN
+    //      the creator count remains bounded + fail-closed, A4.4 note.)
+    if (incoming.creator_block_sigs.size() != incoming.creators.size()) {
+        std::cerr << "[node] S-048 reorg declined at h=" << incoming.index
+                  << ": malformed competitor (sig/creator size mismatch)\n";
+        return;
+    }
+    // (4) Depth-1 capability: without a retained pre-head snapshot the chain
+    //     cannot revert (fresh bootstrap, or head already reverted once) —
+    //     decline rather than throw. The node stays on its head; the S-047
+    //     retry keeps re-offering the winner, so a later head (which retains
+    //     a snapshot) re-opens the path for the NEXT fork.
+    if (!chain_.has_revertible_head()) {
+        std::cerr << "[node] S-048 reorg declined at h=" << incoming.index
+                  << ": no revertible head (bootstrap/already-reverted)\n";
+        return;
+    }
+
+    // ── The reorg (revert → validate → append winner | restore old head) ────
+    // Copy the head BEFORE the revert: the reference dies on pop_back, and a
+    // validation failure OR an apply failure must be able to restore it
+    // verbatim.
+    chain::Block old_head = cur;
+    chain_.revert_head();   // state is now exactly H-1
+
+    // Validate the competitor against the H-1 state it claims to extend —
+    // the same call the normal accept path makes, with the chain now AT the
+    // competitor's parent (registry included: REGISTER/DEREGISTER effects of
+    // the reverted head are gone, which is the correct H-1 view).
+    auto reg = NodeRegistry::build_from_chain(chain_, incoming.index);
+    auto res = validator_.validate(incoming, chain_, reg);
+    if (!res.ok) {
+        // Fail-closed: the competitor won resolve_fork on its CLAIMED sig
+        // set but does not actually verify (Byzantine/garbage sigs). Restore
+        // the old head — it validated when first applied and apply is
+        // deterministic, so this append cannot fail. Net effect: no change.
+        chain_.append(old_head);
+        std::cerr << "[node] S-048 reorg REJECTED at h=" << incoming.index
+                  << " (competitor invalid: " << res.error
+                  << ") — head restored\n";
+        return;
+    }
+
+    // S-102 (adjudicated + closed 2026-09-16): validate() is NOT the last
+    // gate. apply_transactions can still refuse a block that validated — the
+    // S-033 state_root check (state_root is outside compute_block_digest AND
+    // outside every validator rule, so a relayer with NO committee key can
+    // relabel a signed block with a wrong non-zero root, keep its K-of-K
+    // signatures byte-for-byte and win the resolve_fork tie-break by grinding
+    // that free field for the smaller hash), the S-007 credit-overflow throws
+    // and the A1 supply assertion. apply itself is atomic (A9: the chain is
+    // exactly H-1 again after the throw) but the head is already popped, so
+    // an escaping throw left the node at H-1 with its head silently lost
+    // (caught only by the gossip dispatcher). Catch EVERY throw here and
+    // restore the old head exactly as the validate-failure branch does: the
+    // H-1 state is byte-identical to the one old_head was applied to
+    // (BoundedReorgSoundness REORG-2), apply is deterministic, and
+    // revert_head's pop_back left blocks_ with capacity for the re-append, so
+    // the restore cannot fail half-way — every intermediate state is a
+    // consistent chain (H-1 or H). The on-disk store is untouched by the
+    // failed attempt (nothing is saved on this path) and the persisted_count_
+    // clamp only makes the next save rewrite the tail file with the same
+    // bytes. No accept-rule change: the sibling is refused either way; only
+    // the node's own head is no longer collateral. Gate: test-node-reorg-guard.
+    // (An explicit flag, not the message: an exception whose what() is empty
+    // must still count as a failure.)
+    bool        apply_failed = false;
+    std::string apply_error;
+    try {
+        chain_.append(incoming);
+    } catch (const std::exception& e) {
+        apply_failed = true;
+        apply_error  = e.what();
+    } catch (...) {
+        apply_failed = true;
+        apply_error  = "non-standard exception";
+    }
+    if (apply_failed) {
+        chain_.append(old_head);
+        std::cerr << "[node] S-048 reorg REJECTED at h=" << incoming.index
+                  << " (competitor validated but its apply threw: "
+                  << apply_error << ") — head restored (S-102)\n";
+        return;
+    }
+
+    // Return the reverted head's txs to the mempool: any tx NOT in the new
+    // head would otherwise be silently lost. Inserted through the maps
+    // directly (admission policy already passed once); the stale-nonce sweep
+    // inside post_append_bookkeeping_locked immediately drops any that the
+    // new head made stale (same sender+nonce consumed by a different tx).
+    for (const auto& tx : old_head.transactions) {
+        bool in_new = false;
+        for (const auto& ntx : incoming.transactions)
+            if (ntx.hash == tx.hash) { in_new = true; break; }
+        if (!in_new && tx.nonce >= chain_.next_nonce(tx.from)) {
+            tx_store_[tx.hash] = tx;
+            tx_by_account_nonce_[{tx.from, tx.nonce}] = tx.hash;
+        }
+    }
+
+    std::cerr << "[node] S-048 REORG at h=" << incoming.index
+              << ": replaced head (deterministic resolve_fork winner)\n";
+
+    // Same post-append bookkeeping as a normal accept: mempool drop + sweep,
+    // registry rebuild, round/timer reset, evidence + receipt pruning, async
+    // save, subscriber fan-out (subscribers see the block at this height
+    // AGAIN with the new content — inherent to a reorg), epoch log, role
+    // broadcasts (announcing the winner helps stuck peers converge),
+    // check_if_selected against the new head.
+    post_append_bookkeeping_locked(incoming);
+}
+
+void Node::on_block(const chain::Block& b) {
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+    apply_block_locked(b);
+}
+
+// S-002 mitigation: cheap forgery check at mempool-admission time.
+// Mirrors the validator's per-tx signature verification in
+// check_transactions but does ONLY the sig check — full validation
+// (charset, payload-size bounds, type-specific rules) still happens
+// at block apply. The intent is to reject obvious forgeries before
+// they consume mempool slots or amplify through gossip.
+//
+// Dependency: this only works correctly when src/net/binary_codec.cpp's
+// decode_tx_frame preserves amount/fee/nonce — see the comment in
+// binary_codec.cpp and docs/proofs/S002-Mempool-Sig-Verify.md.
+bool Node::verify_tx_signature_locked(const chain::Transaction& tx) const {
+    using namespace determ::crypto;
+    using namespace determ::chain;
+    // §3.21: a PQ_TRANSFER is authenticated by its DPQ1 envelope (ML-DSA) bound
+    // to the PQ-native `from` address — not the Ed25519 `sig`. Same shared
+    // accept-rule the block validator uses.
+    if (tx.type == TxType::PQ_TRANSFER) return verify_pq_transaction(tx);
+    // D9 / R-7 (S-057) mirror: a non-PQ transaction carrying non-empty pq_auth is invalid.
+    if (!tx.pq_auth.empty()) return false;
+    PubKey pk{};
+    const bool from_anon = is_anon_address(tx.from);
+    // E1 mirror (S-071): the pool's all-zero key is small-order, so a forged
+    // signature under it would otherwise make such a tx mempool-resident.
+    if (tx.from == ZEROTH_ADDRESS) return false;
+    if (tx.type == TxType::REGISTER) {
+        if (from_anon) return false;
+        if (tx.payload.size() < 32) return false;
+        // V-REG-1 mirror (node-local): a REGISTER the verifier will reject —
+        // an already-registered domain, or nonce != 0 — must not become
+        // resident either, or a zero-cost REGISTER(victim, n, fee=MAX) squats
+        // the victim's (from, nonce) slot and per-sender quota until a
+        // building node evicts it (mempool-layer censorship of the victim's
+        // own transactions). Cheap: one map lookup before the signature.
+        if (chain_.registrants().count(tx.from) || tx.nonce != 0) return false;
+        std::copy_n(tx.payload.begin(), 32, pk.begin());
+    } else if (from_anon) {
+        if (tx.type != TxType::TRANSFER) return false;
+        pk = parse_anon_pubkey(tx.from);
+    } else {
+        auto& regs = chain_.registrants();
+        auto it = regs.find(tx.from);
+        if (it == regs.end()) return false;
+        pk = it->second.ed_pub;
+    }
+    auto sb = tx.signing_bytes();
+    if (!verify(pk, sb.data(), sb.size(), tx.sig)) return false;
+    // S-068 mirror (after the signature, like the verifier): a REGISTER whose
+    // payload key is small-order never becomes resident either.
+    if (tx.type == TxType::REGISTER)
+        return determ_ed25519_point_has_small_order(pk.data()) == 0;
+    // D10 / S-072 mirror: an anonymous sender key that has small order never becomes resident.
+    if (from_anon)
+        return determ_ed25519_point_has_small_order(pk.data()) == 0;
+    return true;
+}
+
+TxAdmit Node::tx_admit_locked() {
+    // Same height + same registry view as apply_block_locked will use for the
+    // block build_body is about to assemble (b.index = height(); registry =
+    // build_from_chain(chain_, b.index)).
+    const uint64_t at = chain_.empty() ? 1 : chain_.height();
+    auto reg = std::make_shared<const NodeRegistry>(
+        NodeRegistry::build_from_chain(chain_, at));
+    // The memo is valid for one head: every input of check_transaction other
+    // than the tx itself is a function of the head (chain state, registry,
+    // genesis config), so a new head hash — append OR reorg — drops it.
+    const Hash head = chain_.empty() ? Hash{} : chain_.head_hash();
+    if (head != admit_memo_head_) { admit_memo_.clear(); admit_memo_head_ = head; }
+    return [this, at, reg](const chain::Transaction& tx, uint64_t expected_nonce) {
+        const auto key = std::make_pair(tx.hash, expected_nonce);
+        bool ok;
+        if (auto m = admit_memo_.find(key); m != admit_memo_.end()) {
+            ok = m->second;
+        } else {
+            auto r = validator_.check_transaction(tx, at, chain_, *reg, expected_nonce);
+            ++admit_verifications_;
+            admit_memo_.emplace(key, r.ok);
+            if (!r.ok) evict_tx_locked(tx, r.error);
+            ok = r.ok;
+        }
+        if (!ok) return false;
+        // S-079: the verifier has no balance rule, and build_body's own
+        // provisional-balance skip evicts nothing — so a resident the head
+        // can no longer fund (its sender's balance moved under it) would be
+        // re-selected every round, occupying its slot and quota for ever.
+        // Re-check affordability at the head (the sender's lower-nonce
+        // residents spend first) and evict on failure, like a verifier
+        // rejection. NOT memoized: the verdict depends on the pool (which
+        // lower nonces are resident), not only on the head.
+        if (!mempool_affordable_at_build_locked(tx)) {
+            evict_tx_locked(tx, "unaffordable at this head (S-079)");
+            return false;
+        }
+        return true;
+    };
+}
+
+// 2026-09-17 (SECURITY.md S-105): the producer-side admission predicate for
+// EQUIVOCATION EVIDENCE — the exact twin of tx_admit_locked above, wired to the
+// verifier's own BlockValidator::check_equivocation_event at the head this
+// block will be validated against.
+//
+// The halt it closes: build_body's evidence arm included `pool INTERSECT
+// reconcile_union` with NO admissibility check, while the verifier rejects a
+// block whose equivocator no longer resolves ("equivocator not in registry").
+// An eligible key needs two offline signatures and one DEREGISTER: it gossips a
+// self-manufactured record, every node pools it, and at the height its
+// inactive_from lands NodeRegistry::build_from_chain drops the domain — from
+// then on every honest assembler proposes the record, every honest verifier
+// rejects the block, apply_block_locked never appends, and the only prune is
+// POST-inclusion, so the record is never removed. Permanent, and the same
+// S-056 class the 2026-09-14 increments closed for transactions.
+//
+// A record the predicate rejects is EVICTED, like a rejected transaction:
+// nothing can make it includable again without a state change that would also
+// let it be re-adopted, and keeping it would re-cost the check every build.
+// Verdicts are MEMOIZED per head (eq_admit_memo_) — check_equivocation_event is
+// deterministic in (event, head state) and costs two Ed25519 verifications, and
+// build_body runs three times a round, so without the memo the pool would be
+// re-verified 3x per round under state_mutex_.
+EvAdmit Node::eq_admit_locked() {
+    // Same height + same registry view as apply_block_locked will use for the
+    // block build_body is about to assemble (b.index = height(); registry =
+    // build_from_chain(chain_, b.index)) — identical to tx_admit_locked.
+    const uint64_t at = chain_.empty() ? 1 : chain_.height();
+    auto reg = std::make_shared<const NodeRegistry>(
+        NodeRegistry::build_from_chain(chain_, at));
+    const Hash head = chain_.empty() ? Hash{} : chain_.head_hash();
+    if (head != eq_admit_memo_head_) { eq_admit_memo_.clear(); eq_admit_memo_head_ = head; }
+    return [this, at, reg](const chain::EquivocationEvent& ev) {
+        const Hash key = hash_equivocation_event(ev);
+        if (auto m = eq_admit_memo_.find(key); m != eq_admit_memo_.end())
+            return m->second;
+        auto r = validator_.check_equivocation_event(ev, 0, at, chain_, *reg);
+        eq_admit_memo_.emplace(key, r.ok);
+        if (!r.ok) evict_equivocation_evidence_locked(ev, r.error);
+        return r.ok;
+    };
+}
+
+// An equivocation record the verifier rejects at this head cannot enter any
+// block until state changes, and the ONLY prune the node has is post-inclusion
+// — so leaving it pooled leaves it un-includable and permanently resident (it
+// would also keep occupying that equivocator's single pool slot and a place in
+// every Phase-1 view list). Safe inside build_body: the assembler iterates its
+// own copy of the pool (`ev_candidates`, taken before the admission loop) and
+// every call site holds state_mutex_ exclusively.
+void Node::evict_equivocation_evidence_locked(const chain::EquivocationEvent& ev,
+                                              const std::string& why) {
+    pending_equivocation_evidence_.erase(
+        std::remove_if(pending_equivocation_evidence_.begin(),
+                        pending_equivocation_evidence_.end(),
+            [&](const chain::EquivocationEvent& e) {
+                return same_equivocation_identity(e, ev);
+            }),
+        pending_equivocation_evidence_.end());
+    if (!cfg_.log_quiet)
+        std::cerr << "[node] evidence pool: evicted record against "
+                  << ev.equivocator << " (" << why << ") (S-105)\n";
+}
+
+// A transaction the verifier rejects at the head — or one the head cannot
+// fund (S-079) — cannot be included until state changes. Keeping it would
+// cost a full re-check per head (and, before the memo, per rebuild) and
+// would block the sender's later nonces; the wallet resubmits when it
+// becomes valid. Safe inside build_body: the
+// assembler iterates its own copies (`ordered`) taken before the admission
+// loop and never reads tx_store again, and every call site holds
+// state_mutex_ exclusively.
+void Node::evict_tx_locked(const chain::Transaction& tx, const std::string& why) {
+    tx_store_.erase(tx.hash);
+    auto idx = tx_by_account_nonce_.find({tx.from, tx.nonce});
+    if (idx != tx_by_account_nonce_.end() && idx->second == tx.hash)
+        tx_by_account_nonce_.erase(idx);
+    if (!cfg_.log_quiet)
+        std::cerr << "[node] mempool: evicted " << to_hex(tx.hash).substr(0, 16)
+                  << " from " << tx.from << " (" << why << ")\n";
+}
+
+// S-008 helpers (mempool admission policy).
+//
+// mempool_count_from: count tx_by_account_nonce_ entries whose key.first
+// matches `sender`. std::map iterates in sorted key order; lower_bound at
+// (sender, 0) gives the start of the sender's range. Stop when key.first
+// changes. Linear in per-sender count (bounded by MEMPOOL_MAX_PER_SENDER).
+size_t Node::mempool_count_from(const std::string& sender) const {
+    size_t count = 0;
+    auto it = tx_by_account_nonce_.lower_bound({sender, 0});
+    while (it != tx_by_account_nonce_.end() && it->first.first == sender) {
+        ++count;
+        ++it;
+    }
+    return count;
+}
+
+// S-079 helpers (mempool affordability policy, 2026-09-16). SECURITY.md S-079:
+// nothing in admission asked whether the sender could PAY, the cap evicted
+// the minimum fee, and the producer skipped an unaffordable transaction
+// without evicting it — so 100 self-certifying anonymous senders x 100
+// `amount = 0, fee = UINT64_MAX` transfers (S-049-clean: 0 + MAX does not
+// wrap) filled MEMPOOL_MAX_TXS with entries no block would ever apply, and
+// `tx.fee <= min_fee` then rejected every representable fee for ever: a
+// remote, zero-cost, permanent seal. The S-070 name-squatting REGISTER is the
+// same defect with `fee` in place of `amount + fee`. Node-local policy: the
+// verifier and the apply path are untouched.
+
+static inline bool add_u64_or_false(uint64_t a, uint64_t b, uint64_t* out) {
+    if (a > UINT64_MAX - b) return false;
+    *out = a + b;
+    return true;
+}
+
+// mempool_tx_cost: the TRANSPARENT debit Chain::apply_transactions charges
+// tx.from when the transaction applies, per type:
+//   amount + fee ....... TRANSFER, PQ_TRANSFER (the TRANSFER arm), SHIELD,
+//                        DAPP_CALL (the well-formed arm);
+//   staked + fee ....... STAKE (the amount rides in the 8-byte payload);
+//   fee ................ every `charge_fee` type (REGISTER, DEREGISTER,
+//                        UNSTAKE — the refund is a failure path — PARAM_CHANGE,
+//                        MERGE_EVENT, COMPOSABLE_BATCH — inner transfers debit
+//                        their OWN senders, best-effort, the outer applies on
+//                        its fee alone — DAPP_REGISTER, the A2 audit types,
+//                        REGISTER_NOTE_KEY) and, for symmetry with "evicted
+//                        at build", REGION_CHANGE / an unknown type;
+//   0 .................. UNSHIELD, CONFIDENTIAL_TRANSFER: the note(s) fund
+//                        amount and fee, hidden from the transparent balance;
+//                        the verifier proves that at build (and evicts on
+//                        failure). Affordability is vacuous for them — a
+//                        zero-cost confidential junk flood is bounded by the
+//                        quota and cleared by every build, and its
+//                        verification cost is S-065 / D14, not this rule.
+// A sum that overflows can never be charged (apply skips it): UINT64_MAX.
+uint64_t Node::mempool_tx_cost(const chain::Transaction& tx) {
+    using chain::TxType;
+    uint64_t cost = 0;
+    switch (tx.type) {
+    case TxType::TRANSFER:
+    case TxType::PQ_TRANSFER:
+    case TxType::SHIELD:
+    case TxType::DAPP_CALL:
+        return add_u64_or_false(tx.amount, tx.fee, &cost) ? cost : UINT64_MAX;
+    case TxType::STAKE: {
+        if (tx.payload.size() != 8) return tx.fee;   // the verifier rejects the shape at build
+        uint64_t staked = 0;
+        for (int i = 0; i < 8; ++i) staked |= uint64_t(tx.payload[i]) << (8 * i);
+        return add_u64_or_false(staked, tx.fee, &cost) ? cost : UINT64_MAX;
+    }
+    case TxType::UNSHIELD:
+    case TxType::CONFIDENTIAL_TRANSFER:
+        return 0;
+    case TxType::REGISTER:
+    case TxType::DEREGISTER:
+    case TxType::UNSTAKE:
+    case TxType::REGION_CHANGE:
+    case TxType::PARAM_CHANGE:
+    case TxType::MERGE_EVENT:
+    case TxType::COMPOSABLE_BATCH:
+    case TxType::DAPP_REGISTER:
+    case TxType::ROTATE_AUDIT_KEY:
+    case TxType::LOG_AUDIT_ACCESS:
+    case TxType::REGISTER_NOTE_KEY:
+        return tx.fee;
+    }
+    return tx.fee;   // an enumerator-less value: verifier-rejected, evicted at build
+}
+
+// mempool_committed_from: the debits the sender's OTHER resident txs will
+// charge — every entry of `sender` except the one at `excl_nonce` (a
+// replacement displaces its same-nonce incumbent, so that one is not
+// counted). Bounded by MEMPOOL_MAX_PER_SENDER lookups. An overflowing sum
+// is reported as UINT64_MAX (no balance covers it).
+uint64_t Node::mempool_committed_from(const std::string& sender, uint64_t excl_nonce) const {
+    uint64_t sum = 0;
+    for (auto it = tx_by_account_nonce_.lower_bound({sender, 0});
+         it != tx_by_account_nonce_.end() && it->first.first == sender; ++it) {
+        if (it->first.second == excl_nonce) continue;
+        auto t = tx_store_.find(it->second);
+        if (t == tx_store_.end()) continue;   // the two maps move in lockstep; defensive
+        if (!add_u64_or_false(sum, mempool_tx_cost(t->second), &sum)) return UINT64_MAX;
+    }
+    return sum;
+}
+
+// mempool_scan_locked: one pass over tx_by_account_nonce_ — sorted by
+// (from, nonce), so each sender's entries arrive in the order the block
+// applies them — accumulating the running debit per sender against its
+// balance at the head. The first entry whose running sum exceeds the
+// balance, and every later nonce of that sender, is UNAFFORDABLE: nothing
+// this node builds at this head can include it. Reports the first such
+// entry (the eviction victim of choice) and the minimum fee among the
+// affordable entries (the admission floor), tie-broken by the smallest
+// hash like the pre-S-079 scan. O(N log N) and run only at the cap, the
+// same order as the shipped min-fee scan it replaces.
+Node::MempoolScan Node::mempool_scan_locked() const {
+    MempoolScan s;
+    bool        have_sender = false;
+    std::string sender;
+    uint64_t    balance = 0, running = 0;
+    bool        overrun = false;
+    for (const auto& [key, h] : tx_by_account_nonce_) {
+        auto t = tx_store_.find(h);
+        if (t == tx_store_.end()) continue;
+        if (!have_sender || key.first != sender) {
+            have_sender = true;
+            sender  = key.first;
+            balance = chain_.balance(sender);
+            running = 0;
+            overrun = false;
+        }
+        bool affordable = false;
+        if (!overrun) {
+            uint64_t next = 0;
+            if (add_u64_or_false(running, mempool_tx_cost(t->second), &next) && next <= balance) {
+                running    = next;
+                affordable = true;
+            } else {
+                overrun = true;   // this nonce and every later one of this sender
+            }
+        }
+        if (!affordable) {
+            if (!s.has_unaffordable) { s.has_unaffordable = true; s.unaffordable = h; }
+            continue;
+        }
+        const uint64_t fee = t->second.fee;
+        if (!s.has_affordable || fee < s.min_fee || (fee == s.min_fee && h < s.min_fee_hash)) {
+            s.has_affordable = true;
+            s.min_fee        = fee;
+            s.min_fee_hash   = h;
+        }
+    }
+    return s;
+}
+
+// mempool_affordable_at_build_locked: build_body walks a sender's residents
+// in nonce order, so when it asks about `tx` every lower nonce of that
+// sender is already in the block being assembled; what is left of the head
+// balance after those debits must cover tx's own. (Higher nonces come
+// later and do not constrain it.) In-block CREDITS are deliberately not
+// counted — the ingress rule counts none either, so the two agree.
+bool Node::mempool_affordable_at_build_locked(const chain::Transaction& tx) const {
+    uint64_t lower = 0;
+    for (auto it = tx_by_account_nonce_.lower_bound({tx.from, 0});
+         it != tx_by_account_nonce_.end() && it->first.first == tx.from
+             && it->first.second < tx.nonce; ++it) {
+        auto t = tx_store_.find(it->second);
+        if (t == tx_store_.end()) continue;
+        if (!add_u64_or_false(lower, mempool_tx_cost(t->second), &lower)) return false;
+    }
+    uint64_t need = 0;
+    return add_u64_or_false(lower, mempool_tx_cost(tx), &need)
+        && need <= chain_.balance(tx.from);
+}
+
+// mempool_admit_check: shared S-008 admission gate. Returns "" on accept,
+// non-empty error string on reject. Called by both on_tx (gossip path) and
+// rpc_submit_tx (RPC path) so the policy is the same regardless of channel.
+//
+// Order of checks:
+//   1. Affordability at the head, with the sender's other resident txs
+//      (S-079; bounded by the per-sender quota).
+//   2. Per-sender quota (cheap, bounded scan).
+//   3. Global cap + eviction feasibility (most expensive; only run if
+//      the first two pass).
+std::string Node::mempool_admit_check(const chain::Transaction& tx) const {
+    // D3.6 / S-036: MERGE_EVENT is a BEACON-coordinated event whose historical
+    // distress witness (the `t:` records) is BEACON && EXTENDED state — the block
+    // validator fail-closes it on every non-BEACON chain AND on a BEACON that isn't
+    // EXTENDED. Reject it here at mempool admission whenever this node is not
+    // BEACON && EXTENDED so a tx the block validator would reject never ENTERS the
+    // pool — otherwise the producer keeps re-including a queued-but-block-invalid tx
+    // and the chain STALLS (block validation rejects the BLOCK, not the pooled tx).
+    // The gate MATCHES the block-validator gate exactly (non-BEACON → chain_role
+    // reject; BEACON but non-EXTENDED → sharding_mode reject), closing both
+    // stall-class vectors. Runs on both the RPC-submit and gossip channels.
+    if (tx.type == chain::TxType::MERGE_EVENT
+        && (cfg_.chain_role != ChainRole::BEACON
+            || cfg_.sharding_mode != ShardingMode::EXTENDED)) {
+        return "MERGE_EVENT is valid only on a BEACON+EXTENDED chain (S-036: a "
+               "shard cannot verify the historical distress witness, and a "
+               "non-EXTENDED beacon holds no `t:` distress records)";
+    }
+
+    // D2: refuse a payload the binary tx frame cannot represent. `payload_len`
+    // is a u16, so above TX_FRAME_PAYLOAD_MAX the frame's declared length and
+    // its written overflow section disagree and a peer decodes a DIFFERENT
+    // transaction (Transaction::encode_frame throws rather than emit that, but
+    // gossip's per-peer `catch (...)` would swallow it and the tx would simply
+    // never propagate — silently). Rejecting here turns that silence into an
+    // error the submitter can see.
+    //
+    // Nothing legitimate is excluded: every payload-bearing type is capped far
+    // lower (TRANSFER 128, DAPP_CALL / CT 16384, COMPOSABLE_BATCH 47554). The
+    // check is deliberately TYPE-INDEPENDENT because several types carry a
+    // payload with no per-type cap at all, and Transaction::from_json applies
+    // no bound on the RPC ingress. A wire-received tx cannot exceed this by
+    // construction (decode_frame reads payload_len as u16), so this gate is the
+    // only place an oversized payload can enter.
+    if (tx.payload.size() > chain::TX_FRAME_PAYLOAD_MAX) {
+        return "tx payload exceeds the binary frame limit ("
+             + std::to_string(chain::TX_FRAME_PAYLOAD_MAX) + " bytes)";
+    }
+
+    // S-079: the sender must be able to fund this tx AND its other resident
+    // txs out of its balance at the head — the whole pending set must fit,
+    // in any order (costs are non-negative, so every nonce-ordered prefix
+    // fits too). No credit optimism: a pending transfer TO the sender counts
+    // only once it lands (the client resubmits then — a definitive rejection
+    // here beats a `queued` that the producer would skip for ever). By
+    // balance, not by registration: an anonymous address has no registry
+    // entry but a balance if funded, and a fresh domain's REGISTER pays its
+    // fee from whatever was sent to that name (S-070). The same-nonce
+    // incumbent is excluded — a replacement displaces it.
+    {
+        const uint64_t cost      = mempool_tx_cost(tx);
+        const uint64_t committed = mempool_committed_from(tx.from, tx.nonce);
+        const uint64_t balance   = chain_.balance(tx.from);
+        uint64_t need = 0;
+        if (!add_u64_or_false(cost, committed, &need) || need > balance) {
+            return "mempool: unaffordable (S-079): " + tx.from + " holds "
+                 + std::to_string(balance) + " at the head; this tx costs "
+                 + std::to_string(cost) + " and its other pending txs commit "
+                 + std::to_string(committed);
+        }
+    }
+
+    // Check if this tx would REPLACE an existing one at (from, nonce).
+    // A replace doesn't add to the mempool count — same slot, same sender.
+    auto existing_it = tx_by_account_nonce_.find({tx.from, tx.nonce});
+    bool is_replace = (existing_it != tx_by_account_nonce_.end());
+
+    if (!is_replace) {
+        // Per-sender quota.
+        size_t sender_count = mempool_count_from(tx.from);
+        if (sender_count >= MEMPOOL_MAX_PER_SENDER) {
+            return "mempool: per-sender quota exceeded ("
+                 + std::to_string(MEMPOOL_MAX_PER_SENDER)
+                 + " txs from " + tx.from + ")";
+        }
+        // Global cap. Eviction is feasible if some resident is unaffordable
+        // at the head (S-079: it goes first, whatever the incoming fee) or
+        // if tx.fee > the AFFORDABLE minimum — an unaffordable UINT64_MAX
+        // fee never raises the floor. Don't enforce at admission — the
+        // eviction step happens INSIDE the insert path
+        // (mempool_make_room_for). Here we just check that admission is
+        // even possible: if cap is hit, nothing is unaffordable AND
+        // tx.fee <= affordable min, reject early.
+        if (tx_store_.size() >= MEMPOOL_MAX_TXS) {
+            const MempoolScan s = mempool_scan_locked();
+            if (!s.has_unaffordable && tx.fee <= s.min_fee) {
+                return "mempool: full ("
+                     + std::to_string(MEMPOOL_MAX_TXS)
+                     + " txs); incoming fee " + std::to_string(tx.fee)
+                     + " <= mempool minimum " + std::to_string(s.min_fee);
+            }
+        }
+    }
+    return "";
+}
+
+// mempool_make_room_for: make room if mempool is at cap — evict an
+// UNAFFORDABLE resident if there is one (S-079: never keep an entry no
+// block can apply over one that pays), else the lowest-fee affordable tx
+// if the incoming fee is strictly higher. Returns true if room is available
+// (no cap hit, or eviction happened); false if cap hit AND incoming tx's
+// fee isn't high enough to displace anything. Caller rejects the tx if
+// this returns false.
+bool Node::mempool_make_room_for(const chain::Transaction& tx) {
+    if (tx_store_.size() < MEMPOOL_MAX_TXS) return true;
+    const MempoolScan s = mempool_scan_locked();
+    Hash victim{};
+    if (s.has_unaffordable) {
+        victim = s.unaffordable;                       // first, at any fee
+    } else if (s.has_affordable && tx.fee > s.min_fee) {
+        victim = s.min_fee_hash;                       // fee priority (tie: smallest hash)
+    } else {
+        return false;                                  // can't displace
+    }
+    auto min_it = tx_store_.find(victim);
+    if (min_it == tx_store_.end()) return false;       // unreachable: the scan read tx_store_
+    // Evict the victim.
+    auto evicted_key = std::make_pair(min_it->second.from, min_it->second.nonce);
+    tx_store_.erase(min_it);
+    tx_by_account_nonce_.erase(evicted_key);
+    return true;
+}
+
+void Node::on_tx(const chain::Transaction& tx) {
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+
+    // The wire `hash` field is UNSIGNED (Transaction::signing_bytes omits
+    // it) and, until 2026-09-14, the gossip path stored the tx under it
+    // verbatim while only rpc_submit_tx recomputed it. tx_store_, the
+    // (from, nonce) index, the Phase-1 hash lists and the admission memo are
+    // all keyed by it, so a peer could (a) overwrite any resident tx by
+    // claiming its hash and (b) poison a memoized verdict by RBF-swapping a
+    // valid tx for an invalid one under the same claimed hash — the S-056
+    // halt class through the mempool key. Same rule as rpc_submit_tx.
+    if (tx.hash != tx.compute_hash()) return;
+
+    // Drop stale-nonce txs immediately.
+    if (tx.nonce < chain_.next_nonce(tx.from)) return;
+
+    // S-002: verify signature before admitting to mempool. Silent drop
+    // on the gossip path — a forged-sig flood from any peer would
+    // otherwise consume mempool slots and amplify to other peers.
+    if (!verify_tx_signature_locked(tx)) return;
+
+    admit_tx_locked(tx);
+}
+
+// The S-008 / S-079 admission policy + replace-by-fee + insert — everything
+// on_tx does AFTER its authenticity gates (content hash, stale nonce, the
+// S-002 signature). Factored out of on_tx verbatim (2026-09-16) so
+// `determ test-mempool-admit-affordability` can drive the policy at the
+// real cap through admit_tx_for_test without an Ed25519 verification per
+// flood entry: the policy is a function of (from, nonce, type, amount, fee)
+// and the pool, never of the signature — and an anonymous sender's
+// signature is valid by construction (the address IS the key), so the
+// S-002 gate passes the attack shape anyway (S-002 has its own falsifier,
+// test-rpc-tx-sig-admit). Caller holds state_mutex_ exclusively. Returns
+// true iff the tx is resident afterwards.
+bool Node::admit_tx_locked(const chain::Transaction& tx) {
+    // S-008 / S-079: enforce affordability at the head, the mempool size
+    // cap + the per-sender quota. Silent drop on the gossip path (a flood
+    // from N senders gets rate-limited without amplifying the attacker's
+    // traffic; the rejected tx doesn't propagate further).
+    if (!mempool_admit_check(tx).empty()) return false;
+
+    auto key = std::make_pair(tx.from, tx.nonce);
+    auto idx = tx_by_account_nonce_.find(key);
+    if (idx != tx_by_account_nonce_.end()) {
+        // Replace-by-fee: keep the higher-fee version.
+        auto existing = tx_store_.find(idx->second);
+        if (existing != tx_store_.end() && existing->second.fee >= tx.fee) {
+            return false; // incumbent wins (ties favor incumbent — no resource churn)
+        }
+        if (existing != tx_store_.end()) tx_store_.erase(existing);
+    } else {
+        // Fresh slot — check eviction feasibility for the global cap.
+        // mempool_admit_check already verified eviction is possible
+        // (an unaffordable resident exists, or tx.fee > the affordable
+        // min), but the actual eviction happens here atomically with the
+        // insert.
+        if (!mempool_make_room_for(tx)) return false;
+    }
+    tx_store_[tx.hash] = tx;
+    tx_by_account_nonce_[key] = tx.hash;
+    return true;
+}
+
+void Node::on_contrib(const ContribMsg& msg) {
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+
+    uint64_t expected_index = chain_.height();
+    if (msg.block_index != expected_index) return;
+
+    Hash prev_hash = chain_.empty() ? Hash{} : chain_.head_hash();
+    if (msg.prev_hash != prev_hash) return;
+
+    // Generation gate: drop contribs from a different abort-generation. After
+    // a peer aborts and restarts, their fresh contrib carries a higher gen;
+    // ours catches up via gossip convergence on AbortClaim quorums.
+    if (msg.aborts_gen != current_aborts_.size()) return;
+
+    // Note: we do NOT filter by current_creator_domains_ here. A contrib may
+    // arrive before this node has entered IN_SYNC and computed its creator
+    // set; rejecting would lose the message permanently (no retransmit).
+    // Instead, we accept any signer that's in the registry. enter_block_sig_phase
+    // looks up pending_contribs_[d] for each selected creator at use time.
+    // D3.3b-read STEP 3: signer key frozen-first (the present-head fallback
+    // preserves the "accept any registry signer" behaviour for a contrib that
+    // arrives before this node computed its committee).
+    auto sk = resolve_committee_member_pubkey(chain_, registry_,
+                                              current_epoch_index(), msg.signer);
+    if (!sk) return;
+
+    // v2.7 F2 sub-step 2: thread the message's view-roots into the commit
+    // hash. For v1 / F2-not-yet-active contribs, msg.view_*_root are all
+    // zero and the make_contrib_commitment short-circuit produces the
+    // pre-F2 byte-identical hash. For F2 contribs with non-zero roots,
+    // the verify uses the extended DTM-F2-v1 commit shape — must match
+    // what the sender computed in make_contrib.
+    //
+    // S-030-D2 timestamp reconciliation: the sender ALSO binds its committed
+    // proposer_time (DTM-TS-v1 tail, non-zero on every production contrib —
+    // start_contrib_phase passes clock_.unix_seconds()). The recompute MUST bind it too,
+    // or the recomputed digest is the pre-feature shape and EVERY honest
+    // production contrib fails this sig check — Phase-1 never gathers K
+    // contribs and the cluster spirals through abort rounds without ever
+    // minting a block (S-043: shipped with f99eeb8's sender +
+    // validator.cpp::check_creator_commits halves, but this gossip-side
+    // recompute kept a 7-arg call that defaulted proposer_time=0).
+    //
+    // S-043 hardening: the message-form overload binds EVERY signed field
+    // straight from `msg`, so this recompute CANNOT silently omit proposer_time
+    // (or a future bound field) via a trailing default-zero arg — there are no
+    // args to mismatch. msg.proposer_time == 0 (legacy) keeps the byte-identical
+    // pre-feature commitment via the helper's short-circuit, like the all-zero
+    // view roots. Output is byte-identical to the full field-form call.
+    Hash commit = make_contrib_commitment(msg);
+    if (!crypto::verify(*sk, commit.data(), commit.size(), msg.ed_sig)) {
+        std::cerr << "[node] invalid Contrib sig from " << msg.signer << "\n";
+        return;
+    }
+
+    // 2026-09-17 (SECURITY.md S-104): the signature above binds the view ROOTS
+    // (make_contrib_commitment composes view_eq_root / view_abort_root /
+    // view_inbound_root / view_shardtip_root) — it does NOT bind the view
+    // LISTS the same message carries. build_body copies those lists into the
+    // block verbatim, and the verifier's check_eqabort_reconciliation recomputes
+    // compute_view_root(list) and rejects the WHOLE block when it differs from
+    // the committed root ("F2: creator_view_eq_lists[i] does not match committed
+    // root"). So one committee member sending one contrib whose list does not
+    // hash to its signed root made every honest assembler build the same block
+    // that every honest verifier rejects: no append, the S-050 valve re-rounds
+    // with the same committee (the member is PRESENT, so nothing aborts), and
+    // the height never advanced while it kept sending — a cost-free permanent
+    // halt. validate_contrib_view_roots (V21..V25) is exactly that recompute and
+    // had zero production callers; call it here, at ingress.
+    //
+    // DROP = do not store. That is the smallest behaviour that restores
+    // liveness: every earlier `return` on this path (wrong height, wrong
+    // prev_hash, wrong generation, bad signature) already leaves the signer
+    // absent from pending_contribs_, and committee_contribs_complete_locked
+    // then reports the member MISSING, which is what arms the existing Phase-1
+    // timeout / abort path. No new state, no new exclusion signal. It is not a
+    // new exclusion lever either: the only party that can make a contrib fail
+    // this check is one that can already rewrite or withhold the message in
+    // transit (the roots are signed, the lists are not), and withholding
+    // already makes the member missing. An honest member never fails it —
+    // make_contrib computes each list and its root together.
+    //
+    // Placed immediately after the signature check, i.e. before the S-006
+    // duplicate/equivocation detector below, so no evidence is manufactured
+    // and gossiped out of a message this node has decided to discard.
+    if (std::string why; !validate_contrib_view_roots(msg, &why)) {
+        std::cerr << "[node] dropped Contrib from " << msg.signer
+                  << ": " << why << " (S-104)\n";
+        return;
+    }
+
+    // S-006 closure: same-signer duplicate at the SAME generation.
+    //
+    // Pre-fix: any duplicate (existing in pending_contribs_) was silently
+    // dropped on the assumption it was a legitimate retry across abort
+    // generations. But the generation gate above (line 1946) already
+    // restricts pending_contribs_ to the current generation only — so a
+    // duplicate here means the same signer produced TWO different
+    // ContribMsgs at the SAME (block_index, prev_hash, aborts_gen) with
+    // different content. That's equivocation: they signed two different
+    // commitments under the same identity at the same round-state.
+    //
+    // Detect by comparing the freshly-recomputed commitment of `msg` to
+    // the existing entry's recomputed commitment. The sig over `msg` has
+    // already passed verification above (line 1958); the existing entry's
+    // sig passed the same check when it was first admitted. Two distinct
+    // commitments, both signed by the same key → conflicting evidence.
+    //
+    // Build an EquivocationEvent and route it through the same channel
+    // used by BlockSigMsg-level equivocation. EQV-height-bind: the channel
+    // is kind-DISCRIMINATED, not digest-agnostic — this family is
+    // kind=CONTRIB_COMMIT, so the validator recomputes each side via
+    // compose_contrib_commitment(index, gen, body_root) under the
+    // DTM-CONTRIB-v3 tag and asserts both signed heights equal
+    // ev.block_index and both signed gens are equal (cross-family,
+    // cross-height and cross-round confusion all fail-closed).
+    //
+    // EQV-gen-bind note: both messages reached this point through the
+    // aborts_gen gate above, so existing->second.aborts_gen == msg.aborts_gen
+    // == current_aborts_.size() by construction. The evidence records each
+    // side's OWN signed gen rather than one shared value, so the recorded
+    // openings are exactly what the equivocator signed.
+    //
+    // After detection, drop the duplicate from pending_contribs_ entry
+    // anyway — we keep the earlier-arrived view as the canonical contrib
+    // for this signer this round. The evidence is recorded separately at
+    // the next produced block (no L1 consequence — D4).
+    auto existing = pending_contribs_.find(msg.signer);
+    if (existing != pending_contribs_.end()) {
+        // EQV-height-bind + EQV-gen-bind: the evidence carries the OPENINGS
+        // of the two signed commitments — per side (block_index, aborts_gen,
+        // contrib body root) — not the opaque digests. The verifier
+        // recomputes each commitment via
+        // compose_contrib_commitment(index, gen, body_root), so sig_a/sig_b
+        // verify downstream only against the FULL commitment the equivocator
+        // actually signed (F2 view roots + DTM-TS-v1 tail included in the
+        // body root, via the S-043 message-form recompute).
+        Hash existing_body = make_contrib_body_root(existing->second);
+        Hash new_body      = make_contrib_body_root(msg);
+        // v2.7 F2 / S-016: equivocation DETECTION compares the v1 CORE commit
+        // (tx set / prev_hash / dh_input) only — NOT the F2 view roots. A
+        // committee member's view of pool-fed inputs (inbound-receipt evidence,
+        // etc.) legitimately VARIES across re-rounds at the same height
+        // (receipts age past the latency gate, fresh ones arrive) and is
+        // reconciled by intersection downstream, not equality here. Comparing
+        // the full view-bound commit would false-positive an honest member that
+        // refreshed its view between rounds as a self-equivocator. The slashing
+        // EVIDENCE below keeps the full signed openings so the recorded sigs
+        // still verify against the equivocator's key.
+        Hash existing_core = make_contrib_commitment(
+            existing->second.block_index, existing->second.aborts_gen,
+            existing->second.prev_hash,
+            existing->second.tx_hashes,   existing->second.dh_input);
+        Hash new_core = make_contrib_commitment(
+            msg.block_index, msg.aborts_gen,
+            msg.prev_hash, msg.tx_hashes, msg.dh_input);
+        if (existing_core != new_core) {
+            chain::EquivocationEvent ev;
+            ev.equivocator          = msg.signer;
+            ev.block_index          = msg.block_index;
+            ev.kind                 = chain::EquivocationEvent::KIND_CONTRIB_COMMIT;
+            ev.index_a              = existing->second.block_index;
+            ev.gen_a                = existing->second.aborts_gen;
+            ev.body_root_a          = existing_body;
+            ev.sig_a                = existing->second.ed_sig;
+            ev.index_b              = msg.block_index;
+            ev.gen_b                = msg.aborts_gen;
+            ev.body_root_b          = new_body;
+            ev.sig_b                = msg.ed_sig;
+            ev.shard_id             = cfg_.shard_id;
+            ev.beacon_anchor_height = beacon_headers_.empty()
+                ? 0 : beacon_headers_.back().index;
+
+            if (!pending_equivocation_contains(pending_equivocation_evidence_, ev)) {
+                pending_equivocation_evidence_.push_back(ev);
+                gossip_.broadcast(net::make_equivocation_evidence(ev));
+                std::cerr << "[node] S-006 ContribMsg equivocation detected: "
+                          << msg.signer << " at h=" << msg.block_index
+                          << " (gossiped; will be baked into next block)\n";
+            }
+        }
+        return;
+    }
+
+    pending_contribs_[msg.signer] = msg;
+
+    // Trigger on COMMITTEE completeness, not on the map's size: on_contrib
+    // deliberately admits any registry signer (a contrib can precede this
+    // node's committee computation), so a registered non-member's contrib
+    // made the size match with a member still missing (S-058) — and, with
+    // it present, the size could never match again once the member arrived.
+    if (phase_ == ConsensusPhase::CONTRIB && committee_contribs_complete_locked())
+        enter_block_sig_phase();
+}
+
+bool Node::committee_contribs_complete_locked() const {
+    for (auto& d : current_creator_domains_)
+        if (pending_contribs_.find(d) == pending_contribs_.end()) return false;
+    return !current_creator_domains_.empty();
+}
+
+void Node::on_block_sig(const BlockSigMsg& msg) {
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+    on_block_sig_locked(msg);
+}
+
+// S-013: bounded per-signer admission into buffered_block_sigs_. Caller must
+// hold state_mutex_. Two slots per signer is enough to capture one honest
+// BlockSigMsg plus one equivocation-evidence sig at the same height;
+// anything beyond is spam. Pre-filters at the caller (current_creator_domains_
+// membership + registry_ lookup) already cap distinct signers to at most K,
+// so the buffer is bounded at 2·K entries.
+//
+// Why a fixed per-signer cap rather than total-queue + LRU: LRU evicts honest
+// entries when a spammer impersonates K signers — under K-of-K mutual
+// distrust we have no quorum to declare which entry is honest, so we'd be
+// indifferent to which we keep. The per-signer cap closes the attack
+// asymmetrically: a single Byzantine signer can't crowd out honest peers'
+// buffer slots no matter how fast they push.
+static constexpr size_t MAX_BUFFERED_BLOCK_SIGS_PER_SIGNER = 2;
+
+void Node::try_buffer_block_sig(const BlockSigMsg& msg) {
+    size_t per_signer = 0;
+    for (const auto& m : buffered_block_sigs_) {
+        if (m.signer == msg.signer && ++per_signer >= MAX_BUFFERED_BLOCK_SIGS_PER_SIGNER)
+            return; // drop silently
+    }
+    buffered_block_sigs_.push_back(msg);
+}
+
+void Node::on_block_sig_locked(const BlockSigMsg& msg) {
+    // Caller must hold state_mutex_. Used both from gossip dispatch (via
+    // on_block_sig wrapper) and from enter_block_sig_phase when replaying
+    // buffered messages.
+    uint64_t expected_index = chain_.height();
+    if (msg.block_index != expected_index) return;
+
+    if (std::find(current_creator_domains_.begin(),
+                  current_creator_domains_.end(), msg.signer)
+        == current_creator_domains_.end()) return;
+
+    // D3.3b-read STEP 3: signer key frozen-first (mid-epoch-drifted committee
+    // member still verifies on its frozen key).
+    auto sk = resolve_committee_member_pubkey(chain_, registry_,
+                                              current_epoch_index(), msg.signer);
+    if (!sk) return;
+
+    // If we haven't reached BLOCK_SIG yet, buffer for replay.
+    if (phase_ != ConsensusPhase::BLOCK_SIG) {
+        try_buffer_block_sig(msg);
+        return;
+    }
+
+    // delay_output must match the round's canonical output.
+    if (msg.delay_output != current_delay_output_) {
+        std::cerr << "[node] BlockSig with mismatched delay_output from "
+                  << msg.signer << "\n";
+        return;
+    }
+
+    // Build the same tentative block we used for our own digest, so we can
+    // verify the peer's Ed25519 sig over it.
+    std::vector<ContribMsg> ordered_contribs;
+    for (auto& d : current_creator_domains_) {
+        auto it = pending_contribs_.find(d);
+        if (it == pending_contribs_.end()) return;
+        ordered_contribs.push_back(it->second);
+    }
+    auto mode_local     = current_mode();
+    auto proposer_local = current_proposer_domain();
+    std::vector<chain::CrossShardReceipt> inbound_snapshot;
+    inbound_snapshot.reserve(pending_inbound_receipts_.size());
+    for (auto& kv : pending_inbound_receipts_) inbound_snapshot.push_back(kv.second);
+    chain::Block tentative = build_body(tx_store_, chain_, current_aborts_,
+                                         current_creator_domains_,
+                                         ordered_contribs,
+                                         current_delay_output_,
+                                         cfg_.m_creators, mode_local, proposer_local,
+                                         pending_equivocation_evidence_,
+                                         inbound_snapshot,
+                                         /*ordered_secrets=*/{},
+                                         current_source_eligible_count(),
+                                         round_shard_tip_candidates_, round_shard_tip_witnesses_,
+                                         tx_admit_locked(), eq_admit_locked());
+    Hash digest = compute_block_digest(tentative);
+
+    if (!crypto::verify(*sk, digest.data(), digest.size(), msg.ed_sig)) {
+        std::cerr << "[node] invalid BlockSig from " << msg.signer << "\n";
+        return;
+    }
+
+    // rev.9 S-009: verify the revealed secret against the signer's
+    // Phase-1 commit (carried in pending_contribs_[signer].dh_input).
+    auto cit = pending_contribs_.find(msg.signer);
+    if (cit == pending_contribs_.end()) {
+        // No commit yet — buffer for later (the contrib may be in flight).
+        try_buffer_block_sig(msg);
+        return;
+    }
+    Hash expected_commit = crypto::SHA256Builder{}
+        .append(msg.dh_secret)
+        .append(sk->data(), sk->size())
+        .finalize();
+    if (expected_commit != cit->second.dh_input) {
+        std::cerr << "[node] BlockSig dh_secret/commit mismatch from "
+                  << msg.signer << "\n";
+        return;
+    }
+
+    pending_block_sigs_[msg.signer] = msg;
+    pending_secrets_[msg.signer]    = msg.dh_secret;
+
+    // Eager-finalize ONLY when we have all M sigs (the fast happy-path shared
+    // by both modes). Finalizing on just K (when K<M) would race: different
+    // peers would collect different K-sized subsets, build blocks with
+    // different `creator_block_sigs` content, and produce divergent block
+    // hashes. The block_sig_timer falls back to ≥K on timeout once gossip
+    // has settled and all peers see the same sig set.
+    if (pending_block_sigs_.size() == current_creator_domains_.size())
+        try_finalize_round();
+}
+
+void Node::on_get_chain(uint64_t from_index, uint16_t count,
+                         std::shared_ptr<net::Peer> peer) {
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+    if (count == 0)   count = 64;
+    if (count > 256)  count = 256;     // anti-DoS cap
+
+    uint64_t end = std::min(chain_.height(), from_index + count);
+    json blocks = json::array();
+    for (uint64_t i = from_index; i < end; ++i)
+        blocks.push_back(chain_.at(i).to_json());
+    bool has_more = end < chain_.height();
+    peer->send({net::MsgType::CHAIN_RESPONSE,
+                {{"blocks", blocks}, {"has_more", has_more}}});
+}
+
+void Node::on_chain_response(const std::vector<chain::Block>& blocks,
+                              bool has_more,
+                              std::shared_ptr<net::Peer> peer) {
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+    if (blocks.empty()) {
+        // Peer reports nothing more — try transitioning to IN_SYNC.
+        start_sync_if_behind();
+        return;
+    }
+
+    const uint64_t h_before = chain_.height();
+    const Hash head_before = chain_.empty() ? Hash{} : chain_.head_hash();
+
+    for (auto& b : blocks) {
+        // Forward block at our tip → normal append path.
+        if (b.index == chain_.height()) {
+            apply_block_locked(b);
+        // A4.4 (S-048 rejoiner): a block AT our head height (index == height()-1)
+        // is a same-height competitor for our current head — route it through
+        // apply_block_locked's stale-index branch so maybe_reorg_to_locked can
+        // adopt it if it wins resolve_fork (a byte-identical duplicate no-ops).
+        // This is how a restarted node holding a minority tail converges.
+        } else if (chain_.height() >= 2 && b.index == chain_.height() - 1) {
+            apply_block_locked(b);
+        }
+        // else: out-of-range chunk (gap or already-buried) — skip.
+    }
+
+    // "Progressed" = the head advanced OR changed identity (a same-height reorg
+    // changes head_hash without changing height). Only keep pulling from this
+    // peer while we make progress: a chunk that neither advances nor reorgs
+    // (e.g. a Byzantine peer feeding non-applying blocks) must NOT spin — fall
+    // through to start_sync_if_behind, which re-broadcasts so a different peer
+    // can answer. This bounds the reorg-path work a peer can force.
+    const bool progressed =
+        chain_.height() != h_before ||
+        (!chain_.empty() && chain_.head_hash() != head_before);
+
+    if (has_more && progressed) {
+        sync_peer_ = peer;
+        request_next_chunk();
+    } else {
+        start_sync_if_behind();
+    }
+}
+
+void Node::on_status_request(std::shared_ptr<net::Peer> peer) {
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+    std::string ghash = chain_.empty() ? std::string{} : to_hex(chain_.at(0).compute_hash());
+    peer->send(net::make_status_response(chain_.height(), ghash));
+}
+
+void Node::on_status_response(uint64_t height, const std::string& genesis_hash,
+                               std::shared_ptr<net::Peer> peer) {
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+
+    // Reject peers on a different genesis. Their chain is not ours; they will
+    // never feed us valid blocks. But STILL fall through to
+    // start_sync_if_behind() — without it, a node whose only peers are
+    // cross-chain (BEACON ↔ SHARD via beacon_peers/shard_peers) would
+    // never transition to IN_SYNC and never start producing. Different-
+    // genesis peers simply don't contribute to peer_heights_ so the
+    // sync-height comparison correctly ignores them.
+    if (!chain_.empty()) {
+        std::string ours = to_hex(chain_.at(0).compute_hash());
+        if (!genesis_hash.empty() && genesis_hash != ours) {
+            std::cerr << "[node] peer " << peer->address()
+                      << " on different genesis (" << genesis_hash
+                      << ", ours " << ours << "); ignoring for sync\n";
+            start_sync_if_behind();
+            return;
+        }
+    }
+
+    peer_heights_[peer->address()] = height;
+    start_sync_if_behind();
+}
+
+void Node::start_sync_if_behind() {
+    // state_mutex_ held by caller.
+    uint64_t max_h = chain_.height();
+    for (auto& [_, h] : peer_heights_) max_h = std::max(max_h, h);
+
+    // S-050: after a stall-valve reset, ANY positive gap is sync-worthy —
+    // the stalled node may be stranded 1-2 blocks behind after a missed
+    // block broadcast, which the normal tolerance window is designed to
+    // ignore (a block in flight is not "behind"). Cleared on block apply.
+    const uint64_t TOLERANCE = stalled_resync_ ? 0 : 5;
+    if (chain_.height() + TOLERANCE >= max_h) {
+        if (state_ != SyncState::IN_SYNC) {
+            state_ = SyncState::IN_SYNC;
+            std::cout << "[node] caught up to height " << chain_.height()
+                      << "; entering IN_SYNC\n";
+            check_if_selected();
+        }
+        return;
+    }
+
+    state_ = SyncState::SYNCING;
+
+    // Pick the highest-reported peer and request the next chunk from them.
+    std::string best_addr;
+    uint64_t    best_h = 0;
+    for (auto& [addr, h] : peer_heights_) {
+        if (h > best_h) { best_h = h; best_addr = addr; }
+    }
+    if (best_addr.empty()) return;
+
+    // Resolve to the actual peer pointer. (peer_addresses returns the same
+    // string format used as the key; for simplicity we just broadcast and
+    // rely on the chunk responder being the highest peer.)
+    sync_peer_ = nullptr; // we'll just broadcast — first responder wins
+    request_next_chunk();
+}
+
+void Node::request_next_chunk() {
+    // state_mutex_ held by caller.
+    // A4.4 (S-048 rejoiner): request from height()-1, NOT height(). A node
+    // restarted holding a minority same-height tail has a head M at index H-1
+    // that differs from the network's winner W at H-1; asking from H would only
+    // ever fetch blocks [H, …] whose prev_hash is hash(W) ≠ hash(M), so every
+    // one fails prev_hash validation forever (the S-048 rejoin wall). Asking
+    // from H-1 delivers W itself; on_chain_response routes a block at
+    // height()-1 into apply_block_locked's same-height branch → maybe_reorg_
+    // to_locked adopts the resolve_fork winner, and the subsequent [H, …] then
+    // apply cleanly. On the no-fork path the H-1 block is a byte-identical
+    // duplicate the reorg check drops (one re-fetched block per chunk — ~1/64).
+    uint64_t from = chain_.height() > 0 ? chain_.height() - 1 : 0;
+    auto msg = net::make_get_chain(from, 64);
+    if (sync_peer_) {
+        try { sync_peer_->send(msg); } catch (...) { sync_peer_ = nullptr; }
+    } else {
+        gossip_.broadcast(msg);
+    }
+}
+
+// ─── RPC Handlers ────────────────────────────────────────────────────────────
+
+json Node::rpc_status() const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    json j;
+    j["height"]      = chain_.height();
+    j["head_hash"]   = chain_.empty() ? "" : to_hex(chain_.head_hash());
+    j["node_count"]  = registry_.size();
+    j["domain"]      = cfg_.domain;
+    j["peer_count"]  = gossip_.peer_count();
+    j["m_creators"]  = cfg_.m_creators;
+    j["k_block_sigs"]= cfg_.k_block_sigs;
+    j["sync_state"]  = (state_ == SyncState::IN_SYNC) ? "in_sync" : "syncing";
+    j["genesis"]     = chain_.empty() ? "" : to_hex(chain_.at(0).compute_hash());
+    j["chain_role"]  = to_string(cfg_.chain_role);
+    j["shard_id"]    = cfg_.shard_id;
+    j["epoch_index"] = current_epoch_index();
+    j["mempool_size"] = tx_store_.size();
+    j["beacon_headers"]    = beacon_headers_.size();    // shard-only; 0 elsewhere
+    j["tracked_shard_tips"] = latest_shard_tips_.size(); // beacon-only; 0 elsewhere
+    j["pending_inbound_receipts"] = pending_inbound_receipts_.size(); // shard-only
+    // A5 Phase 2 governance visibility: count of PARAM_CHANGE entries
+    // staged but not yet activated. Each entry waits until its
+    // effective_height is reached and then mutates a named chain
+    // parameter at the start of that block's apply. A non-zero value
+    // means governance has staged changes that will land in future
+    // blocks — operators tracking parameter drift can alert on this.
+    // The detailed (height, name, value) list is exposed via the
+    // `pending_params` RPC + `determ pending-params` CLI.
+    {
+        size_t n = 0;
+        for (auto& [_, bucket] : chain_.pending_param_changes())
+            n += bucket.size();
+        j["pending_param_changes"] = n;
+    }
+    // R1 / rev.9: this node's configured committee_region. Empty
+    // string = global pool (the default and pre-R1 behavior). In
+    // regional EXTENDED-mode deployments, the region tag determines
+    // which shard's eligible pool this node draws from. Surfacing
+    // here lets operators in multi-region clusters confirm a node's
+    // region assignment from the status RPC alone — avoids needing
+    // to read the config file from disk.
+    j["committee_region"] = cfg_.committee_region;
+
+    // Block-mode + tx counters across the full chain. Useful for ops
+    // dashboards and test assertions ("did the chain actually escalate?").
+    uint64_t md_blocks = 0, bft_blocks = 0, total_txs = 0;
+    for (uint64_t i = 0; i < chain_.height(); ++i) {
+        const auto& b = chain_.at(i);
+        total_txs += b.transactions.size();
+        if (b.consensus_mode == chain::ConsensusMode::BFT) ++bft_blocks;
+        else ++md_blocks;
+    }
+    j["md_block_count"]  = md_blocks;
+    j["bft_block_count"] = bft_blocks;
+    j["tx_count"]        = total_txs;
+
+    // rev.9 R2 / D3.3b-read: status preview of "next_creators" reads the same
+    // region-filtered POOL that check_if_selected operates on — the frozen
+    // committee checkpoint on EXTENDED, present-head otherwise. (This preview is
+    // approximate on the SEED/count: it uses head cumulative_rand + M rather
+    // than the epoch seed + K, so it is a hint, not the exact committee.)
+    auto nodes = select_committee_pool(chain_, registry_, current_epoch_index(),
+                                       cfg_.committee_region);
+    if (!chain_.empty() && nodes.size() >= cfg_.m_creators) {
+        Hash rand = chain_.head().cumulative_rand;
+        try {
+            auto indices = crypto::select_m_creators(rand, nodes.size(), cfg_.m_creators);
+            json next = json::array();
+            for (auto i : indices) next.push_back(nodes[i].domain);
+            j["next_creators"] = next;
+        } catch (...) {}
+    }
+
+    // Operator-hygiene: a snapshot of which security / operational
+    // features are active on this node, so a monitoring system can
+    // detect drift in production (e.g., a node accidentally started
+    // with rate-limiting disabled, or running in verbose-log mode in
+    // production). Pure config readback; no protocol semantics.
+    j["protections"] = {
+        {"rpc_localhost_only",  cfg_.rpc_localhost_only},
+        {"rpc_hmac_auth",       !cfg_.rpc_auth_secret.empty()},
+        {"rpc_rate_limit",      cfg_.rpc_rate_per_sec > 0.0 && cfg_.rpc_rate_burst > 0.0},
+        {"gossip_rate_limit",   cfg_.gossip_rate_per_sec > 0.0 && cfg_.gossip_rate_burst > 0.0},
+        {"log_quiet",           cfg_.log_quiet},
+        {"bft_enabled",         cfg_.bft_enabled},
+        {"sharding_mode",       to_string(cfg_.sharding_mode)},
+    };
+
+    return j;
+}
+
+json Node::rpc_peers() const {
+    auto addrs = gossip_.peer_addresses();
+    return json(addrs);
+}
+
+// A5 Phase 2 governance visibility. Returns the chain's staged
+// PARAM_CHANGE entries as a JSON array — one element per staged change
+// — so operators can see exactly which parameters will mutate, when,
+// and to what value. The list is sorted ascending by effective_height
+// (apply order); within the same height bucket, entries are in
+// insertion order (also apply order). Empty array = no pending
+// changes. Values are hex-encoded (matches PROTOCOL.md §A5 wire format
+// for PARAM_CHANGE payloads).
+json Node::rpc_pending_params() const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    json arr = json::array();
+    for (auto& [eff, bucket] : chain_.pending_param_changes()) {
+        for (auto& [name, value] : bucket) {
+            json entry;
+            entry["effective_height"] = eff;
+            entry["name"]             = name;
+            entry["value_hex"]        = to_hex(value.data(), value.size());
+            entry["value_bytes"]      = value.size();
+            arr.push_back(entry);
+        }
+    }
+    return arr;
+}
+
+// S-032 cache visibility. Returns the chain's abort_records as a JSON
+// array sorted by `count` descending — i.e., the most-aborted domains
+// first. Useful for operators diagnosing committee instability, BFT
+// escalations, or suspension patterns. Each entry includes (domain,
+// count, last_block). Empty array = no recorded aborts.
+//
+// abort_records is the S-032 cache that build_from_chain reads instead
+// of walking history; it's incremented at apply time for every
+// Phase-1 AbortEvent baked into a finalized block. Phase-2 aborts
+// (timing-skew on healthy creators) are NOT tracked here.
+json Node::rpc_abort_records() const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    auto& records = chain_.abort_records();
+    // Materialize (domain, count, last_block) tuples for stable
+    // descending-by-count sort. We use a plain struct instead of
+    // copying AbortRecord (the underlying type may live in a
+    // different namespace; safer to extract fields).
+    struct Row { std::string domain; uint64_t count; uint64_t last_block; };
+    std::vector<Row> sorted;
+    sorted.reserve(records.size());
+    for (auto& [domain, rec] : records) {
+        sorted.push_back({domain, rec.count, rec.last_block});
+    }
+    std::sort(sorted.begin(), sorted.end(),
+              [](const Row& a, const Row& b) {
+                  // Primary: count descending. Tie-break: domain
+                  // ascending (deterministic across nodes).
+                  if (a.count != b.count) return a.count > b.count;
+                  return a.domain < b.domain;
+              });
+    json arr = json::array();
+    for (auto& r : sorted) {
+        json entry;
+        entry["domain"]     = r.domain;
+        entry["count"]      = r.count;
+        entry["last_block"] = r.last_block;
+        arr.push_back(entry);
+    }
+    return arr;
+}
+
+json Node::rpc_block(uint64_t index) const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    if (index >= chain_.height()) return nullptr;
+    return chain_.at(index).to_json();
+}
+
+// v2.2 light-client header-sync foundation. Strips the four heavy
+// collections from each block in the requested range; everything else
+// (committee, signatures, dh commitments, tx_root, delay seed/output,
+// cumulative_rand, abort_events, equivocation_events,
+// partner_subset_hash, state_root) stays so a light client can verify
+// committee signatures + extract state_root. Output shape:
+//   { "headers": [<header-JSON>, ...], "from": <from_index>,
+//     "count":   <actual count returned> }
+// `count` is the *actual* number returned (clamped at the chain tail
+// and capped at HEADERS_PAGE_MAX to bound response size).
+json Node::rpc_headers(uint64_t from_index, uint32_t count) const {
+    // The page cap is net::kHeadersPageMax — the SAME constant the
+    // HEADERS_RESPONSE frame decoder rejects above (D2 inc7c), so the
+    // server's clamp and the wire's ceiling cannot drift apart.
+    constexpr uint32_t HEADERS_PAGE_MAX = net::kHeadersPageMax;
+    if (count > HEADERS_PAGE_MAX) count = HEADERS_PAGE_MAX;
+
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    uint64_t height = chain_.height();
+
+    json headers = json::array();
+    if (from_index < height) {
+        uint64_t end = std::min<uint64_t>(from_index + count, height);
+        for (uint64_t i = from_index; i < end; ++i) {
+            const auto& blk = chain_.at(i);
+            json h = blk.to_json();
+            // Heavy collections — stripped for header-only sync.
+            // These are precisely the fields the v2.2 light client
+            // doesn't need (it queries individual tx data via
+            // dapp_messages / show_tx, and individual state via
+            // state_proof; the header is for committee-sig + state_root
+            // anchoring).
+            h.erase("transactions");
+            h.erase("cross_shard_receipts");
+            h.erase("inbound_receipts");
+            h.erase("initial_state");
+            // Light clients use block_hash to display/check the prev_hash
+            // chain (each subsequent header's prev_hash should equal this
+            // header's block_hash). compute_hash uses signing_bytes, which
+            // includes the heavy fields stripped above, so the client cannot
+            // recompute it from a stripped header — hence the server-side
+            // hash is included explicitly here. NOTE: this served block_hash
+            // is a CONVENIENCE for prev_hash-continuity display only; it is
+            // NOT a trust anchor for state_root. The committee signs
+            // compute_block_digest, which EXCLUDES both block_hash and
+            // state_root, so a malicious daemon can swap either field on a
+            // stripped header without breaking the committee sigs.
+            // Trust-minimized light readers therefore recompute block_hash
+            // from the FULL block (the "block" RPC, which returns the
+            // unstripped body) and bind state_root via the successor block's
+            // committee-signed prev_hash (committee_bound_state_root in the
+            // light client) — they never trust this served field.
+            h["block_hash"] = to_hex(blk.compute_hash());
+            headers.push_back(std::move(h));
+        }
+    }
+
+    return {
+        {"headers", headers},
+        {"from",    from_index},
+        {"count",   headers.size()},
+        {"height",  height},
+    };
+}
+
+json Node::rpc_account(const std::string& addr) const {
+    // A9 Phase 2C-Node bundled path. Grab the committed view ONCE
+    // and read all four fields (balance, next_nonce, stake,
+    // registrant) from the same bundle. All four reads are
+    // guaranteed cross-container atomic — they come from the same
+    // commit, no straddling. Lock-free: no state_mutex_ acquisition.
+    // The shared_ptr keeps the bundle alive for the duration of
+    // this function; the writer's next commit publishes a fresh
+    // bundle but does not disturb our view.
+    auto view = chain_.committed_state_view();
+
+    json j;
+    j["address"] = addr;
+
+    // Bearer-wallet anonymous addresses surface as their pubkey-derived
+    // address; show that fact for the explorer.
+    j["is_anonymous"] = is_anon_address(addr);
+
+    uint64_t balance    = 0;
+    uint64_t next_nonce = 0;
+    uint64_t stake      = 0;
+    std::optional<chain::RegistryEntry> reg_entry;
+
+    if (view) {
+        auto ait = view->accounts.find(addr);
+        if (ait != view->accounts.end()) {
+            balance    = ait->second.balance;
+            next_nonce = ait->second.next_nonce;
+        }
+        auto sit = view->stakes.find(addr);
+        if (sit != view->stakes.end()) {
+            stake = sit->second.locked;
+        }
+        auto rit = view->registrants.find(addr);
+        if (rit != view->registrants.end()) {
+            reg_entry = rit->second;
+        }
+    }
+
+    j["balance"]    = balance;
+    j["next_nonce"] = next_nonce;
+
+    // NC-8 §5b: the standing recipient note key (cleartext lowercase-hex
+    // note_pk), so a light client can recompute SHA256(note_pk) and match the
+    // nk: leaf it proves against the committee-signed state_root (verify-
+    // notekey). note_keys_ is NOT in the lock-free committed-view bundle, so
+    // read it under the state lock. The cleartext is UNTRUSTED — the value-
+    // hash-bind in the leaf is what makes the read trustless, so a torn/stale
+    // value merely fails the hash check on the client (a retry), never a forge.
+    std::optional<std::string> note_key_hex;
+    {
+        std::shared_lock<std::shared_mutex> lk(state_mutex_);
+        note_key_hex = chain_.note_key(addr);
+    }
+    j["note_key"] = note_key_hex ? json(*note_key_hex) : json(nullptr);
+
+    if (reg_entry) {
+        json r;
+        r["ed_pub"]        = to_hex(reg_entry->ed_pub);
+        r["registered_at"] = reg_entry->registered_at;
+        r["active_from"]   = reg_entry->active_from;
+        r["inactive_from"] = reg_entry->inactive_from;
+        r["region"]        = reg_entry->region;  // completes the r:-leaf field set
+                                                  // (SHA256 over ed_pub||registered_at||
+                                                  // active_from||inactive_from||region) so a
+                                                  // light client can trustlessly verify-registrant
+        j["registry"] = r;
+        j["stake"]    = stake;
+    } else {
+        j["registry"] = nullptr;
+        j["stake"]    = stake;    // 0 if not staked
+    }
+
+    // Aggregate visibility: has this address ever appeared on-chain?
+    // NC-8 §5b: a published note key is on-chain state too — include it so a
+    // note-keyed account is never surfaced as null (in steady state
+    // REGISTER_NOTE_KEY's next_nonce++ already forces this; folding it in also
+    // erases the transient lock-free-view/state-lock straddle the light-client
+    // verify-notekey would otherwise fail-closed on).
+    bool has_state = (balance > 0)
+                  || (next_nonce > 0)
+                  || reg_entry.has_value()
+                  || note_key_hex.has_value();
+    if (!has_state) return nullptr;
+    return j;
+}
+
+json Node::rpc_tx(const std::string& hash_hex) const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    if (hash_hex.size() != 64) return nullptr;
+    Hash target;
+    try {
+        target = from_hex_arr<32>(hash_hex);
+    } catch (...) { return nullptr; }
+
+    // Scan tip → genesis (recent blocks first; explorer queries skew
+    // toward fresh transactions). Linear in chain height; fine for the
+    // current single-chain volume — a hash-keyed index lives in B6.
+    uint64_t total = chain_.height();
+    for (uint64_t i = total; i > 0; --i) {
+        const auto& b = chain_.at(i - 1);
+        for (const auto& tx : b.transactions) {
+            if (tx.hash == target) {
+                json out;
+                out["tx"]          = tx.to_json();
+                out["block_index"] = b.index;
+                out["block_hash"]  = to_hex(b.compute_hash());
+                out["timestamp"]   = b.timestamp;
+                return out;
+            }
+        }
+    }
+    return nullptr;
+}
+
+json Node::rpc_committee() const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    json arr = json::array();
+    if (chain_.empty()) return arr;
+
+    auto reg = NodeRegistry::build_from_chain(chain_, chain_.height());
+    // rev.9 R2 / D3.3b-read: rpc_committee mirrors check_if_selected's pool so
+    // the displayed committee matches what producers actually run — the frozen
+    // committee checkpoint on EXTENDED (else present-head via the fallback).
+    auto pool = select_committee_pool(chain_, reg, current_epoch_index(),
+                                      cfg_.committee_region);
+    if (pool.empty()) return arr;
+
+    // Mirror check_if_selected's seed derivation so the result matches
+    // what producers actually use this round (modulo abort_events which
+    // only enter once a round has had aborts).
+    Hash epoch_rand = current_epoch_rand();
+    Hash rand = crypto::epoch_committee_seed(epoch_rand, cfg_.shard_id);
+
+    size_t k = std::min<size_t>(cfg_.k_block_sigs, pool.size());
+    if (k == 0) return arr;
+
+    std::vector<size_t> indices;
+    try {
+        indices = crypto::select_m_creators(rand, pool.size(), k);
+    } catch (...) { return arr; }
+
+    for (size_t idx : indices) {
+        const auto& nd = pool[idx];
+        json e;
+        e["domain"]      = nd.domain;
+        e["ed_pub"]      = to_hex(nd.pubkey);
+        e["active_from"] = nd.active_from;
+        e["stake"]       = chain_.stake(nd.domain);
+        arr.push_back(e);
+    }
+    return arr;
+}
+
+json Node::rpc_validators() const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    json arr = json::array();
+    auto reg = NodeRegistry::build_from_chain(chain_, chain_.height());
+    for (auto& nd : reg.sorted_nodes()) {
+        json e;
+        e["domain"]       = nd.domain;
+        e["ed_pub"]       = to_hex(nd.pubkey);
+        e["active_from"]  = nd.active_from;
+        e["registered_at"]= nd.registered_at;
+        e["stake"]        = chain_.stake(nd.domain);
+        e["region"]       = nd.region; // rev.9 R1
+        arr.push_back(e);
+    }
+    return arr;
+}
+
+json Node::rpc_chain_summary(uint32_t last_n) const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    json arr = json::array();
+    uint64_t total = chain_.height();
+    if (total > 0) {
+        // RpcIngressGateAudit §3 #6: clamp last_n to the 256-page anti-DoS cap
+        // (chain::kChainSummaryPageMax) its sibling history handlers already
+        // enforce (on_get_chain / rpc_headers). An unbounded last_n >= total
+        // otherwise forces start = 0 → a full-chain compute_hash() rewalk under
+        // this read lock — a per-request-work DoS the token bucket cannot bound.
+        uint64_t start = chain::chain_summary_start(total, last_n);
+        for (uint64_t i = start; i < total; ++i) {
+            const auto& b = chain_.at(i);
+            json e;
+            e["index"]          = b.index;
+            e["hash"]           = to_hex(b.compute_hash());
+            e["prev_hash"]      = to_hex(b.prev_hash);
+            e["timestamp"]      = b.timestamp;
+            e["consensus_mode"] = static_cast<uint8_t>(b.consensus_mode);
+            e["bft_proposer"]   = b.bft_proposer;
+            e["tx_count"]       = b.transactions.size();
+            e["creators"]       = b.creators;
+            arr.push_back(e);
+        }
+    }
+    // A1: surface the unitary-balance invariant. `total_supply` is the
+    // live walk over accounts.balance + stakes.locked; the four delta
+    // counters break down how it diverges from genesis_total. Useful as
+    // a single-RPC sanity probe in regression tests: total_supply must
+    // equal expected_total at the head of every applied block, and
+    // total_supply == genesis_total + accumulated_subsidy + accumulated_inbound
+    //   - accumulated_slashed - accumulated_outbound is the same equality.
+    json out;
+    out["blocks"]               = arr;
+    out["height"]               = total;
+    out["total_supply"]         = chain_.live_total_supply();
+    out["genesis_total"]        = chain_.genesis_total();
+    out["expected_total"]       = chain_.expected_total();
+    out["accumulated_subsidy"]  = chain_.accumulated_subsidy();
+    out["accumulated_slashed"]  = chain_.accumulated_slashed();
+    out["accumulated_inbound"]  = chain_.accumulated_inbound();
+    out["accumulated_outbound"] = chain_.accumulated_outbound();
+    return out;
+}
+
+json Node::rpc_send(const std::string& to_in, uint64_t amount, uint64_t fee) {
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+    // S-028: normalize anon-address inputs to lowercase canonical form so
+    // "0xABC..." and "0xabc..." land in the same account-map entry.
+    // Domain names pass through unchanged (is_anon_address rejects them).
+    const std::string to = normalize_anon_address(to_in);
+    // S-023: balance pre-check. The chain's apply path silently drops
+    // (continues the tx loop) if balance < amount + fee — the user
+    // would otherwise get "queued" but their tx would never debit.
+    // Surface the rejection upfront so the client knows to top up or
+    // adjust the amount before submitting.
+    uint64_t cost = amount + fee;
+    uint64_t bal  = chain_.balance(cfg_.domain);
+    if (bal < cost) {
+        throw std::runtime_error(
+            "insufficient balance: have " + std::to_string(bal)
+          + ", need " + std::to_string(cost)
+          + " (amount " + std::to_string(amount)
+          + " + fee " + std::to_string(fee) + ")");
+    }
+    chain::Transaction tx;
+    tx.type   = chain::TxType::TRANSFER;
+    tx.from   = cfg_.domain;
+    tx.to     = to;
+    tx.amount = amount;
+    tx.fee    = fee;
+    tx.nonce  = chain_.next_nonce(cfg_.domain);
+
+    auto sb = tx.signing_bytes();
+    tx.sig  = crypto::sign(key_, sb.data(), sb.size());
+    tx.hash = tx.compute_hash();
+
+    tx_store_[tx.hash] = tx;
+    tx_by_account_nonce_[{tx.from, tx.nonce}] = tx.hash;
+    // v2.6 / S-031 polish: release state_mutex_ before broadcast.
+    lk.unlock();
+    gossip_.broadcast(net::make_transaction(tx));
+    return {{"status", "queued"}, {"hash", to_hex(tx.hash)}};
+}
+
+static std::vector<uint8_t> encode_amount(uint64_t a) {
+    std::vector<uint8_t> v(8);
+    for (int i = 0; i < 8; ++i) v[i] = (a >> (8 * i)) & 0xFF;
+    return v;
+}
+
+json Node::rpc_stake(uint64_t amount, uint64_t fee) {
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+    // S-023: balance pre-check. STAKE locks `amount` from balance AND
+    // pays `fee` from balance; total deducted = amount + fee.
+    uint64_t cost = amount + fee;
+    uint64_t bal  = chain_.balance(cfg_.domain);
+    if (bal < cost) {
+        throw std::runtime_error(
+            "insufficient balance: have " + std::to_string(bal)
+          + ", need " + std::to_string(cost)
+          + " (stake-amount " + std::to_string(amount)
+          + " + fee " + std::to_string(fee) + ")");
+    }
+    chain::Transaction tx;
+    tx.type    = chain::TxType::STAKE;
+    tx.from    = cfg_.domain;
+    tx.to      = "";
+    tx.amount  = 0;
+    tx.fee     = fee;
+    tx.nonce   = chain_.next_nonce(cfg_.domain);
+    tx.payload = encode_amount(amount);
+
+    auto sb = tx.signing_bytes();
+    tx.sig  = crypto::sign(key_, sb.data(), sb.size());
+    tx.hash = tx.compute_hash();
+
+    tx_store_[tx.hash] = tx;
+    tx_by_account_nonce_[{tx.from, tx.nonce}] = tx.hash;
+    // v2.6 / S-031 polish: release state_mutex_ before broadcast.
+    lk.unlock();
+    gossip_.broadcast(net::make_transaction(tx));
+    return {{"status", "queued"}, {"hash", to_hex(tx.hash)}, {"locked_increment", amount}};
+}
+
+json Node::rpc_unstake(uint64_t amount, uint64_t fee) {
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+    // S-023: pre-check both balance (for fee) AND locked stake (for
+    // the unstake amount). UNSTAKE only pays fee from balance; it
+    // RETURNS `amount` from stake back to balance. So bal >= fee
+    // suffices for the cost side, but stake >= amount must hold for
+    // the amount side. Also check unlock_height ≤ current chain
+    // height: an UNSTAKE before the unlock window is rejected by the
+    // chain's apply path (fee refunded) but it's friendlier to fail
+    // upfront.
+    uint64_t bal = chain_.balance(cfg_.domain);
+    if (bal < fee) {
+        throw std::runtime_error(
+            "insufficient balance for fee: have " + std::to_string(bal)
+          + ", fee " + std::to_string(fee));
+    }
+    uint64_t locked = chain_.stake(cfg_.domain);
+    if (locked < amount) {
+        throw std::runtime_error(
+            "insufficient stake to unlock: locked " + std::to_string(locked)
+          + ", attempting to unstake " + std::to_string(amount));
+    }
+    uint64_t unlock_h = chain_.stake_unlock_height(cfg_.domain);
+    if (chain_.height() < unlock_h) {
+        throw std::runtime_error(
+            "stake still locked: current height " + std::to_string(chain_.height())
+          + ", unlock_height " + std::to_string(unlock_h));
+    }
+    chain::Transaction tx;
+    tx.type    = chain::TxType::UNSTAKE;
+    tx.from    = cfg_.domain;
+    tx.to      = "";
+    tx.amount  = 0;
+    tx.fee     = fee;
+    tx.nonce   = chain_.next_nonce(cfg_.domain);
+    tx.payload = encode_amount(amount);
+
+    auto sb = tx.signing_bytes();
+    tx.sig  = crypto::sign(key_, sb.data(), sb.size());
+    tx.hash = tx.compute_hash();
+
+    tx_store_[tx.hash] = tx;
+    tx_by_account_nonce_[{tx.from, tx.nonce}] = tx.hash;
+    // v2.6 / S-031 polish: release state_mutex_ before broadcast.
+    lk.unlock();
+    gossip_.broadcast(net::make_transaction(tx));
+    return {{"status", "queued"}, {"hash", to_hex(tx.hash)}, {"unlock_at", chain_.stake_unlock_height(cfg_.domain)}};
+}
+
+json Node::rpc_nonce(const std::string& domain_in) const {
+    // S-028 G-2 closure: normalize anon-address input so "0xABC..."
+    // resolves to the same account as "0xabc..." — matches the
+    // rpc_balance + rpc_send normalization pattern. Domain names pass
+    // through unchanged. Pre-G-2, this handler took raw `domain` and
+    // passed it directly to the lock-free accessor, producing a UX
+    // inconsistency vs. rpc_balance for mixed-case input. No safety
+    // impact pre-fix (the stale-nonce drop catches any tx using the
+    // wrong-case nonce) — purely operator-experience cleanup. Surfaced
+    // by docs/proofs/S028AnonAddressNormalization.md §6 G-2.
+    const std::string domain = normalize_anon_address(domain_in);
+    // A9 Phase 2C-Node: lock-free read path. balance_lockfree /
+    // next_nonce_lockfree atomic-load the committed accounts view
+    // published at the last successful apply commit. No state_mutex_
+    // acquisition needed — the call doesn't block on the writer's
+    // unique_lock during apply. RPC clients querying nonce while a
+    // block applies see the prior committed state (correct semantics:
+    // the in-progress apply isn't finalized yet). Throughput on the
+    // hot RPC paths is no longer gated on apply duration.
+    return {{"domain", domain}, {"next_nonce", chain_.next_nonce_lockfree(domain)}};
+}
+
+json Node::rpc_stake_info(const std::string& domain_in) const {
+    // S-028 G-2 closure: normalize anon-address input. Same rationale
+    // as rpc_nonce above — pre-G-2 this handler took raw `domain` and
+    // an uppercase-form anon-address query returned `locked=0` because
+    // the lockfree map is keyed by canonical lowercase form, while a
+    // lowercase-form query against the same address returned the real
+    // stake. No safety impact (a mismatched key just returns zero) —
+    // UX-only fix. Surfaced by docs/proofs/S028AnonAddressNormalization.md
+    // §6 G-2.
+    const std::string domain = normalize_anon_address(domain_in);
+    // A9 Phase 2C-Node: lock-free read path for stakes. See rpc_balance
+    // / rpc_nonce above. The two atomic_loads (one per lockfree call)
+    // are independent — they may return shared_ptrs from different
+    // commit cycles. For rpc_stake_info this is fine: locked and
+    // unlock_height come from the SAME StakeEntry inside one shared_ptr
+    // load, so the per-call view is internally consistent even though
+    // the two calls may straddle a commit boundary.
+    return {
+        {"domain",        domain},
+        {"locked",        chain_.stake_lockfree(domain)},
+        {"unlock_height", chain_.stake_unlock_height_lockfree(domain)}
+    };
+}
+
+// v2.18/v2.19 Theme 7: DApp registry queries.
+//
+// v2.18 Phase 7.3: lock-free read path. dapp_lockfree atomic-loads
+// the bundled CommittedStateBundle (Phase 2C extension) and reads
+// dapp_registry from it. No state_mutex_ acquisition needed — these
+// RPC paths don't block on apply's writer lock. dapp-discovery
+// queries from wallets, light clients, and explorer tooling are now
+// genuinely concurrent with consensus.
+json Node::rpc_dapp_info(const std::string& domain) const {
+    auto entry = chain_.dapp_lockfree(domain);
+    if (!entry) {
+        return {{"error", "not_found"}, {"domain", domain}};
+    }
+
+    json topics = json::array();
+    for (auto& t : entry->topics) topics.push_back(t);
+
+    return {
+        {"domain",         domain},
+        {"service_pubkey", to_hex(entry->service_pubkey)},
+        {"endpoint_url",   entry->endpoint_url},
+        {"topics",         topics},
+        {"retention",      entry->retention},
+        {"metadata",       to_hex(entry->metadata.data(), entry->metadata.size())},
+        {"registered_at",  entry->registered_at},
+        {"active_from",    entry->active_from},
+        {"inactive_from",  entry->inactive_from},
+        {"height",         chain_.height()},
+    };
+}
+
+// v2.19 Theme 7 Phase 7.4 (polling subset): scan blocks for DAPP_CALL
+// events addressed to a DApp. DApp nodes poll this every N seconds
+// from their last-processed height; chain replies with all events in
+// the requested window. Streaming subscription is a future follow-on.
+//
+// Lock semantics: holds state_mutex_'s shared_lock for the block-
+// iteration (blocks_ is mutated by Chain::append; reading
+// concurrently with apply is unsafe without the lock). The lock IS
+// shared so other readers proceed; only the next apply's writer-lock
+// acquire waits.
+//
+// Pagination: at most DAPP_MESSAGES_PAGE_LIMIT events per call. If
+// the filter window has more, caller bumps from_height to one past
+// the last returned block_height and re-queries.
+namespace {
+constexpr size_t DAPP_MESSAGES_PAGE_LIMIT = 256;
+
+// v2.20 (S-043 one-formula rule): the DAPP_CALL payload topic decode
+// ([topic_len:u8][topic][ct_len:u32 LE][ct]) now has three consumers —
+// rpc_dapp_messages, the subscriber catch-up replay, and the per-block
+// subscriber fan-out hook. One helper; a formula fork here would make
+// polling and streaming disagree on which events match a topic filter.
+std::string dapp_payload_topic(const chain::Transaction& tx) {
+    if (tx.payload.empty()) return {};
+    uint8_t tl = tx.payload[0];
+    if (size_t(1) + tl > tx.payload.size()) return {};
+    return std::string(
+        reinterpret_cast<const char*>(tx.payload.data() + 1), tl);
+}
+
+} // namespace
+
+// S-063 / D18a: the dapp_call frame body shared by catch-up replay and the
+// live fan-out hook (seq + sid are stamped by the single writer thread
+// at send time). block_index + tx_index are the client's idempotent
+// dedup key across reconnects.
+// Value fields (amount, fee) are stamped iff applied == true; otherwise
+// omitted so delivery layer cannot vouch for unapplied payments.
+nlohmann::json make_dapp_call_frame(uint64_t block_index, size_t tx_index,
+                                    const chain::Transaction& tx,
+                                    const std::string& tx_topic,
+                                    bool applied) {
+    nlohmann::json f = {
+        {"event",       "dapp_call"},
+        {"status",      applied ? "APPLIED" : "SKIPPED"},
+        {"block_index", block_index},
+        {"tx_index",    tx_index},
+        {"tx_hash",     to_hex(tx.hash)},
+        {"from",        tx.from},
+        {"to",          tx.to},
+        {"nonce",       tx.nonce},
+        {"topic",       tx_topic},
+        {"payload_hex", to_hex(tx.payload.data(), tx.payload.size())},
+    };
+    if (applied) {
+        f["amount"] = tx.amount;
+        f["fee"]    = tx.fee;
+    }
+    return f;
+}
+
+json Node::rpc_dapp_messages(const std::string& domain,
+                                uint64_t           from_height,
+                                uint64_t           to_height,
+                                const std::string& topic) const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    uint64_t head = chain_.height();
+    if (to_height == 0 || to_height > head) to_height = head;
+    json events = json::array();
+    bool truncated = false;
+    uint64_t last_scanned = from_height;
+    for (uint64_t h = from_height; h < to_height; ++h) {
+        const auto& b = chain_.at(h);
+        for (size_t t = 0; t < b.transactions.size(); ++t) {
+            const auto& tx = b.transactions[t];
+            if (tx.type != chain::TxType::DAPP_CALL) continue;
+            if (tx.to != domain) continue;
+            std::string tx_topic = dapp_payload_topic(tx);
+            if (!topic.empty() && tx_topic != topic) continue;
+            bool applied = chain_.is_tx_applied(h, t);
+            nlohmann::json ev = {
+                {"block_height", h},
+                {"status",       applied ? "APPLIED" : "SKIPPED"},
+                {"tx_hash",      to_hex(tx.hash)},
+                {"from",         tx.from},
+                {"to",           tx.to},
+                {"nonce",        tx.nonce},
+                {"topic",        tx_topic},
+                {"payload_hex",  to_hex(tx.payload.data(), tx.payload.size())},
+            };
+            if (applied) {
+                ev["amount"] = tx.amount;
+                ev["fee"]    = tx.fee;
+            }
+            events.push_back(std::move(ev));
+            if (events.size() >= DAPP_MESSAGES_PAGE_LIMIT) {
+                truncated = true;
+                break;
+            }
+        }
+        last_scanned = h;
+        if (truncated) break;
+    }
+    return {
+        {"domain",       domain},
+        {"from_height",  from_height},
+        {"to_height",    to_height},
+        {"last_scanned", last_scanned},
+        {"truncated",    truncated},
+        {"count",        events.size()},
+        {"events",       events},
+    };
+}
+
+// ─── v2.20 streaming subscription ────────────────────────────────────────
+//
+// Design contract (StreamingSubscriptionSoundness.md; FB71 machine-checks
+// the backpressure protocol):
+//   SS-1: one dedicated writer thread per subscriber stamps `seq` at send
+//         time — per-connection seq is monotonic by construction.
+//   SS-2: head H is captured under state_mutex_ (shared) in the same
+//         critical section as the map insert; the hook holds unique, so
+//         no block can apply between capture and register. Catch-up scans
+//         [since, H); the queue covers [H, ∞). Partition — no gap/overlap.
+//   SS-3: queue overflow KILLS the subscriber (error frame + close),
+//         never drops frames — a live connection's stream is gapless.
+
+bool Node::rpc_dapp_subscribe(std::shared_ptr<net::Connection> conn,
+                                 const json& params,
+                                 std::string& error_out) {
+    const std::string domain = params.value("domain", std::string{});
+    const std::string topic  = params.value("topic",  std::string{});
+    if (domain.empty()) {
+        error_out = "invalid_arg: domain is required";
+        return false;
+    }
+    uint64_t hb = params.value("heartbeat_blocks", HEARTBEAT_INTERVAL_BLOCKS);
+    if (hb < 1) hb = 1;
+    if (hb > HEARTBEAT_MAX_BLOCKS) hb = HEARTBEAT_MAX_BLOCKS;
+    // The client may request a SMALLER queue than the server cap (it
+    // declares its own read capacity); it can never raise the cap.
+    uint64_t qmax = params.value("queue_max", SUBSCRIBER_QUEUE_MAX);
+    if (qmax < SUBSCRIBER_QUEUE_MIN) qmax = SUBSCRIBER_QUEUE_MIN;
+    if (qmax > SUBSCRIBER_QUEUE_MAX) qmax = SUBSCRIBER_QUEUE_MAX;
+
+    auto sub = std::make_shared<Subscriber>();
+    uint64_t head_at_register = 0;
+    {
+        // Shared lock excludes the applying writer: the head we read and
+        // the map insert below are atomic w.r.t. apply_block_locked (SS-2).
+        std::shared_lock<std::shared_mutex> lk(state_mutex_);
+        uint64_t head = chain_.height();
+        if (chain_.dapp_registry().find(domain) ==
+            chain_.dapp_registry().end()) {
+            error_out = "invalid_arg: unknown DApp domain '" + domain + "'";
+            return false;
+        }
+        uint64_t since = params.value("since", head);
+        if (since > head) {
+            error_out = "invalid_arg: since=" + std::to_string(since) +
+                        " is beyond head=" + std::to_string(head);
+            return false;
+        }
+        if (head - since > SUBSCRIBE_BACKLOG_MAX_BLOCKS) {
+            error_out = "invalid_arg: since is more than " +
+                        std::to_string(SUBSCRIBE_BACKLOG_MAX_BLOCKS) +
+                        " blocks behind head — backfill via dapp_messages "
+                        "polling first";
+            return false;
+        }
+
+        std::lock_guard<std::mutex> sl(subscribers_mutex_);
+        // Reap finished writer threads before the capacity check so a
+        // churny client can't wedge the slot count with dead entries.
+        for (auto it = subscribers_.begin(); it != subscribers_.end(); ) {
+            if (it->second->done.load()) {
+                if (it->second->thread.joinable()) it->second->thread.join();
+                it = subscribers_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (subscribers_.size() >= SUBSCRIBER_MAX_PER_NODE) {
+            error_out = "rate_limited: subscriber capacity (" +
+                        std::to_string(SUBSCRIBER_MAX_PER_NODE) + ") reached";
+            return false;
+        }
+
+        uint8_t sid[16];
+        if (determ_rng_bytes(sid, sizeof sid) != 0) {
+            error_out = "internal: entropy unavailable";  // fail closed
+            return false;
+        }
+        sub->id               = next_subscriber_id_++;
+        sub->sid_hex          = to_hex(sid, sizeof sid);
+        sub->domain           = domain;
+        sub->topic            = topic;
+        sub->since            = since;
+        sub->queue_max        = qmax;
+        sub->heartbeat_blocks = hb;
+        sub->socket           = std::move(conn);
+        head_at_register      = head;
+        subscribers_[sub->id] = sub;
+    }
+    // Thread starts after the insert; the queue may already be
+    // accumulating (hook fires for blocks ≥ head_at_register) — the
+    // writer drains it only after catch-up, preserving order.
+    sub->thread = std::thread(
+        [this, sub, head_at_register] {
+            subscriber_session(sub, head_at_register);
+        });
+    return true;
+}
+
+void Node::subscriber_session(std::shared_ptr<Subscriber> sub,
+                                 uint64_t head_at_register) {
+    // Bound every synchronous write: a client that stops reading stalls
+    // us at most this long before the write errors and the session dies
+    // (client redials with since=last_observed). Complements the
+    // backpressure kill, which handles queue growth while we're stalled.
+    sub->socket->set_send_timeout(std::chrono::milliseconds(5000));
+
+    uint64_t seq = 0;
+    // The ONLY place frames are written and seq is stamped (SS-1).
+    auto write_frame = [&](json f) -> bool {
+        f["seq"] = seq++;
+        sub->last_seq.store(seq - 1);   // observability (rpc_dapp_subscribers)
+        f["sid"] = sub->sid_hex;
+        std::string line = f.dump() + "\n";
+        sub->in_write.store(true);
+        bool ok = sub->socket->write_all(line.data(), line.size());
+        sub->in_write.store(false);
+        return ok;
+    };
+    auto finish = [&](bool emit_error) {
+        if (emit_error) {
+            std::string reason;
+            {
+                std::lock_guard<std::mutex> lk(sub->mu);
+                reason = sub->kill_reason.empty() ? "shutdown"
+                                                    : sub->kill_reason;
+            }
+            // Best-effort: the socket may already be closed/broken.
+            write_frame({{"event", "error"}, {"code", reason}});
+        }
+        sub->socket->close();
+        sub->done.store(true);
+        sub->cv.notify_all();
+    };
+
+    // queue_max / heartbeat_blocks are echoed post-clamp so clients can
+    // see the effective values the server actually applied.
+    bool ok = write_frame({{"event", "subscribed"},
+                            {"domain", sub->domain},
+                            {"topic",  sub->topic},
+                            {"since",  sub->since},
+                            {"head",   head_at_register},
+                            {"queue_max", sub->queue_max},
+                            {"heartbeat_blocks", sub->heartbeat_blocks}});
+    if (!ok) { finish(false); return; }
+
+    // Catch-up replay: [since, head_at_register), chunked so the shared
+    // state lock is never held across socket writes.
+    constexpr uint64_t CHUNK = 256;
+    for (uint64_t h = sub->since; h < head_at_register; h += CHUNK) {
+        uint64_t end = std::min(head_at_register, h + CHUNK);
+        std::vector<json> frames;
+        {
+            std::shared_lock<std::shared_mutex> lk(state_mutex_);
+            for (uint64_t i = h; i < end; ++i) {
+                const auto& b = chain_.at(i);
+                for (size_t t = 0; t < b.transactions.size(); ++t) {
+                    const auto& tx = b.transactions[t];
+                    if (tx.type != chain::TxType::DAPP_CALL) continue;
+                    if (tx.to != sub->domain) continue;
+                    std::string tx_topic = dapp_payload_topic(tx);
+                    if (!sub->topic.empty() && tx_topic != sub->topic)
+                        continue;
+                    bool applied = chain_.is_tx_applied(i, t);
+                    frames.push_back(make_dapp_call_frame(i, t, tx, tx_topic, applied));
+                }
+            }
+        }
+        for (auto& f : frames)
+            if (!write_frame(std::move(f))) { finish(false); return; }
+        // A kill can land mid-catch-up (shutdown); honor it promptly.
+        {
+            std::lock_guard<std::mutex> lk(sub->mu);
+            if (sub->killed) break;
+        }
+    }
+
+    if (!write_frame({{"event", "live"},
+                       {"block_index", head_at_register}})) {
+        finish(false);
+        return;
+    }
+
+    // Live tail: drain the hook-fed queue; idle-timeout heartbeat keeps
+    // dead-connection detection working on a chain that stopped moving.
+    for (;;) {
+        std::vector<json> batch;
+        bool killed = false;
+        {
+            std::unique_lock<std::mutex> lk(sub->mu);
+            sub->cv.wait_for(
+                lk, std::chrono::seconds(SUBSCRIBER_IDLE_HEARTBEAT_SECS),
+                [&] { return sub->killed || !sub->queue.empty(); });
+            killed = sub->killed;
+            while (!sub->queue.empty() && batch.size() < 64) {
+                batch.push_back(std::move(sub->queue.front()));
+                sub->queue.pop_front();
+            }
+            if (sub->bytes_buffered > 0 && sub->queue.empty())
+                sub->bytes_buffered = 0;
+        }
+        for (auto& f : batch)
+            if (!write_frame(std::move(f))) { finish(false); return; }
+        if (killed) { finish(true); return; }
+        if (batch.empty()) {
+            // Idle timeout. Head read takes the state lock — never held
+            // together with sub->mu (lock ordering).
+            uint64_t head;
+            {
+                std::shared_lock<std::shared_mutex> lk(state_mutex_);
+                head = chain_.height();
+            }
+            if (!write_frame({{"event", "heartbeat"},
+                               {"block_index", head},
+                               {"ts", clock_.unix_seconds()}})) {
+                finish(false);
+                return;
+            }
+        }
+    }
+}
+
+void Node::on_block_finalized_for_subscribers(const chain::Block& b) {
+    // Caller holds state_mutex_ unique (apply_block_locked). Keep this
+    // cheap: no socket I/O, no blocking — enqueue + notify only.
+    std::lock_guard<std::mutex> sl(subscribers_mutex_);
+    if (subscribers_.empty()) return;
+    for (auto& [id, sub] : subscribers_) {
+        std::lock_guard<std::mutex> lk(sub->mu);
+        if (sub->killed || sub->done.load()) continue;
+        bool enqueued = false;
+        auto enqueue = [&](json f, uint64_t approx_bytes) -> bool {
+            if (sub->queue.size() + 1 > sub->queue_max ||
+                sub->bytes_buffered + approx_bytes > SUBSCRIBER_BYTES_MAX) {
+                // Kill-on-overflow (SS-3): never drop frames from a live
+                // stream. Clear the queue (the client must redial with
+                // since=last_observed anyway), break a stuck write.
+                sub->killed      = true;
+                sub->kill_reason = "backpressure";
+                sub->queue.clear();
+                sub->bytes_buffered = 0;
+                subscriber_kills_backpressure_.fetch_add(1);
+                if (sub->in_write.load()) {
+                    sub->socket->close();
+                }
+                return false;
+            }
+            sub->queue.push_back(std::move(f));
+            sub->bytes_buffered += approx_bytes;
+            enqueued = true;
+            return true;
+        };
+        for (size_t t = 0; t < b.transactions.size() && !sub->killed; ++t) {
+            const auto& tx = b.transactions[t];
+            if (tx.type != chain::TxType::DAPP_CALL) continue;
+            if (tx.to != sub->domain) continue;
+            std::string tx_topic = dapp_payload_topic(tx);
+            if (!sub->topic.empty() && tx_topic != sub->topic) continue;
+            bool applied = chain_.is_tx_applied(b.index, t);
+            enqueue(make_dapp_call_frame(b.index, t, tx, tx_topic, applied),
+                    tx.payload.size() * 2 + 256);
+        }
+        if (!sub->killed) {
+            if (enqueued) {
+                sub->blocks_since_frame = 0;
+            } else if (++sub->blocks_since_frame >= sub->heartbeat_blocks) {
+                enqueue({{"event", "heartbeat"},
+                          {"block_index", b.index},
+                          {"ts", clock_.unix_seconds()}}, 256);
+                sub->blocks_since_frame = 0;
+            }
+        }
+        if (enqueued || sub->killed) sub->cv.notify_one();
+    }
+}
+
+json Node::rpc_dapp_subscribers() const {
+    // Read-only observability over the streaming subscriber fleet
+    // (StreamingObservabilityReadOnly.md). Takes ONLY subscribers_mutex_
+    // (+ each Subscriber::mu briefly) — never state_mutex_ — and mutates
+    // nothing: the writer thread stays the sole mutator of each queue and
+    // the sole seq assigner, so this read cannot drop a frame or perturb
+    // a stream. Cross-subscriber the scan is best-effort point-in-time,
+    // not a linearizable global instant.
+    json subs = json::array();
+    size_t count = 0;
+    {
+        std::lock_guard<std::mutex> sl(subscribers_mutex_);
+        for (const auto& [id, sub] : subscribers_) {
+            std::lock_guard<std::mutex> lk(sub->mu);
+            if (sub->done.load()) continue;  // writer finished; being reaped
+            ++count;
+            subs.push_back({
+                {"sid",            sub->sid_hex},
+                {"domain",         sub->domain},
+                {"topic",          sub->topic},
+                {"queue_depth",    sub->queue.size()},
+                {"queue_max",      sub->queue_max},
+                {"bytes_buffered", sub->bytes_buffered},
+                {"seq",            sub->last_seq.load()},
+                {"killed",         sub->killed},
+            });
+        }
+    }
+    return {
+        {"count",               count},
+        {"max",                 SUBSCRIBER_MAX_PER_NODE},
+        {"kills_backpressure",  subscriber_kills_backpressure_.load()},
+        {"subscribers",         subs},
+    };
+}
+
+void Node::shutdown_subscribers(const std::string& reason) {
+    std::vector<std::shared_ptr<Subscriber>> subs;
+    {
+        std::lock_guard<std::mutex> sl(subscribers_mutex_);
+        for (auto& [id, sub] : subscribers_) subs.push_back(sub);
+    }
+    for (auto& sub : subs) {
+        {
+            std::lock_guard<std::mutex> lk(sub->mu);
+            if (!sub->killed) {
+                sub->killed      = true;
+                sub->kill_reason = reason;
+            }
+            // Break an in-flight write so the join below is bounded;
+            // parked writers wake via the notify and still deliver the
+            // final error frame.
+            if (sub->in_write.load()) {
+                sub->socket->close();
+            }
+        }
+        sub->cv.notify_all();
+    }
+    for (auto& sub : subs)
+        if (sub->thread.joinable()) sub->thread.join();
+    std::lock_guard<std::mutex> sl(subscribers_mutex_);
+    subscribers_.clear();
+}
+
+json Node::rpc_dapp_list(const std::string& prefix,
+                            const std::string& topic) const {
+    // Lock-free via the committed bundle. Single atomic_load yields a
+    // shared_ptr that keeps the snapshot alive for the iteration —
+    // even if the writer publishes new bundles during the loop, we
+    // see a consistent snapshot.
+    auto view = chain_.committed_state_view();
+    json out = json::array();
+    uint64_t h = chain_.height();
+    if (!view) return {{"height", h}, {"count", 0}, {"dapps", out}};
+    for (auto& [domain, entry] : view->dapp_registry) {
+        // Filter: prefix match (empty prefix matches all)
+        if (!prefix.empty() &&
+            domain.size() < prefix.size()) continue;
+        if (!prefix.empty() &&
+            domain.compare(0, prefix.size(), prefix) != 0) continue;
+        // Filter: topic match (empty topic matches all)
+        if (!topic.empty()) {
+            bool found = false;
+            for (auto& t : entry.topics) {
+                if (t == topic) { found = true; break; }
+            }
+            if (!found) continue;
+        }
+        // Compact summary — full entry comes from rpc_dapp_info.
+        json topics_json = json::array();
+        for (auto& t : entry.topics) topics_json.push_back(t);
+        out.push_back({
+            {"domain",       domain},
+            {"endpoint_url", entry.endpoint_url},
+            {"topics",       topics_json},
+            {"active",       entry.inactive_from > h},
+        });
+    }
+    return {{"height", h}, {"count", out.size()}, {"dapps", out}};
+}
+
+json Node::rpc_submit_tx(const json& tx_json) {
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+    chain::Transaction tx = chain::Transaction::from_json(tx_json);
+
+    // S-028: tx.from and tx.to (when anon-shape) must arrive in
+    // canonical lowercase hex form. We can't normalize-then-accept
+    // because the client's Ed25519 signature is over signing_bytes
+    // which embeds tx.from / tx.to byte-for-byte; mutating the case
+    // post-receipt would invalidate that signature. Instead, fail
+    // loud with a clear diagnostic telling the client to lowercase
+    // before signing. (For anon address `from`, the lowercase form
+    // is also the form parse_anon_pubkey would derive a valid
+    // verification key from — uppercase would parse to the SAME
+    // pubkey but the SAME pubkey-bytes encoded as "0xabc..." would
+    // be the store-key. Forcing lowercase at the boundary keeps
+    // store-keys unambiguous.)
+    if (is_anon_address(tx.from) && tx.from != normalize_anon_address(tx.from)) {
+        throw std::runtime_error(
+            "submitted tx.from is non-canonical (uppercase hex); "
+            "anon addresses MUST be lowercase: got '" + tx.from
+          + "', expected '" + normalize_anon_address(tx.from) + "'");
+    }
+    if (is_anon_address(tx.to)   && tx.to   != normalize_anon_address(tx.to)) {
+        throw std::runtime_error(
+            "submitted tx.to is non-canonical (uppercase hex); "
+            "anon addresses MUST be lowercase: got '" + tx.to
+          + "', expected '" + normalize_anon_address(tx.to) + "'");
+    }
+    // §3.21 S-028 for PQ-native HASH addresses (A5, Option A). Same rationale as
+    // anon: the signed signing_bytes embed from/to byte-for-byte, so reject
+    // rather than normalize; from is also consensus-enforced canonical in
+    // verify_pq_transaction. Since the hash address shares the 66-char 0x+hex
+    // shape with the Ed25519 anon address (and normalize_pq_anon_address ==
+    // normalize_anon_address for that shape), these two checks are now REDUNDANT
+    // with the anon-canonicalization checks above — kept as harmless defense in
+    // depth so the PQ-specific error message survives if the anon path ever
+    // narrows.
+    if (is_pq_anon_address(tx.from) && tx.from != normalize_pq_anon_address(tx.from)) {
+        throw std::runtime_error(
+            "submitted PQ tx.from is non-canonical (uppercase hex); PQ addresses "
+            "MUST be lowercase: got '" + tx.from + "'");
+    }
+    if (is_pq_anon_address(tx.to)   && tx.to   != normalize_pq_anon_address(tx.to)) {
+        throw std::runtime_error(
+            "submitted PQ tx.to is non-canonical (uppercase hex); PQ addresses "
+            "MUST be lowercase: got '" + tx.to + "'");
+    }
+
+    // Recompute hash to defend against client-side errors / tampering.
+    Hash expected_hash = tx.compute_hash();
+    if (tx.hash != expected_hash)
+        throw std::runtime_error(
+            "submitted tx hash mismatch: expected " + to_hex(expected_hash)
+          + " got " + to_hex(tx.hash));
+
+    // Stale-nonce drop here too (mirrors on_tx).
+    if (tx.nonce < chain_.next_nonce(tx.from))
+        throw std::runtime_error(
+            "submitted tx has stale nonce " + std::to_string(tx.nonce)
+          + " (expected >= " + std::to_string(chain_.next_nonce(tx.from)) + ")");
+
+    // S-002: verify signature before admitting to mempool. Surface as
+    // a hard error to the submitting client (RPC callers get feedback;
+    // unlike a faceless gossip peer, the client can correct and retry).
+    if (!verify_tx_signature_locked(tx))
+        throw std::runtime_error(
+            "submitted tx signature verification failed (from " + tx.from + ")");
+
+    // S-008 / S-079: enforce mempool admission policy (affordability at the
+    // head with the sender's pending txs, quota, cap). RPC path surfaces
+    // the rejection reason to the client (vs gossip's silent drop) so the
+    // submitter can decide whether to retry with a higher fee, top up, or
+    // back off — a definitive rejection here, not a `queued` the producer
+    // would skip for ever.
+    if (auto err = mempool_admit_check(tx); !err.empty()) {
+        throw std::runtime_error(err);
+    }
+
+    auto key = std::make_pair(tx.from, tx.nonce);
+    auto idx = tx_by_account_nonce_.find(key);
+    if (idx != tx_by_account_nonce_.end()) {
+        auto existing = tx_store_.find(idx->second);
+        if (existing != tx_store_.end() && existing->second.fee >= tx.fee)
+            throw std::runtime_error(
+                "incumbent tx at (from, nonce) has equal-or-higher fee");
+        if (existing != tx_store_.end()) tx_store_.erase(existing);
+    } else {
+        // S-008: fresh-slot insert — apply eviction if at cap.
+        if (!mempool_make_room_for(tx)) {
+            throw std::runtime_error(
+                "mempool full; fee too low to evict any incumbent tx");
+        }
+    }
+    tx_store_[tx.hash] = tx;
+    tx_by_account_nonce_[key] = tx.hash;
+    // v2.6 / S-031 polish: release state_mutex_ BEFORE the gossip
+    // broadcast. The tx is already in tx_store_ + tx_by_account_nonce_
+    // by this point — peers receiving the broadcast will gossip-replay
+    // through on_tx, which re-validates and re-inserts (idempotent
+    // under replace-by-fee). The broadcast itself is a network op that
+    // doesn't touch chain state; holding state_mutex_ across it
+    // serialized all other state operations against network latency.
+    lk.unlock();
+    gossip_.broadcast(net::make_transaction(tx));
+    return {{"status", "queued"}, {"hash", to_hex(tx.hash)}};
+}
+
+json Node::rpc_submit_equivocation(const json& ev_json) {
+    auto ev = chain::EquivocationEvent::from_json(ev_json);
+
+    // Reuse the gossip handler's validation + dedup + acceptance path
+    // (EQV-height-bind check set, mirroring the validator gate):
+    //   - rejects kind > 1
+    //   - rejects index_a/index_b != block_index (the height assert)
+    //   - rejects gen_a != gen_b (the round assert)
+    //   - rejects body_root_a == body_root_b
+    //   - rejects sig_a == sig_b
+    //   - rejects unregistered equivocator
+    //   - verifies BOTH sigs against digests DERIVED from the openings
+    //   - dedupes against pending pool
+    // The handler grabs state_mutex_ itself.
+    on_equivocation_evidence(ev);
+
+    // Re-grab to inspect post-handler state for the response. Idempotent on the
+    // equivocator (same identity the handler dedups on): a valid submission for
+    // an already-pooled equivocator reports accepted=true (it WILL be recorded),
+    // an invalid one leaves the equivocator absent → accepted=false.
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+    bool present = pending_equivocation_contains(pending_equivocation_evidence_, ev);
+    if (present) {
+        // Gossip so peers can also record it. The handler doesn't broadcast
+        // (it processes inbound), so we do it here on the submission path.
+        gossip_.broadcast(net::make_equivocation_evidence(ev));
+        return {{"accepted", true}, {"equivocator", ev.equivocator},
+                {"block_index", ev.block_index}, {"kind", ev.kind}};
+    }
+    return {{"accepted", false},
+            {"reason", "evidence rejected (invalid sigs, "
+                       "unregistered equivocator, or duplicate)"}};
+}
+
+json Node::rpc_snapshot(uint32_t header_count) const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    return chain_.serialize_state(header_count);
+}
+
+// D2 inc8: write the CANONICAL binary snapshot (DSN1) to `path`, node-side.
+// `determ snapshot create` used to dump the JSON rpc_snapshot result to disk;
+// at-rest snapshots are binary now, so the bytes are produced where the chain
+// lives and written atomically (tmp+rename) — a crash mid-write can never
+// leave a half-written snapshot that the next bootstrap would decode-reject.
+// Localhost-only, like every other RPC. rpc_snapshot (the JSON view) is
+// unchanged and still backs operator inspection.
+json Node::rpc_snapshot_save(const std::string& path,
+                              uint32_t header_count) const {
+    std::vector<uint8_t> bytes;
+    {
+        std::shared_lock<std::shared_mutex> lk(state_mutex_);
+        bytes = chain_.encode_state(header_count);
+    }
+    namespace fs = std::filesystem;
+    const fs::path target(path);
+    if (!target.parent_path().empty())
+        fs::create_directories(target.parent_path());
+    const std::string tmp = path + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) throw std::runtime_error("snapshot_save: cannot write " + tmp);
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+        f.flush();
+        if (!f) throw std::runtime_error("snapshot_save: failed to flush " + tmp);
+    }
+    std::error_code ec;
+    fs::rename(tmp, target, ec);
+    if (ec) throw std::runtime_error("snapshot_save: cannot rename " + tmp
+        + " → " + path + ": " + ec.message());
+    return json{{"status", "ok"}, {"path", path},
+                {"bytes", bytes.size()}, {"format", "DSN1"}};
+}
+
+json Node::rpc_balance(const std::string& domain_in) const {
+    // S-028: normalize anon-address input so "0xABC..." resolves to the
+    // same account as "0xabc...". Domain names pass through unchanged.
+    const std::string domain = normalize_anon_address(domain_in);
+    // A9 Phase 2C-Node: lock-free path. See rpc_nonce above for the
+    // semantics — atomic_load of the committed accounts view, no
+    // state_mutex_ acquisition. balance is one of the most-hammered
+    // RPC paths (wallets poll it after every send); decoupling it
+    // from apply's writer lock is a meaningful operational improvement.
+    return {{"domain", domain}, {"balance", chain_.balance_lockfree(domain)}};
+}
+
+// S-033 / v2.1: query the chain's current cryptographic state commitment.
+// Operators can call this against multiple nodes to detect silent state
+// divergence (a real S-030 D1 / S-030 D2 attack would manifest as the
+// same height but different state_root across nodes). Read-only via
+// shared_lock — concurrent with other readers, blocked only by active
+// writers.
+json Node::rpc_state_root() const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    return {
+        {"state_root", to_hex(chain_.compute_state_root())},
+        {"height",     chain_.height()},
+        {"head_hash",  chain_.empty() ? "" : to_hex(chain_.head_hash())},
+    };
+}
+
+// NC-8 wiring inc.3: the enote SCAN RPC. Returns the per-output encrypted-note
+// delivery ciphertexts carried on CONFIDENTIAL_TRANSFER (TxType=14) txs over a
+// height range, so a wallet can pull-and-trial-decrypt them (a verifying AEAD
+// tag = "mine"). Read-only + profile-agnostic (the ciphertext rides the tx
+// payload on both MODERN and FIPS). Params: {from_height:u64=0, to_height:u64=
+// height, limit:u64<=SCAN_ENOTES_MAX}. The range is clamped to the chain and the
+// returned set is hard-capped, so a single call can never return an unbounded
+// response; a caller pages by advancing from_height. `truncated` flags that the
+// cap was hit. tx_hash / commitment / enote are hex-encoded.
+json Node::rpc_scan_enotes(const json& params) const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    constexpr size_t SCAN_ENOTES_MAX = 10000;
+    const uint64_t height = chain_.height();
+    uint64_t from = params.value("from_height", uint64_t{0});
+    uint64_t to   = params.value("to_height",   height);
+    if (to > height) to = height;
+    if (from > to)   from = to;
+    size_t limit = params.value("limit", SCAN_ENOTES_MAX);
+    if (limit == 0 || limit > SCAN_ENOTES_MAX) limit = SCAN_ENOTES_MAX;
+
+    // Collect at most limit+1 so the walk stops O(limit) into the range (bounding
+    // both the materialized set and the read-lock hold) yet we can still tell the
+    // cap was hit. limit is already clamped to [1, SCAN_ENOTES_MAX], so limit+1
+    // cannot overflow.
+    std::vector<chain::EnoteHit> hits = chain::scan_enotes(chain_, from, to, limit + 1);
+    const bool truncated = hits.size() > limit;
+    if (truncated) hits.resize(limit);
+
+    json arr = json::array();
+    for (auto& e : hits) {
+        arr.push_back({
+            {"height",       e.height},
+            {"tx_hash",      to_hex(e.tx_hash)},
+            {"output_index", e.output_index},
+            {"commitment",   e.commitment_hex},
+            {"enote",        to_hex(e.enote.data(), e.enote.size())},
+        });
+    }
+    return {
+        {"height",    height},
+        {"from",      from},
+        {"to",        to},
+        {"count",     arr.size()},
+        {"truncated", truncated},
+        {"enotes",    std::move(arr)},
+    };
+}
+
+// v2.2 light-client foundation: inclusion proof RPC.
+//
+// Wire format: {
+//   "key": "<hex>",                  // domain-prefixed key bytes
+//   "value_hash": "<hex-32>",        // SHA-256 of the canonical value
+//   "target_index": <number>,        // sorted-leaf position
+//   "leaf_count": <number>,          // total leaves at this height
+//   "proof": ["<hex-32>", ...],      // sibling hashes bottom-up
+//   "state_root": "<hex-32>",        // recomputed at the same instant
+//   "height": <number>,              // current chain height
+//   "value_hex": "<hex-8>",          // c: namespace only (R51): the raw
+//   "value_u64": <number>            //   u64_be counter value, ATOMIC with
+//                                    //   the proof (same state_mutex_ hold);
+//                                    //   present iff SHA256(value) matches
+//                                    //   value_hash (fail-closed self-check)
+// }
+//
+// state_root and height are returned together so the light client can
+// verify them against the (committee-signed) Block header at that
+// height — if the header's state_root matches, the proof is honest.
+// Returning {"error": "not_found"} if the key is absent from the
+// current state. (Non-membership proofs require an SMT migration.)
+// SP-CK-2 (register): shared composite-key body decode + exact-width guard.
+// Extracted from rpc_state_proof so the width check is reachable in-process by
+// test-state-proof-composite-key. `want` per build_state_leaves; `ns` is one of
+// i/m/p/cc/t (the caller dispatches). Fail-closed: hex_ok=false on non-hex,
+// ok=false on any width mismatch — a wrong-width body must NOT be accepted, else
+// it aliases a different leaf.
+CompositeKeyDecode decode_composite_state_body(const std::string& ns,
+                                               const std::string& hex) {
+    CompositeKeyDecode d;
+    d.want = (ns == "i")  ? (8 + 32)   // src_be8 + tx_hash[32]
+           : (ns == "m")  ? 4          // shard_be4
+           : (ns == "p")  ? (8 + 4)    // eff_be8 + idx_be4
+           : (ns == "cc") ? 8          // epoch_be8
+                          : (4 + 8);   // t: shard_be4 + height_be8
+    try {
+        d.body   = from_hex(hex);
+        d.hex_ok = true;
+    } catch (const std::exception&) {
+        return d;                      // hex_ok=false, ok=false
+    }
+    d.ok = (d.body.size() == d.want);
+    return d;
+}
+
+json Node::rpc_state_proof(const std::string& ns,
+                              const std::string& key) const {
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+
+    // Build domain-prefixed key bytes matching build_state_leaves'
+    // encoding (src/chain/chain.cpp). Two key shapes are served:
+    //
+    //   * Simple namespaces (a|s|r|d|b|k|c): the `key` param is the
+    //     human-readable ASCII suffix (domain / constant name). The full
+    //     leaf key is "<ns>:" + key (counters: "k:c:" + name).
+    //
+    //   * Composite namespaces (i|m|p): the leaf-key suffix is BINARY
+    //     (big-endian integers + 32-byte hashes), which cannot ride raw
+    //     inside a JSON string — nlohmann throws on non-UTF-8 bytes during
+    //     dump(). The caller therefore HEX-encodes the post-prefix body
+    //     and we decode it here, then prepend "<ns>:" — reproducing the
+    //     build_state_leaves key byte-for-byte:
+    //       i: body = hex( u64_be(src_shard) || tx_hash[32] )     (40B)
+    //          -> applied_inbound_receipts leaf (value = SHA256(0x01))
+    //       m: body = hex( u32_be(shard_id) )                     ( 4B)
+    //          -> merge_state leaf
+    //       p: body = hex( u64_be(eff_height) || u32_be(idx) )    (12B)
+    //          -> pending_param_changes leaf
+    //
+    // Absence still returns {"error":"not_found"} for any namespace;
+    // non-membership proofs require an SMT migration (see header comment).
+    std::vector<uint8_t> k;
+    if (ns == "a" || ns == "s" || ns == "r" || ns == "d" || ns == "b" || ns == "k") {
+        // "a:" / "s:" / "r:" / "d:" / "b:" / "k:" + key string
+        // (d: namespace = v2.18 DApp registry; same simple-key pattern
+        // as accounts/stakes/registrants, so the light-client path
+        // V2-DAPP-DESIGN.md §263 describes works as-is.)
+        k.reserve(2 + key.size());
+        k.push_back(ns[0]);
+        k.push_back(':');
+        k.insert(k.end(), key.begin(), key.end());
+    } else if (ns == "c") {
+        // counters: "k:c:" + name (see build_state_leaves's const_leaf
+        // calls for counters using "c:" prefix as the name)
+        std::string composite = "c:" + key;
+        k.reserve(2 + composite.size());
+        k.push_back('k'); k.push_back(':');
+        k.insert(k.end(), composite.begin(), composite.end());
+    } else if (ns == "nk") {
+        // NC-8 §5b: "nk:" + addr (ASCII) — the standing recipient note-key
+        // leaf (value = SHA256(note_pk); build_state_leaves' "nk:" branch).
+        // A simple ASCII suffix like r:, but a 2-char prefix, so built
+        // explicitly. Lets a light client (verify-notekey) PIN a published
+        // note_pk against a committee-signed state_root before sealing to it.
+        std::string full = "nk:" + key;
+        k.assign(full.begin(), full.end());
+    } else if (ns == "en") {
+        // NC-8 §5.6: "en:" + hex(output commitment) (ASCII) — the per-output
+        // encrypted-note delivery leaf (value = SHA256(commitment_bytes ||
+        // enote_wire_bytes); build_state_leaves' "en:" branch, MODERN only).
+        // `key` is the lowercase-hex commitment string, so the leaf key is a
+        // plain ASCII suffix (no composite-hex body). Lets a light client
+        // (verify-enote-inclusion) PROVE a scanned (commitment, ciphertext)
+        // pair is really the committed on-chain delivery before trial-decrypting.
+        std::string full = "en:" + key;
+        k.assign(full.begin(), full.end());
+    } else if (ns == "i" || ns == "m" || ns == "p" || ns == "cc" || ns == "t") {
+        // Composite-key namespaces: `key` is the hex of the binary body.
+        // D3.5e-7e adds `cc` (epoch committee checkpoint, body = epoch_be8 →
+        // leaf "cc:"+epoch_be8) and `t` (shard-tip distress record, body =
+        // shard_be4 + height_be8 → leaf "t:"+shard_be4+height_be8) so the
+        // verify-shardtip-records auditor can PIN the frozen committee + a
+        // folded record against a committee-signed state_root.
+        // SP-CK-2: hex-decode + EXACT-width guard via the shared free fn so the
+        // width check is gated in-process (test-state-proof-composite-key). The
+        // two error shapes below are the byte-identical originals; a wrong-width
+        // body must be rejected here — otherwise it silently aliases a different
+        // leaf (lengths per build_state_leaves).
+        auto dec = decode_composite_state_body(ns, key);
+        if (!dec.hex_ok) {
+            return {{"error", "invalid hex key for composite namespace"},
+                    {"namespace", ns}, {"key", key}};
+        }
+        if (!dec.ok) {
+            return {{"error", "composite key wrong length"},
+                    {"namespace",      ns},
+                    {"expected_bytes", dec.want},
+                    {"got_bytes",      dec.body.size()}};
+        }
+        k.reserve(ns.size() + 1 + dec.body.size());
+        k.insert(k.end(), ns.begin(), ns.end());   // "cc" is a 2-char prefix
+        k.push_back(':');
+        k.insert(k.end(), dec.body.begin(), dec.body.end());
+    } else {
+        return {{"error", "unsupported namespace; use a|s|r|d|b|k|c|nk|en|i|m|p|cc|t"}};
+    }
+
+    auto proof_opt = chain_.state_proof(k);
+    if (!proof_opt) {
+        return {{"error", "not_found"}, {"namespace", ns}, {"key", key}};
+    }
+    auto& p = *proof_opt;
+
+    json proof_arr = json::array();
+    for (auto& h : p.proof) proof_arr.push_back(to_hex(h));
+
+    json resp = {
+        {"namespace",    ns},
+        {"key",          key},
+        {"key_bytes",    to_hex(p.key.data(), p.key.size())},
+        {"value_hash",   to_hex(p.value_hash)},
+        {"target_index", p.target_index},
+        {"leaf_count",   p.leaf_count},
+        {"proof",        proof_arr},
+        {"state_root",   to_hex(chain_.compute_state_root())},
+        {"height",       chain_.height()},
+    };
+
+    // R51: ATOMIC raw value for the c: (supply-counter) namespace. The whole
+    // call holds state_mutex_, so the counter value below, the proof, the
+    // state_root, and the height are ONE snapshot — this closes the
+    // cleartext/proof height race that made a trustless supply read report
+    // TAMPERED against an HONEST daemon (the per-block-incrementing
+    // accumulated_subsidy advanced between a chain_summary fetch and the
+    // proof fetch; SupplyProofSoundness.md "Implementation status (R41)"
+    // names exactly this fix: "the state_proof RPC returning the raw value
+    // bytes alongside value_hash so cleartext and proof are atomic").
+    // FAIL-CLOSED: value_hex/value_u64 are attached only if the recomputed
+    // SHA256(u64_be(value)) equals the proof's value_hash — an encoding
+    // drift (S-043 class) silently turns the field OFF (clients fall back
+    // to the legacy chain_summary path) rather than ever serving a value
+    // inconsistent with the committed leaf.
+    if (ns == "c") {
+        uint64_t v = 0;
+        bool known = true;
+        if      (key == "genesis_total")        v = chain_.genesis_total();
+        else if (key == "accumulated_subsidy")  v = chain_.accumulated_subsidy();
+        else if (key == "accumulated_slashed")  v = chain_.accumulated_slashed();
+        else if (key == "accumulated_inbound")  v = chain_.accumulated_inbound();
+        else if (key == "accumulated_outbound") v = chain_.accumulated_outbound();
+        else known = false;
+        if (known) {
+            crypto::SHA256Builder b;
+            b.append(v);                       // u64 big-endian, = const_leaf
+            if (b.finalize() == p.value_hash) {
+                uint8_t be[8];
+                uint64_t t = v;
+                for (int i = 7; i >= 0; --i) { be[i] = (uint8_t)(t & 0xff); t >>= 8; }
+                resp["value_hex"] = to_hex(be, 8);
+                resp["value_u64"] = v;
+            }
+        }
+    }
+    return resp;
+}
+
+json Node::rpc_cc_checkpoint(uint64_t epoch) const {
+    // D3.5e-7e / S-036: serve the cc:[epoch] frozen committee checkpoint
+    // CONTENT (the preimage of the cc: state leaf). Read-only; consensus-inert.
+    // The auditor treats this as UNTRUSTED daemon output and pins it: it
+    // recomputes SHA256(epoch_rand ‖ u64(members.size) ‖ per-member[
+    // u64(domain.size)‖domain‖ed_pub(32)‖u64(region.size)‖region]) — the exact
+    // build_state_leaves cc: value — and verifies the "cc"-namespace
+    // state_proof for this epoch against a committee-signed state_root.
+    std::shared_lock<std::shared_mutex> lk(state_mutex_);
+    const auto& ccs = chain_.committee_checkpoints();
+    auto it = ccs.find(epoch);
+    if (it == ccs.end()) {
+        return {{"error", "not_found"}, {"epoch", epoch},
+                {"retained_epochs", ccs.size()}};
+    }
+    json members = json::array();
+    for (const auto& m : it->second.members) {
+        members.push_back({{"domain", m.domain},
+                           {"ed_pub", to_hex(m.ed_pub)},
+                           {"region", m.region}});
+    }
+    return {{"epoch",      epoch},
+            {"epoch_rand", to_hex(it->second.epoch_rand)},
+            {"members",    std::move(members)}};
+}
+
+json Node::rpc_register() {
+    std::unique_lock<std::shared_mutex> lk(state_mutex_);
+
+    // V-REG-1: REGISTER is create-only (the verifier rejects a REGISTER for a
+    // registered domain), so the operator command must not queue one that can
+    // never be included. Surface it as an RPC error instead.
+    if (chain_.registrants().count(cfg_.domain))
+        throw std::runtime_error(
+            "REGISTER refused: domain '" + cfg_.domain + "' is already registered "
+            "(REGISTER is create-only, V-REG-1; key rotation is a separate transaction)");
+
+    // Payload (rev.9 R1): [pubkey: 32B][region_len: u8][region: utf8].
+    // When cfg_.region is empty we emit only the 32-byte pubkey
+    // (legacy / wire-compat path; old REGISTER txs replay byte-identical).
+    // The tx's own Ed25519 sig (verified at validator) proves possession
+    // of the key — no separate PoP. signing_bytes() includes the full
+    // payload, so the region binds into the tx hash automatically.
+    std::vector<uint8_t> payload;
+    payload.reserve(chain::REGISTER_PAYLOAD_PUBKEY_SIZE
+                    + (cfg_.region.empty() ? 0 : 1 + cfg_.region.size()));
+    payload.insert(payload.end(), key_.pub.begin(), key_.pub.end());
+    if (!cfg_.region.empty()) {
+        payload.push_back(static_cast<uint8_t>(cfg_.region.size()));
+        payload.insert(payload.end(), cfg_.region.begin(), cfg_.region.end());
+    }
+
+    chain::Transaction tx;
+    tx.type    = chain::TxType::REGISTER;
+    tx.from    = cfg_.domain;
+    tx.to      = "";
+    tx.amount  = 0;
+    tx.fee     = 0;
+    tx.nonce   = chain_.next_nonce(cfg_.domain);
+    tx.payload = std::move(payload);
+
+    auto sb = tx.signing_bytes();
+    tx.sig  = crypto::sign(key_, sb.data(), sb.size());
+    tx.hash = tx.compute_hash();
+
+    tx_store_[tx.hash] = tx;
+    tx_by_account_nonce_[{tx.from, tx.nonce}] = tx.hash;
+    // v2.6 / S-031 polish: release state_mutex_ before broadcast.
+    lk.unlock();
+    gossip_.broadcast(net::make_transaction(tx));
+    return {{"status", "queued"}, {"hash", to_hex(tx.hash)}};
+}
+
+} // namespace determ::node

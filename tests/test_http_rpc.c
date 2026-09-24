@@ -69,7 +69,7 @@ static int send_http_request(uint16_t port, const char *req, char *resp, size_t 
     return (int)total;
 }
 
-/* 1. Test GET /health and OPTIONS CORS */
+/* 1. Test GET /health, no CORS surface, loopback default bind */
 static void test_http_health_and_options(void) {
     uint16_t test_port = 18545;
     http_rpc_config_t cfg;
@@ -106,7 +106,10 @@ static void test_http_health_and_options(void) {
     TEST_ASSERT(strstr(resp, "HTTP/1.1 200 OK") != NULL);
     TEST_ASSERT(strstr(resp, "\"status\":\"OK\"") != NULL);
 
-    /* Test OPTIONS CORS */
+    /* No cross-origin surface: OPTIONS is not served and no response
+     * carries Access-Control-Allow-Origin (a web page must not be able to
+     * drive this RPC). */
+    TEST_ASSERT(strstr(resp, "Access-Control-Allow-Origin") == NULL);
     const char opt_req[] = "OPTIONS / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
     client_fd = socket(AF_INET, SOCK_STREAM, 0);
     TEST_ASSERT(connect(client_fd, (struct sockaddr *)&addr, sizeof(addr)) == 0);
@@ -121,11 +124,43 @@ static void test_http_health_and_options(void) {
     resp[n] = '\0';
     close(client_fd);
 
-    TEST_ASSERT(strstr(resp, "HTTP/1.1 204 No Content") != NULL);
-    TEST_ASSERT(strstr(resp, "Access-Control-Allow-Origin: *") != NULL);
+    TEST_ASSERT(strstr(resp, "HTTP/1.1 405 Method Not Allowed") != NULL);
+    TEST_ASSERT(strstr(resp, "Access-Control-Allow-Origin") == NULL);
+
+    /* Default bind address is loopback, never the wildcard. */
+    {
+        struct sockaddr_in bound;
+        socklen_t bound_len = sizeof(bound);
+        memset(&bound, 0, sizeof(bound));
+        TEST_ASSERT(getsockname(server.server_fd, (struct sockaddr *)&bound, &bound_len) == 0);
+        TEST_ASSERT(bound.sin_addr.s_addr == htonl(INADDR_LOOPBACK));
+    }
 
     http_rpc_server_close(&server);
     TEST_PASS("test_http_health_and_options");
+}
+
+/* 1b. An explicit bind address is honored; a malformed one is refused. */
+static void test_http_bind_address(void) {
+    http_rpc_config_t cfg;
+    http_rpc_server_t server;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.port = 0;
+    cfg.bind_ip = "not-an-ip";
+    TEST_ASSERT(http_rpc_server_init(&server, &cfg) != 0);
+    {
+        /* Closing after a failed init must not close descriptor 0. */
+        int null_fd = open("/dev/null", O_RDONLY);
+        TEST_ASSERT(null_fd >= 0);
+        TEST_ASSERT(dup2(null_fd, 0) == 0);
+        if (null_fd != 0) close(null_fd);
+        http_rpc_server_close(&server);
+        TEST_ASSERT(fcntl(0, F_GETFD) != -1);
+    }
+    cfg.bind_ip = "127.0.0.1";
+    TEST_ASSERT(http_rpc_server_init(&server, &cfg) == 0);
+    TEST_ASSERT(server.bind_addr_be == htonl(INADDR_LOOPBACK));
+    TEST_PASS("test_http_bind_address");
 }
 
 /* 2. Test JSON-RPC POST get_status & get_difficulty */
@@ -226,8 +261,8 @@ static void test_http_json_rpc_block_store(void) {
     uint16_t test_port = 18547;
     const char *test_dir = "/tmp/test_http_rpc_store";
     char rm_cmd[128];
-    snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf %s", test_dir);
-    (void)system(rm_cmd);
+    TEST_ASSERT(snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf %s", test_dir) < (int)sizeof(rm_cmd));
+    TEST_ASSERT(system(rm_cmd) == 0);
 
     block_store_t store;
     TEST_ASSERT(block_store_open(&store, test_dir) == 0);
@@ -284,7 +319,7 @@ static void test_http_json_rpc_block_store(void) {
 
     http_rpc_server_close(&server);
     block_store_close(&store);
-    (void)system(rm_cmd);
+    TEST_ASSERT(system(rm_cmd) == 0);
     TEST_PASS("test_http_json_rpc_block_store");
 }
 
@@ -525,6 +560,7 @@ int main(void) {
     (void)send_http_request;
     printf("=== Starting C99 HTTP/1.1 JSON-RPC Server Test Suite ===\n");
     test_http_health_and_options();
+    test_http_bind_address();
     test_http_json_rpc_status_and_difficulty();
     test_http_json_rpc_block_store();
     test_http_malformed_handling();

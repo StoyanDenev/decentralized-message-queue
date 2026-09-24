@@ -15,7 +15,8 @@ The C99 node provides `get_shard_for_pubkey`, a read-only query using the existi
 salted modulus map and canonical lowercase account addresses. Configure its local
 inputs with `--routing-shards` and `--routing-salt`; defaults are one shard and a
 zero salt. Responses identify these as local settings, not authenticated genesis
-or enforced transaction ownership. See the [routing contract](docs/proofs/ShardRoutingSoundness.md#c99-local-routing-query-2026-09-22).
+or enforced transaction ownership. The JSON-RPC server (`--rpc-port`) binds
+127.0.0.1 and sends no CORS headers. See the [routing contract](docs/proofs/ShardRoutingSoundness.md#c99-local-routing-query-2026-09-22).
 
 An optional bounded inbox now accepts signed, intra-shard anonymous transfers via
 `submit_pending_transfer` and lists their canonical binary frames with
@@ -23,7 +24,10 @@ An optional bounded inbox now accepts signed, intra-shard anonymous transfers vi
 `--rpc-port`; routing uses the same local count/salt. It checks signatures and
 context before retaining up to four transactions per occupied shard, eight shards
 per node. Responses say `state_validated:false`: balances, nonce readiness,
-execution, persistence and gossip are not implemented by this inbox. See the
+execution, persistence and gossip are not implemented by this inbox. The signed
+preimage binds `genesis_hash` and `shard_id` (the chain identity decided in D23),
+which the C++ `Transaction::signing_bytes()` does not sign (S-103), so the C99 and
+C++ transaction formats differ. See the
 [pending contract](docs/proofs/ShardRoutingSoundness.md#c99-signed-pending-inbox-2026-09-22).
 
 `test-dsf-k2-recovery` separately tests finite sibling selection and state replay,
@@ -31,28 +35,35 @@ including late smaller-header correction and descendant revalidation. Its fixed
 eligibility/receipt fixtures are model assumptions; it does not implement production
 chain recovery. See the [DSF scope](docs/proofs/DSF-SPEC.md#104-bounded-c99-fork-recovery-model).
 
-[ADR-004](docs/decisions/ADR-004-Fault-Model.md) establishes Proof of Sequential Work (PoSW)
-with Heaviest-Chain branch resolution as the canonical consensus architecture.
-All legacy claims of "Fork-Free Finality," "1-of-2 Fallback," and "Zero-Bit Bias" are
-retracted and superseded. The consensus protocol is Proof of Sequential Work (PoSW)
-with probabilistic Nakamoto finality governed by cumulative VDF iterations and strict
-2-of-2 epoch skipping. See the formal mathematical proofs in [`PoSW_Nakamoto_Safety.md`](docs/proofs/PoSW_Nakamoto_Safety.md),
-[`PoSW_Economic_Soundness.md`](docs/proofs/PoSW_Economic_Soundness.md), and
-[`VRF_Sharding_Safety.md`](docs/proofs/VRF_Sharding_Safety.md).
+[ADR-004](docs/decisions/ADR-004-Fault-Model.md) records PoSW as an architectural
+direction with unresolved security obligations; no PoSW chain protocol is
+implemented. Claims of unconditional liveness, 1-of-2 completion, fork-free C99
+finality, zero bias, hardware-independent timing, and MEV prevention are withdrawn.
+See the [C99 contracts and refutations](docs/proofs/K2_VDF_Soundness.md)
+and [security ledger](docs/SECURITY.md). [Temporal sharding](docs/decisions/ADR-005-Temporal-Sharding.md)
+is at its design gate; it does not deprecate the C++ beacon or EXTENDED topology.
 
 Run the C99 checks through the project CI entry point:
 
 ```sh
 bash tools/ci_local.sh --c99 --jobs 4
+bash tools/ci_local.sh --c99-sanitize --jobs 4   # the same targets under ASan + UBSan
 bash tools/ci_local.sh --c99-mutants --jobs 4
 ```
 
 The arithmetic and local state-machine tests are portable C99. The network driver
 and its live socket tests currently use POSIX transport; Windows transport support
-is not established by these checks. The ordinary `ci_local.sh` path still tests the
-C++ implementation. Pull-request CI also configures a separate Ubuntu 24.04 job
-for the C99 suite, isolated mutation checks and documentation guards; local Darwin
-results do not substitute for that runner's result.
+is not established by these checks. On a POSIX host `--c99` builds and runs 21
+targets (10 portable, 11 POSIX-only; a Windows shell reports the 11 as
+platform-skipped), and `--c99-mutants` runs the isolated mutation gate. Each of
+these targets compiles as strict ISO C99 (no GNU extensions) with
+`-Wall -Wextra -Werror -pedantic` on GCC and Clang (`determ_c99_strict` in
+`CMakeLists.txt`); the shared `determ-crypto-c99` library, which the C++ binaries
+also link, keeps its own settings. There is no root Makefile. The ordinary
+`ci_local.sh` path still tests the C++ implementation. Pull-request CI also
+configures a separate Ubuntu 24.04 job for the C99 suite (GCC and Clang builds,
+then GCC under ASan + UBSan), isolated mutation checks and documentation guards;
+local results do not substitute for that runner's result.
 
 ## C++ implementation reference
 
@@ -63,7 +74,7 @@ in the decision log and security ledger; they are not a proof of launch readines
 
 **Version v1.1 (mainnet launch target)** · [![License: Multi-licensed](https://img.shields.io/badge/License-Multi--licensed-blue.svg)](LICENSING.md)
 
-> **Scope, briefly:** Determ is a **pure C99 L1 payment + identity chain secured by Proof of Sequential Work (PoSW) with probabilistic finality** with mutual-distrust safety. It is **not** a general DApp hosting platform — there is no Turing-complete smart-contract execution layer (no EVM, no WASM, no gas), no off-chain storage integration, no bridges. Native transaction types cover base payments and identity (TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE), atomic multi-operation composition (COMPOSABLE_BATCH), canonical encrypted DApp messaging (DAPP_REGISTER, DAPP_CALL), post-quantum bearer payments (PQ_TRANSFER via ML-DSA / FIPS 204), confidential transactions (SHIELD, UNSHIELD, CONFIDENTIAL_TRANSFER with DCT1 Pedersen/range proofs), audit trail management (ROTATE_AUDIT_KEY, LOG_AUDIT_ACCESS, REGISTER_NOTE_KEY), and governed configuration (PARAM_CHANGE, MERGE_EVENT). The full breakdown of what fits and what doesn't is in [§17 Scope](#17-scope).
+> **Scope, briefly:** Determ is a **base-layer fork-free L1 payment + identity chain** with mutual-distrust safety. It is **not** a general DApp hosting platform — there is no Turing-complete smart-contract execution layer (no EVM, no WASM, no gas), no off-chain storage integration, no bridges. Native transaction types cover base payments and identity (TRANSFER, REGISTER, DEREGISTER, STAKE, UNSTAKE), atomic multi-operation composition (COMPOSABLE_BATCH), canonical encrypted DApp messaging (DAPP_REGISTER, DAPP_CALL), post-quantum bearer payments (PQ_TRANSFER via ML-DSA / FIPS 204), confidential transactions (SHIELD, UNSHIELD, CONFIDENTIAL_TRANSFER with DCT1 Pedersen/range proofs), audit trail management (ROTATE_AUDIT_KEY, LOG_AUDIT_ACCESS, REGISTER_NOTE_KEY), governed configuration (PARAM_CHANGE) and under-quorum shard merges (MERGE_EVENT). The full breakdown of what fits and what doesn't is in [§17 Scope](#17-scope).
 >
 > **For operators:** see [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for a 5-minute walkthrough and [`docs/CLI-REFERENCE.md`](docs/CLI-REFERENCE.md) for the full command list.
 >
@@ -84,7 +95,7 @@ in the decision log and security ledger; they are not a proof of launch readines
 
 The C++ implementation uses a registration-gated, two-phase K-of-K committee protocol. Each block is produced by a deterministically rotated **K-committee** drawn from the registered creator pool. The protocol runs in two phases per block: a **Contrib phase** in which each committee member commits transaction proposals plus a Phase-1 commitment to a fresh per-round secret (`SHA256(secret ‖ pubkey)`) under an Ed25519 signature, and a **BlockSig phase** in which each member reveals their secret alongside an Ed25519 signature over the block digest. A block is final when all K committee signatures are present and all K secrets verify against the Phase-1 commitments.
 
-Key architectural principles of Determ's PoSW consensus:
+Two design choices distinguish Determ from prior fork-free systems:
 
 1. **Commitment binding.** Phase 1 commits to a secret; Phase 2 verifies its opening. This prevents changing the committed secret under the hash assumption. It does not stop a last revealer, who knows its own secret, from computing the result and withholding an unfavorable outcome.
 
@@ -104,7 +115,7 @@ The C++ protocol derives randomness from ordered committed secrets. Commitment b
 
 This design has three consequences worth highlighting:
 
-1. **Heaviest-Chain Fork Choice Rule.** When competing blocks or branches are received at the same height, nodes strictly adopt the branch with the highest cumulative VDF iterations, achieving probabilistic Nakamoto finality.
+1. **Same-committee forks need every member to double-sign.** Two blocks at the same height from the same committee would require every member to sign two different digests — which honest committee members refuse to do — and a digest mismatch is detected by the missing or invalid signatures. Blocks from different committees at one height (different abort histories) are excluded only under the §2 safety assumption, and the node keeps a deterministic fork choice for same-height siblings (`Chain::resolve_fork`, S-029).
 
 2. **Censorship resistance is structural.** Each committee member independently proposes transactions in Phase 1. The block's transaction root is the union of all committee proposals. A transaction is excluded only if every one of the `K` committee members colludes — probability `(f/N)^K` for adversarial fraction `f/N`.
 
@@ -117,9 +128,9 @@ This design has three consequences worth highlighting:
 **Participants.** Two classes of participants exist:
 
 - **Registered domains.** A node identified by a human-readable domain string. Each holds an Ed25519 keypair, registers on-chain via a REGISTER transaction, stakes at least `MIN_STAKE`, and is eligible for committee selection.
-- **Anonymous accounts.** A user-side keypair. Address is derived directly from the Ed25519 public key (`0x` + 64 hex chars). Anonymous accounts may transact (TRANSFER, STAKE, etc.) but cannot be selected as creators.
+- **Anonymous accounts.** A user-side keypair. Address is derived directly from the Ed25519 public key (`0x` + 64 hex chars). Anonymous accounts may send TRANSFER, the confidential types (SHIELD, UNSHIELD, CONFIDENTIAL_TRANSFER) and ROTATE_AUDIT_KEY, LOG_AUDIT_ACCESS and REGISTER_NOTE_KEY — node ingress currently admits only TRANSFER from them (S-065) — but cannot stake, register or be selected as creators.
 
-Transactions from both account types are signed under Ed25519. The chain validates signatures uniformly; the only difference is consensus eligibility.
+Transactions from both account types are signed under Ed25519. The chain validates signatures uniformly; the differences are consensus eligibility and the transaction types each may send.
 
 **Trust model — zero-trust system, mutual-distrust environment.** Determ is a **zero-trust system internally**. The protocol itself assumes nothing about any participant's honesty, intent, or alignment with chain progress. It only enforces rules: verify signatures, run the consensus state machine, propagate messages. No participant — including beacons, validators, users, or operators — is granted any trust by the protocol. Every actor is treated as potentially adversarial.
 
@@ -131,7 +142,7 @@ This is "mutual distrust" — every validator watches every other, assumes every
 
 ### 2.1 The actual decentralization threshold
 
-Determ's safety + censorship-resistance properties hold **as long as at least one validator in the registry is rule-following**:
+Determ's censorship-resistance property holds **as long as at least one validator in the registry is rule-following**; its safety claims need more — the honest-signing and committee-intersection hypotheses stated under "Safety assumption" below:
 
 - **At least 1 rule-following validator anywhere in the registry → mutual-distrust environment.** The K-of-K committee rotates over time, so a single rule-following validator eventually appears on any committee. Their Phase 1 contribution unions any censored tx into the block (mutual inclusion). Their refusal to sign malformed proposals is a veto on those they reject (mutual veto). The chain stays open and uncensored.
 - **0 rule-following validators (100% adversarial capture) → fully controlled adversarial network.** No protocol provides safety in this case — the attacker controls every committee member at every height and can produce any block they want. This is the universal limit beyond which no consensus protocol can function. Determ makes no claim here.
@@ -159,7 +170,7 @@ The following are C++ design objectives, subject to the security ledger and thei
 - **Stronger censorship resistance** — `(f/N)^K` per round, exponential in K, no leader bottleneck.
 - **Conditional committee safety** — requires the committee-intersection and honest-signing assumptions recorded in the proof set; signature unforgeability alone does not prevent conflicting signatures.
 - **Lower honest-fraction requirement** — `≥1 of N` honest, not `≥2/3 of N` honest, for the chain to remain useful.
-- **Clean economic story** — every participant pursues block rewards. Deviation either earns no reward (refusal → no share), is recorded as evidence (equivocation — an on-chain record with no L1 consequence since 2026-09-16, DECISION-LOG D4; the L2 policy consumes it), or is futile (censorship → defected by any honest member). No "honest majority assumption" is bolted on.
+- **Clean economic story** — every participant pursues block rewards. Deviation either earns no reward (refusal → no share), is recorded as evidence (equivocation — an on-chain record with no L1 consequence since 2026-09-16, DECISION-LOG D4; the designated input to an L2 policy, D22, that is not yet designed), or is futile (censorship → defected by any honest member). No "honest majority assumption" is bolted on.
 
 **Network assumptions.** We assume a partially synchronous network: messages are delivered within some known bound `Δ` during normal operation. The protocol tolerates periods of asynchrony by aborting and restarting rounds. Safety does not require synchrony — an invalid block is rejected regardless of message ordering.
 
@@ -167,7 +178,7 @@ The following are C++ design objectives, subject to the security ledger and thei
 
 **Safety assumption.** No-two-finalized-blocks claims require explicit honest-signing and committee-intersection hypotheses. They do not follow unconditionally from the K-of-K signature check, and they do not apply to the C99 prototype.
 
-**Liveness assumption.** Liveness requires that at least one committee can be formed from `K` honest, online committee members. With `M_pool` registered nodes and per-node availability `(1-p)`, the probability that a specific committee is fully live is `(1-p)^K`. The committee rotates per round; persistent absence triggers suspension.
+**Liveness assumption.** Liveness requires that at least one committee can be formed from `K` honest, online committee members. With `M_pool` registered nodes and per-node availability `(1-p)`, the probability that a specific committee is fully live is `(1-p)^K`. The committee is redrawn per epoch and on abort re-selection (§10.2); persistent absence triggers suspension.
 
 ---
 
@@ -208,14 +219,14 @@ Transaction {
 }
 ```
 
-Nonces are sequential (account state tracks `next_nonce`), preventing replay.
+Nonces are sequential (account state tracks `next_nonce`), preventing replay within one chain. `signing_bytes()` binds no chain identity, so a signed transaction is also valid on any other chain or shard where `(from, nonce)` matches (S-103, open; the genesis-hash and shard-id binding is decided in D23, not landed). The verifier does not recompute `hash` for transactions inside a block (S-101, open).
 
 **Native Transaction Types (`TxType`):**
 - `0: TRANSFER` — Direct balance transfer between accounts (domain or anonymous).
 - `1: REGISTER` — Creates a domain identity (create-only, nonce 0). Binds domain name to 32-byte Ed25519 key. Rejects small-order torsion keys (S-068).
 - `2: DEREGISTER` — Deactivates validator eligibility and initiates unbonding delay for staked bond.
-- `3: STAKE` — Deposits validator stake. Post-genesis join path admits STAKE while `block_index < inactive_from` (D6 / S-069), bounded by quorum intersection $N(h) + 1 < 2K$ (D5a / S-054).
-- `4: UNSTAKE` — Unlocks and reclaims stake. Active validators unstake surplus above `min_stake`; deregistered validators withdraw after unbonding delay `block_index >= stake_unlock_height` (D7 / S-067).
+- `3: STAKE` — Locks validator stake from the sender's balance. Accepted only from a domain already in the eligible registry: under `STAKE_INCLUSION` the STAKE of a registered-but-unstaked domain is rejected ("tx sender not in registry"), so no domain can join after genesis (S-069, open; the D6 join rule is decided, not landed — §5.2).
+- `4: UNSTAKE` — Moves locked stake back to the domain's balance once `block_index >= stake_unlock_height`. That height stays `UINT64_MAX` until DEREGISTER sets it, so an active validator cannot unstake any amount; a deregistered domain can UNSTAKE after the unbonding delay (D7 / S-067, partial — the unlocked balance cannot be moved by any later transaction; §5.3).
 - `5: REGION_CHANGE` — Reserved for epoch-boundary regional rebalancing.
 - `6: PARAM_CHANGE` — Multisig parameter governance under `governed` mode ($M$-of-$N$ threshold signatures over whitelisted parameters).
 - `7: MERGE_EVENT` — Under-quorum shard merge coordination event under `EXTENDED` sharding mode.
@@ -271,11 +282,11 @@ AbortEvent {
     aborting_node : string
     timestamp     : int64
     event_hash    : [32]        // chained for verifiability
-    claims        : AbortClaim[]  // K-1 signed claims forming the quorum
+    claims        : AbortClaim[]  // max(2, K-1) signed claims forming the quorum
 }
 ```
 
-A round aborts when `K-1` distinct committee members each broadcast an `AbortClaimMsg` against the same missing creator at the same round. The aggregated quorum is recorded as an `AbortEvent` baked into the next finalized block.
+A round aborts when `max(2, K-1)` distinct committee members (`K-1` for `K ≥ 3`; unsatisfiable at `K = 2`, S-044) each broadcast an `AbortClaimMsg` against the same missing creator at the same round. The aggregated quorum is recorded as an `AbortEvent` baked into the next finalized block.
 
 The claim list is a **typed** vector of the six consensus-bound fields, carried and hashed as one canonical fixed-layout binary encoding — `[count u16 LE]` then, per claim, `[block_index u64 LE][round u8][prev_hash 32][ed_sig 64][len u8]missing_creator[len u8]claimer`. Those exact bytes are both the `hash_abort_event` digest preimage (domain `DTM-F2-ABORT-v2`, recomputed identically by the light client) and, hex-wrapped, the block-container value, so the stored form and the hashed form cannot drift. Decoding is fail-closed with exact-consumption semantics. The per-claim Ed25519 signature covers `(block_index, round, prev_hash, missing_creator)` only — never any serialization.
 
@@ -297,7 +308,7 @@ Block {
     bft_proposer      : string             // empty in MD blocks
     creator_block_sigs : [][64]            // K' Phase 2 Ed25519 sigs over block_digest
     abort_events       : []AbortEvent
-    equivocation_events: []EquivocationEvent  // baked evidence; apply slashes equivocator's stake (§15)
+    equivocation_events: []EquivocationEvent  // baked evidence; an on-chain record only, apply moves no state (§5.4, §15)
     cross_shard_receipts: []CrossShardReceipt // outbound receipts for off-shard `to` (§16.4)
     inbound_receipts   : []CrossShardReceipt  // inbound receipts credited by this block; exactly-once on (src_shard, tx_hash)
     initial_state      : []GenesisAlloc       // genesis only (index == 0); seeds account / stake / registry tables
@@ -332,10 +343,10 @@ state_root             [bound only when non-zero — S-033 v2.1 backward-compat]
 
 This is broader than `block_digest` (§7.4), which is what committee members sign in Phase 2. `block_digest` excludes `delay_output` and `creator_dh_secrets` so members can sign at Phase-2 entry without waiting for the K reveals to gather; `signing_bytes` includes them so the final block identity uniquely binds the post-reveal randomness output.
 
-### 3.7.2 Block Frame Cap and Storage Integrity
+### 3.7.2 Block Size and Storage Integrity
 
-- **Block Frame Consensus Cap (D9 / S-057):** The canonical wire-encoded block frame is bounded at `BLOCK_FRAME_CONSENSUS_CAP_BYTES = 4,194,300` bytes (4 MB gossip buffer minus 4-byte framing). Blocks exceeding this cap are rejected fail-closed during verification (`BlockValidator::check_block`), guaranteeing that valid blocks can never exceed gossip envelope capacity.
-- **Storage Integrity & Continuity (S-084):** During database loading (`Chain::load`) and canonical state export (`Chain::export_store`), every block record is verified for sequential height continuity (`b.index == i`) and cryptographic hash linking (`b.prev_hash == prev_hash`). Corrupted or non-linking block files throw immediately and fail closed on startup.
+- **No consensus block-byte cap (S-057, partial):** no rule in `BlockValidator::validate` bounds a block's encoded size, so a block that passes validation can exceed the 4 MB wire cap for BLOCK messages (§12.2) and then cannot be relayed. The consensus cap matching the wire limit is decided (D9 / R-7) but not landed. D9's other rule is in code: a non-PQ transaction carrying a non-empty `pq_auth` is rejected by the verifier and by the ingress mirror.
+- **Storage Integrity & Continuity (S-084):** `Chain::load` and the offline text export (`Chain::export_store_json`) check every stored block record for height continuity (`b.index == i`), a zero `prev_hash` at genesis and hash linking (`b.prev_hash` equals the previous record's hash). A missing, corrupted or non-linking block file throws, so the node fails closed on startup.
 
 ---
 
@@ -386,7 +397,7 @@ A node registers by broadcasting a REGISTER transaction whose payload is its 32-
 
 Registration takes effect after a randomized 1–10 block delay derived from `(tx.hash || cumulative_rand)`. This prevents a registrant from timing entry to guarantee selection in a chosen round.
 
-Under `STAKE_INCLUSION` (the default) registration alone does not make a node eligible for committee selection. A post-genesis join path (D6 / S-069) allows a registered domain to submit `STAKE` (and an optional funding `TRANSFER`) while `block_index < inactive_from`. The node activates and becomes eligible once its stake reaches `min_stake`, subject to the strict quorum intersection cap $N(h) + 1 < 2K$ (D5a / S-054).
+Under `STAKE_INCLUSION` (the default) registration alone does not make a node eligible for committee selection, and the verifier rejects every transaction from a registered-but-unstaked domain ("tx sender not in registry") — including the STAKE that would make it eligible. The validator set is therefore closed at genesis (SECURITY.md S-069, open). The owner decision to accept STAKE and its funding TRANSFER from such a domain (D6 / R-12) is decided but not landed.
 
 In `DOMAIN_INCLUSION` chains the convention is that `tx.from` is a real DNS name (e.g., `validator1.example.com`). The protocol does not enforce DNS validity — that's an off-chain concern (operators may verify via DNSSEC TXT records pointing to the on-chain `ed_pub`). Mismatches surface as governance issues, not protocol violations.
 
@@ -394,11 +405,11 @@ In `DOMAIN_INCLUSION` chains the convention is that `tx.from` is a real DNS name
 
 Eligibility requires `stake[domain] ≥ chain.min_stake()`. In `STAKE_INCLUSION` mode this is `min_stake = 1000` (configurable per chain at genesis). In `DOMAIN_INCLUSION` mode `min_stake = 0` and the gate is skipped entirely — registration alone suffices.
 
-**Quorum Intersection Invariant (D5a / S-054):** To preserve committee safety and ensure any two $K$-sized committees intersect in at least one honest creator ($2K - N(h) \ge 1$), the total eligible pool $N(h)$ is bounded such that $2K > N(h)$ must hold at genesis and throughout chain life. Any `STAKE` transaction that would expand the eligible validator pool to $N(h) \ge 2K$ is rejected fail-closed by the validator.
+**Committee-intersection bound (S-054, partial).** Genesis validation requires `2K > M_pool` over `m_creators` (with `K ≤ M_pool` checked at node start, §4), so any two `K`-subsets of an `M_pool`-sized pool overlap. No rule bounds the eligible pool `N(h)` from which committees are actually drawn: there is no genesis check against the initial creators, no assertion at committee selection (§6) and no STAKE cap. Enforcing `2K > N(h)` is decided (D5a / R-4) but not landed. An overlap of `2K − N(h)` members would not by itself make a shared member honest; the safety hypotheses are stated in §2.
 
-**Exit Unlock Path (D7 / S-067):** An active validator may unstake surplus amounts above `min_stake`. A validator that deregisters enters an unbonding lock period; once the unbonding delay passes (`block_index >= stake_unlock_height(domain)`), the inactive domain can submit an `UNSTAKE` transaction authenticated by its registered public key to reclaim its full stake.
+**Exit (D7 / S-067, partial).** Stake stays locked while a domain is registered: `unlock_height` is `UINT64_MAX` until DEREGISTER sets it to `inactive_from + unstake_delay`, so an active validator cannot UNSTAKE any amount. From `block_index >= stake_unlock_height(domain)` the deregistered domain may submit UNSTAKE — the only transaction type the verifier accepts from a registered domain outside the eligible registry — authenticated by its registered key. The amount is credited to the domain's balance, which no later transaction can move: every other type from that domain, including COMPOSABLE_BATCH inners, is still rejected ("tx sender not in registry").
 
-### 5.4 Suspension and equivocation deregistration
+### 5.4 Suspension and equivocation evidence
 
 A registered, eligible domain is **suspended** from selection if it has any Phase 1 abort against it in chain history; the suspension window grows exponentially with repeat offenses:
 
@@ -409,23 +420,23 @@ BASE = 10, MAX = 10000
 
 Only **Phase 1** aborts (`round=1` AbortEvents) count toward suspension. Phase 2 aborts can fire on a healthy creator when its block-sig arrival is delayed past the timer (timing skew); using them would inflate false-positive suspensions and harm liveness without improving censorship guarantees.
 
-A domain that **equivocates** has the double-sign proof recorded on chain as an `EquivocationEvent` — an evidence record for the L2 policy that carries **no L1 consequence** (owner decision 2026-09-16, DECISION-LOG D4: no stake forfeiture, no registry deactivation). The protocol detects two equivocation surfaces (both digest-agnostic — the validator's V11 only checks "two distinct hashes signed by the same registered key"):
+A domain that **equivocates** has the double-sign proof recorded on chain as an `EquivocationEvent` — an evidence record for the L2 policy that carries **no L1 consequence** (owner decision 2026-09-16, DECISION-LOG D4: no stake forfeiture, no registry deactivation). The protocol detects two equivocation surfaces, both checked by the same V11 rule (two signed openings at the same height and round generation with different body roots, both verifying under the same registered key against the digests the validator derives from them):
 
 1. **BlockSigMsg-level (rev.8)**: the validator signs `compute_block_digest(b)` for two different block bodies at the same height. Detection in `Node::apply_block_locked`.
 2. **ContribMsg same-generation (S-006 closure)**: the validator signs `make_contrib_commitment(...)` for two different `(tx_hashes, dh_input)` snapshots at the same `(block_index, prev_hash, aborts_gen)`. Detection in `Node::on_contrib`.
 
-Both detection paths feed the same `EquivocationEvent` channel; an external implementer must wire both to record all equivocation surfaces. The record is capped and deduplicated per block in a following increment (step 3b) and consumed by the L2 bond policy (D22).
+Both detection paths feed the same `EquivocationEvent` channel; an external implementer must wire both to record all equivocation surfaces. A block may carry at most `EQUIVOCATION_EVENTS_PER_BLOCK_MAX = 16` events and no duplicate event; the verifier rejects a block that breaks either rule (O-1 step 3b). The record is the designated input to the L2 bond policy (D22), which is not yet designed; until it exists, equivocation has no consequence anywhere.
 
 ---
 
 ## 6. Committee Selection
 
-Given the registry at the chain's current height (sorted deterministically by domain), `current_aborts` for the in-flight round, and the previous block's `cumulative_rand`:
+Given the registry at the chain's current height (sorted deterministically by domain), `current_aborts` for the in-flight round, and the epoch seed `epoch_committee_seed(epoch_rand, shard_id)` — `epoch_rand` being the `cumulative_rand` of the block before the current epoch opens (in epoch 0, of the previous block; on a shard, the beacon's — §16.2):
 
 ```
 excluded   = {ae.aborting_node : ae in current_aborts}
 available  = registry \ excluded
-effective_rand = cumulative_rand
+effective_rand = epoch_committee_seed(epoch_rand, shard_id)
 for ae in current_aborts:
     effective_rand = SHA-256(effective_rand ‖ ae.event_hash)
 indices    = select_m_creators(effective_rand, |available|, K)
@@ -434,7 +445,7 @@ committee  = [available[i] : i in indices]
 
 `select_m_creators` uses a deterministic hybrid (S-020): rejection sampling with a counter when `2K ≤ N` (cheap path, expected `O(K)` hashes, no allocation), or a partial Fisher-Yates shuffle when `2K > N` (bounded `O(N)` setup + exactly `K` hashes, no rejection spin even at `K = N − 1`). Both branches are pure functions of `(random_state, N, K)` so every node picks the same branch and the same indices. Excluding aborted-this-height domains from the local pool ensures committee re-selection after an abort doesn't re-pick the same silent creator before the chain-baked suspension takes effect on the next finalized block. The validator reproduces the same selection given a block's `abort_events` field.
 
-**Quorum intersection enforcement (D5a / S-054):** The selection function verifies that `|available| < 2K`. If the eligible pool ever reaches or exceeds $2K$, creator selection halts with a deterministic validation error, preventing the formation of two disjoint $K$-committees.
+**No pool-size assertion (S-054, partial).** Neither the producer's selection (`Node::check_if_selected`) nor the verifier (`BlockValidator::check_creator_selection`) bounds `|available|` against `2K`; the D5a assertion at selection is decided but not landed (§5.3).
 
 ---
 
@@ -461,7 +472,7 @@ tx_root    = root(union(creator_tx_lists))           // union of K hash lists
 delay_seed = H(idx ‖ prev_hash ‖ tx_root ‖ dh_inputs[K])
 ```
 
-The transition is immediate (no wall-clock delay). Selective-abort defense comes from the commit-reveal binding: in Phase 1 each member's secret is sealed under `SHA256(secret ‖ pubkey)`, so when a member decides whether to publish their commitment they cannot predict the eventual `R` — the K−1 other secrets remain uniformly random under SHA-256 preimage resistance.
+The transition is immediate (no wall-clock delay). The commit-reveal binding hides the outcome at commitment time: in Phase 1 each member's secret is sealed under `SHA256(secret ‖ pubkey)`, so when a member decides whether to publish their commitment they cannot predict the eventual `R` — the K−1 other secrets remain uniformly random under SHA-256 preimage resistance. It is no defense at Phase 2: a last revealer can compute `R` before deciding to reveal (§10.3, S-077).
 
 ### 7.3 Latency optimizations
 
@@ -479,9 +490,9 @@ When all `K` BlockSig messages are present (and all K secrets verify), the node 
 
 ### 7.5 Abort
 
-If Phase 1's `tx_commit_ms` timer fires before all `K` contribs arrive, every committee member who has its own contrib but not the missing creator's broadcasts an `AbortClaimMsg` against the missing creator. When `K-1` distinct claims are gathered locally (an `AbortEvent`), the round restarts: `current_aborts` grows, the committee is re-selected with the missing creator excluded, and Phase 1 begins anew.
+If Phase 1's `tx_commit_ms` timer fires before all `K` contribs arrive, every committee member who has its own contrib but not the missing creator's broadcasts an `AbortClaimMsg` against the missing creator. When `max(2, K-1)` distinct claims are gathered locally (an `AbortEvent`), the round restarts: `current_aborts` grows, the committee is re-selected with the missing creator excluded, and Phase 1 begins anew.
 
-If Phase 2's `block_sig_ms` timer fires with fewer than `K` sigs, an analogous claim quorum forms (`round=2`), but does not contribute to suspension (§5.3).
+If Phase 2's `block_sig_ms` timer fires with fewer than `K` sigs, an analogous claim quorum forms (`round=2`), but does not contribute to suspension (§5.4).
 
 ---
 
@@ -490,19 +501,19 @@ If Phase 2's `block_sig_ms` timer fires with fewer than `K` sigs, an analogous c
 A node receiving a block verifies:
 
 1. `prev_hash` matches the local chain head.
-2. `creators` is exactly the deterministic K-committee derived from `prev.cumulative_rand`, `b.abort_events`, and the registry — using the exclude-mixed selection of §6.
+2. `creators` is exactly the deterministic K-committee derived from the epoch seed, `b.abort_events`, and the registry — using the exclude-mixed selection of §6.
 3. Each `creator_ed_sigs[i]` is a valid Ed25519 signature over the Phase 1 commit, by `creators[i]`'s registered key.
 4. `tx_root` equals `root(union(creator_tx_lists))`.
 5. `delay_seed` equals `H(idx ‖ prev_hash ‖ tx_root ‖ creator_dh_inputs)`.
 6. For each `i`, `SHA256(creator_dh_secrets[i] ‖ creators[i].pubkey)` equals `creator_dh_inputs[i]` (Phase-2 reveal verifies against the Phase-1 commitment).
 7. `delay_output` equals `SHA256(delay_seed ‖ creator_dh_secrets[0..K])`.
 8. Each `creator_block_sigs[i]` is a valid Ed25519 signature over `block_digest` by `creators[i]`'s registered key.
-9. Each `AbortEvent` carries a valid `K-1` quorum of signed `AbortClaimMsg`s, with claimers drawn from the at-event committee (reconstructed by the same exclude-mixed rule).
+9. Each `AbortEvent` carries a valid `max(2, K-1)` quorum of signed `AbortClaimMsg`s, with claimers drawn from the at-event committee (reconstructed by the same exclude-mixed rule).
 10. Transactions are valid against the running balance/nonce model in canonical order.
 11. `cumulative_rand` equals `H(prev.cumulative_rand ‖ delay_output)`.
 12. `timestamp` is within `±30 s` of the local clock.
 
-Steps 2, 3, 7, and 8 validate block headers against deterministic VRF eligibility and sequential VDF proofs. Competing valid blocks at the same height are resolved via the Heaviest-Chain rule (highest cumulative VDF iterations).
+Steps 2, 3, 7, and 8 give fork-freedom only under the §2 safety assumption. Two valid blocks at the same height from the same committee would require every member to sign two different digests, which any honest committee member refuses. Blocks carrying different `abort_events` are checked against different committees, so each can pass step 2; the pool bound that would make any two committees overlap is not enforced (S-054, partial — §5.3).
 
 ---
 
@@ -522,15 +533,14 @@ Subsidy is a fixed integer set at genesis — not a curve. Operators choose the 
 
 ## 10. Security Analysis
 
-### 10.1 Heaviest-Chain Consensus and Probabilistic Finality
+### 10.1 Fork freedom
 
-Determ consensus operates under Proof of Sequential Work (PoSW) with Nakamoto-style heaviest-chain fork resolution:
+Producing two valid blocks at the same height requires either:
 
-- When conflicting blocks are produced at the same height, the node adopts the branch maximizing cumulative VDF iterations (`cumulative_vdf_iterations`).
-- An attacker seeking to rewrite history from depth $k$ must compute sequential VDF steps faster than the honest network. For ASIC speedup ratio $ho < 1.45$, the probability of a private attacker chain overtaking the public chain decays exponentially:
-  $$P(\text{reorg at depth } k) \le \exp\left( -k \cdot \frac{(1 - \rho \alpha)^2}{2} \right)$$
-- Strict 2-of-2 Epoch Skipping: If a participant fails to reveal before the 2000ms buzzer, the epoch is dropped fail-closed (`ERR_EPOCH_SKIPPED_INCOMPLETE`). There is no 1-of-2 fallback.
-- Full formal proofs are documented in `docs/proofs/PoSW_Nakamoto_Safety.md` and `docs/proofs/PoSW_Economic_Soundness.md`.
+- The same committee to produce two different digests, then sign each `K`-times — excluded when any committee member follows the honest-signing rule (FA1, [Safety.md](docs/proofs/Safety.md)); or
+- Differing committees at the same height — not excluded by selection: the committee is derived from each block's own `abort_events` (§6), so two blocks with different abort histories are each checked against their own committee. Excluding this case needs the committee-intersection and honest-signing hypotheses of §2; the pool bound `2K > N(h)` is not enforced (S-054, partial — §5.3).
+
+At most one valid block exists at a height only under those hypotheses.
 
 ### 10.2 Censorship resistance
 
@@ -540,7 +550,7 @@ A transaction is omitted from block `n` only if every one of the `K` committee m
 P(tx censored in round n) ≈ (f/N)^K
 ```
 
-With `K = 3` and `f/N = 0.10`: `P ≈ 10⁻³` per round. Since the committee rotates per round, persistent censorship is exponentially unlikely.
+With `K = 3` and `f/N = 0.10`: `P ≈ 10⁻³` per committee draw. The committee is redrawn at each epoch boundary (`epoch_blocks`, genesis-pinned; during epoch 0 at every block) and on abort re-selection, not every round, so a committee that censors can keep doing so until its epoch ends; persistence becomes exponentially unlikely across epochs (§16.6).
 
 ### 10.3 Commitment binding and selective abort
 
@@ -556,9 +566,9 @@ experiment additionally permits colluders to precompute both payloads before sta
 
 **Strong mode (`K = M_pool`)** is the default. Every committee is the entire pool; a single silent creator halts the round.
 
-**Per-height BFT escalation** restores liveness without giving up strong mode's safety on most blocks. The mechanism, configured via genesis-pinned `bft_enabled` (default `true`) and `bft_escalation_threshold` (default 5):
+**Per-height BFT escalation** restores liveness without giving up strong mode's safety on most blocks. The mechanism, configured via genesis-pinned `bft_enabled` (default `true`) and `bft_escalation_threshold` (default 1 since S-045; was 5):
 
-1. **Default state**: each round runs in **MUTUAL_DISTRUST** mode — full K-of-K Phase 2 unanimity, every block is unconditionally fork-free.
+1. **Default state**: each round runs in **MUTUAL_DISTRUST** mode — full K-of-K Phase 2 unanimity; MD blocks are fork-free under the §2 safety assumption (§10.1).
 2. **Trigger** (all four must hold — see PROTOCOL.md §5.3 for the exact gates): `bft_enabled = true` AND in-flight round at height `h` accumulates `bft_escalation_threshold` aborts (Round 1 + Round 2 both count) AND the available pool (registry minus aborted-this-height domains) has dropped below `K` AND the available pool is still ≥ `ceil(2K/3)`. If the available pool falls below `ceil(2K/3)` the shard stalls — there's not enough to form a BFT committee either; under EXTENDED sharding the R4 under-quorum merge mechanism may absorb the shard.
 3. **BFT mode**: committee shrinks to `k_bft = ceil(2K/3)` selected from the available pool. A deterministic **designated proposer** (chosen from the committee via `proposer_idx(seed, abort_events, k_bft)` with `seed = epoch_committee_seed(epoch_rand, shard_id)` plus a 12-byte `"bft-proposer"` ASCII domain separator — see PROTOCOL.md §5.3.1 for the full algorithm) is the only node that builds a block at this height. Phase 1 still requires unanimity within the smaller committee; Phase 2 finalizes on `Q = ceil(2·k_bft/3)` sigs collected by the proposer (the standard BFT 2/3 quorum applied to the shrunk committee, not to the genesis K — the two coincide only at K=3). The block carries `consensus_mode = BFT` and `bft_proposer = <domain>`.
 4. **Reset**: after the escalated block finalizes, height `h+1` resets to MD by default.
@@ -567,14 +577,14 @@ experiment additionally permits colluders to precompute both payloads before sta
 
 | Block type | Safety                                  | Censorship                                |
 |-----------|-----------------------------------------|-------------------------------------------|
-| MD        | **Unconditional** (no honest-fraction assumption — see §2 trust model) | K-conjunction over committee |
-| BFT       | Conditional on `f_h < k_bft/3` in this committee + economic disincentive (`k_bft = ⌈2K/3⌉`) | `k_bft`-conjunction over the smaller committee — the union-tx-root rule covers all `k_bft` Phase-1 contributions; Phase-2 sentinels only affect signing |
+| MD        | Conditional on the §2 safety assumption: an honest signer in the committee plus committee intersection (§10.1) | K-conjunction over committee |
+| BFT       | Conditional on `f_h < k_bft/3` in this committee (`k_bft = ⌈2K/3⌉`) and on the §2 committee-intersection hypothesis | `k_bft`-conjunction over the smaller committee — the union-tx-root rule covers all `k_bft` Phase-1 contributions; Phase-2 sentinels only affect signing |
 
 Applications (and light clients) inspect each block's `consensus_mode` and reason accordingly. High-value transactions can wait for the next MD-mode block; routine transactions accept BFT blocks knowing the weaker safety claim. Most blocks (steady state) are MD; BFT is the tail liveness fallback.
 
 **Suspension**: BFT-mode safety depends on `f_h < k_bft/3` (standard BFT 1/3 bound applied to the BFT-shrunk committee). An `AbortEvent` for round 1 baked into a finalized block records a suspension against the named validator (the S-032 `abort_records` cache: exponential-backoff exclusion from committee selection); it moves no stake — the former `SUSPENSION_SLASH` deduction was retired 2026-09-16 (owner decision D13; the parameter remains as an inert genesis-covered field). Suspension counts only Phase-1 aborts to avoid Phase-2 timing-skew false positives; escalation counts all aborts.
 
-**Opt out**: setting `bft_enabled = false` at genesis disables escalation — the chain halts on a persistent silent committee member, by design. Suitable for deployments that prefer unconditional safety on every block over liveness fallback.
+**Opt out**: setting `bft_enabled = false` at genesis disables escalation — the chain halts on a persistent silent committee member, by design. Suitable for deployments that prefer MD-mode safety (§10.1) on every block over liveness fallback.
 
 ### 10.5 Censorship vs. liveness, side by side
 
@@ -589,7 +599,7 @@ Applications (and light clients) inspect each block's `consensus_mode` and reaso
 
 ### 11.1 Domains (registered, named)
 
-A domain registers via REGISTER with its Ed25519 public key. Domains are listed in chain state and can be inspected by any observer. Domains may stake to become eligible creators; they may also transact (TRANSFER, etc.) under the same key.
+A domain registers via REGISTER with its Ed25519 public key. Domains are listed in chain state and can be inspected by any observer. Under `STAKE_INCLUSION` a domain can stake and transact only while it is in the eligible registry, so a domain registered after genesis cannot become an eligible creator (S-069, §5.2); an eligible domain may also transact (TRANSFER, etc.) under the same key.
 
 ### 11.2 Anonymous accounts (bearer wallets)
 
@@ -614,7 +624,7 @@ The v1.x identity model is sufficient for on-chain action authorization (signing
 
 v2.25 specifies that ceremony as the mutual-distrust IdP of academia.edu/80188125, realized with two improvements over the paper: **OPAQUE in place of SRP**, and a **t-of-n, unordered threshold OPRF** in place of the paper's sequential all-node chain (any t of the K committee members, in any order; no member below t learns the password). RPs register on-chain via v2.18 DAPP_REGISTER; the threshold OPRF authenticates the password and the OPAQUE handshake co-generates a shared key, from which the user proves authentication to the RP by the paper's **dual-hash challenge-response** (`H2 = H(tenant_key, H1')`) carried over v2.19 DAPP_CALL — no committee signature, no FROST, no block co-sign. Full mechanism: `docs/proofs/v2.25-DSSO-DAPP-SPEC.md`.
 
-v2.26 adds an on-chain `ROTATE_KEY` tx so a compromised key can be retired without losing the identity. Both items are specified in `docs/V2-DESIGN.md` Theme 9.
+v2.26 would add an on-chain `ROTATE_KEY` tx so a compromised key can be retired without losing the identity; key rotation is decided (D15 / R-6) but not in code — the shipped `TxType` values are 0..17 and a lost key is terminal for its domain. Both items are specified in `docs/V2-DESIGN.md` Theme 9.
 
 ---
 
@@ -634,13 +644,15 @@ v2.26 adds an on-chain `ROTATE_KEY` tx so a compromised key can be retired witho
 | STATUS_REQUEST | 7 | peer → peer | Sync state probe |
 | STATUS_RESPONSE | 8 | peer → peer | Sync state response (height, genesis hash) |
 | ABORT_CLAIM | 9 | broadcast | S7 Phase-1/2 abort claim (signed) |
-| ABORT_EVENT | 10 | broadcast | Assembled K-1-claim quorum |
-| EQUIVOCATION_EVIDENCE | 11 | broadcast | Two conflicting BlockSig sigs at same height |
+| ABORT_EVENT | 10 | broadcast | Assembled `max(2, K-1)`-claim quorum |
+| EQUIVOCATION_EVIDENCE | 11 | broadcast | Two conflicting signatures (block digests or contrib commitments) at one height |
 | BEACON_HEADER | 12 | beacon → shard | Beacon block for shard-side header-chain |
 | SHARD_TIP | 13 | shard → beacon | Shard block for beacon-side committee verify |
 | CROSS_SHARD_RECEIPT_BUNDLE | 14 | broadcast (relay via beacon) | Source-shard block carrying outbound receipts |
 | SNAPSHOT_REQUEST | 15 | peer → peer | Bootstrap snapshot fetch |
 | SNAPSHOT_RESPONSE | 16 | peer → peer | Serialized chain state for fast-bootstrap |
+| HEADERS_REQUEST | 17 | peer → peer | Header-page request (`from`, `count`) |
+| HEADERS_RESPONSE | 18 | peer → peer | Page of at most 256 DHF1 header records |
 
 ### 12.2 Wire Format
 
@@ -652,10 +664,10 @@ All messages are length-prefixed:
 
 One codec is shipped — the p2p envelope is binary-only (D2, DECISION-LOG 2026-07-28; corrected here 2026-09-14, the text below described the pre-D2 state):
 
-* every body on the wire is the `0xB1` binary envelope (`src/net/binary_codec.cpp`); the legacy text envelope (wire-version 0) and the per-pair HELLO version negotiation were removed pre-genesis, and a non-`0xB1` body is rejected fail-closed.
+* every body on the wire is the `0xB1` binary envelope (`src/net/binary_codec.cpp`); the legacy JSON envelope (wire-version 0) and the per-pair HELLO version negotiation were removed pre-genesis, and a non-`0xB1` body is rejected fail-closed.
 * HELLO still carries a `wire_version` advertisement — with a single shipped version it decides nothing; it is the additive post-genesis upgrade hatch.
 
-Per-type payloads inside the envelope are fixed binary frames for all 19 message types (PROTOCOL.md §9.1): since D2 inc7c (2026-09-16) HEADERS_RESPONSE is a page of DHF1 header records and SNAPSHOT_RESPONSE is the DSN1 snapshot record verbatim, the length-prefixed text fallback is deleted, and a message type the codec cannot encode or decode is rejected rather than serialized as text.
+Per-type payloads inside the envelope are fixed binary frames for all 19 message types (PROTOCOL.md §9.1): since D2 inc7c (2026-09-16) HEADERS_RESPONSE is a page of DHF1 header records and SNAPSHOT_RESPONSE is the DSN1 snapshot record verbatim, the length-prefixed JSON fallback is deleted, and a message type the codec cannot encode or decode is rejected rather than serialized as JSON.
 
 S-022 per-message-type body caps apply at deserialize time regardless of codec: 1 MB for consensus chatter, 4 MB for blocks/headers/bundles, 16 MB only for SNAPSHOT_RESPONSE / CHAIN_RESPONSE. The 16 MB framing-layer ceiling (`kMaxFrameBytes`) is enforced at read time before the per-type check.
 
@@ -669,9 +681,9 @@ A node behind on chain state enters SYNC mode: it does not contribute to consens
 
 ### 12.5 Egress Bounds and Sync Safety
 
-- **Bounded Peer Egress Queue (S-082):** To defend against memory exhaustion attacks from slow, unresponsive, or stalled peers, each peer's outbound buffer is capped at `MAX_PEER_WRITE_QUEUE = 256` items. If a peer accumulates 256 pending messages without reading, further enqueues are rejected and the TCP connection is closed immediately (`conn_->close()`). Write queues are flushed on I/O disconnects.
-- **Sync Storm Suppression & Lead Bound (S-080 / S-085):** A node caps peer-advertised height claims at `MAX_SYNC_LEAD = 100,000` above local tip to prevent astronomical range-request resource exhaustion. Chain sync requests (`GET_CHAIN`) are directed unicast to the single highest-height peer, and repeated sync queries are rate-limited with a 5-second in-flight dampener to prevent request storms during reorganization or catchup.
-- **Light-Client Quorum Floor on Inclusion Proofs (S-100):** Light clients verifying transaction inclusion (`verify_tx_inclusion_from_block`) enforce the full quorum floor (`k_block_sigs`), rejecting inclusion blocks that fail to demonstrate the required quorum.
+- **Bounded Peer Egress Queue (S-082, partial):** each peer's outbound queue holds at most `MAX_PEER_WRITE_QUEUE = 256` frames. An enqueue at that depth closes the connection (`conn_->close()`) instead of growing the queue, and a write error clears it. The bound counts frames, not bytes (one frame may be up to 16 MB, §12.2); an accepted socket joins the broadcast set before its HELLO; and the number of connections is not capped.
+- **Sync requests (S-080, S-085 open):** a node that is behind broadcasts `GET_CHAIN` to all peers and takes the first response (§12.4), with no in-flight bound or backoff, and it records the height a peer reports in `STATUS_RESPONSE` with no plausibility bound.
+- **Light-Client Quorum Floor on Inclusion Proofs (S-100):** `verify_tx_inclusion_from_block` passes the genesis `k_block_sigs` and `bft_enabled` to `verify_block_sigs`, so the inclusion block must name exactly `k_block_sigs` creators (MD) or, only when `bft_enabled`, exactly `ceil(2K/3)` (BFT); a reduced-quorum block is rejected as unverifiable.
 
 ---
 
@@ -679,11 +691,11 @@ A node behind on chain state enters SYNC mode: it does not contribute to consens
 
 | Parameter | Default | Notes |
 |---|---|---|
-| `m_creators` (M_pool) | 3 (web profile) | Genesis-pinned. Per-profile M in §13.1 |
-| `k_block_sigs` (K) | 2 (web profile, hybrid K<M) | Genesis-pinned. Only `cluster` is strong (K=M); `web`/`regional`/`global` are hybrid. Per-profile K in §13.1 |
+| `m_creators` (M_pool) | 4 (web profile) | Genesis-pinned. Per-profile M in §13.1 |
+| `k_block_sigs` (K) | 3 (web profile, hybrid K<M) | Genesis-pinned. `cluster` and `tactical` are strong (K=M); `web`/`regional`/`global` are hybrid. Per-profile K in §13.1 |
 | `block_subsidy` | 10 (atomic, by genesis convention) | Genesis-pinned, page reward. No code-level default — operator sets it in `GenesisConfig`; `tools/test_*.sh` use 10 |
 | `bft_enabled` | true | Genesis-pinned. Enables per-height BFT escalation (§10.4) |
-| `bft_escalation_threshold` | 5 | Genesis-pinned. Total aborts at same height before escalation |
+| `bft_escalation_threshold` | 1 | Genesis-pinned. Total aborts at same height before escalation (S-045; was 5) |
 | `SUSPENSION_SLASH` | 10 (atomic) | Inert since 2026-09-16 (D13): no stake is deducted on an abort; kept as a genesis-hash-covered field |
 | `tx_commit_ms` | 200 | Phase 1 timer |
 | `block_sig_ms` | 200 | Phase 2 timer |
@@ -702,7 +714,7 @@ A profile is a **complete deployment archetype**: timing, committee size, chain 
 | Profile | M | K | block time | role | sharding_mode | crypto | confidential tx | Primary use case |
 |---|---|---|---|---|---|---|---|---|
 | **`cluster`** | 3 | 3 (strong) | ~125 ms | BEACON | CURRENT | **FIPS** | ❌ | **In-house enterprise, financial services, banking settlement, regulated single-org chains, single-org CBDC, HIPAA-strict healthcare** |
-| `web` (default) | 3 | 2 (hybrid) | ~500 ms | SHARD | EXTENDED | MODERN | ✅ | Public-internet, regional shards, commercial single-cluster non-FIPS, regulated gambling, B2B payment |
+| `web` (default) | 4 | 3 (hybrid) | ~500 ms | SHARD | EXTENDED | MODERN | ✅ | Public-internet, regional shards, commercial single-cluster non-FIPS, regulated gambling, B2B payment |
 | `regional` | 5 | 4 (hybrid) | ~750 ms | SHARD | CURRENT | MODERN | ✅ | Regional / continental RTT, state lottery, multi-region commercial |
 | `global` | 7 | 5 (hybrid) | ~1.5 s | BEACON | EXTENDED | MODERN | ✅ | Inter-continental hub-and-spoke, international CBDC federation |
 | **`tactical`** | 3 | 3 (strong) | ~50 ms | SHARD | EXTENDED | **FIPS** | ❌ | **Military, defense, drone swarm, embedded mobile units, DoD deployments** |
@@ -721,7 +733,7 @@ See `docs/proofs/CRYPTO-C99-SPEC.md` §2.Q10 for full cryptographic-profile rati
 |---|---|---|---|---|---|
 | `single_test` | 3 | 3 (strong) | SINGLE | NONE | MODERN |
 | `cluster_test` | 3 | 3 (strong) | BEACON | CURRENT | **FIPS** |
-| `web_test` | 3 | 2 (hybrid) | SHARD | EXTENDED | MODERN |
+| `web_test` | 4 | 3 (hybrid) | SHARD | EXTENDED | MODERN |
 | `regional_test` | 5 | 4 (hybrid) | SHARD | CURRENT | MODERN |
 | `global_test` | 7 | 5 (hybrid) | BEACON | EXTENDED | MODERN |
 | `tactical_test` | 3 | 3 (strong) | SHARD | EXTENDED | **FIPS** |
@@ -739,7 +751,7 @@ Block time approaches `T_phase_1 + T_phase_2 + 2 × max RTT in committee` once t
 
 ### 14.1 Bitcoin (Nakamoto Consensus)
 
-PoW longest-chain. Probabilistic finality, energy-intensive, fork-prone. Determ is registration-gated PoSW with Heaviest-Chain cumulative VDF iterations and probabilistic Nakamoto finality.
+PoW longest-chain. Probabilistic finality, energy-intensive, fork-prone. Determ is registration-gated and finalizes each block by committee signatures; its fork-freedom holds under the §2 safety assumption (§10.1), not unconditionally.
 
 ### 14.2 Ethereum (Gasper)
 
@@ -773,38 +785,38 @@ Iterated-SHA-256 Proof of History for sequencing + Tower BFT for finality laggin
 
 **Network partition behavior.** A partition that splits the committee blocks progress on both sides until it heals (modulo BFT escalation, which can finalize a side with `ceil(2K/3)` honest committee members). Appropriate for a financial ledger (CP, not AP). Under `EXTENDED` sharding a region losing connectivity to the rest of the world stalls cross-shard receipts; in-shard production continues.
 
-**Binary wire codec — shipped and mandatory (A3 / S8, then D2).** The `0xB1` binary envelope (`src/net/binary_codec.cpp`) is the only codec on the wire; the legacy text envelope and the HELLO codec negotiation were deleted pre-genesis (DECISION-LOG 2026-07-28, commit ce31c6f). HELLO keeps a `wire_version` advertisement as the additive post-genesis upgrade hatch. PROTOCOL.md §9.1 has the per-type frame layouts. (Corrected 2026-09-14.)
+**Binary wire codec — shipped and mandatory (A3 / S8, then D2).** The `0xB1` binary envelope (`src/net/binary_codec.cpp`) is the only codec on the wire; the legacy JSON envelope and the HELLO codec negotiation were deleted pre-genesis (DECISION-LOG 2026-07-28, commit ce31c6f). HELLO keeps a `wire_version` advertisement as the additive post-genesis upgrade hatch. PROTOCOL.md §9.1 has the per-type frame layouts. (Corrected 2026-09-14.)
 
-**Light clients.** Inclusion-proof RPC (`state_proof`) is shipped via the v2.2 foundation — light clients query a full node for a Merkle proof of any state entry against the current `state_root` (which is bound into `signing_bytes` and committee-signed). CLI `determ state-proof --ns <a|s|r|d|b|k|c> --key <name>` fetches a proof; the `d` namespace surfaces v2.18 DApp-registry entries. **Local verification of fetched proofs** is provided by `determ verify-state-proof --in proof.bin [--state-root <trusted-hex64>]` which calls `crypto::merkle_verify` without trusting the responding node — the optional `--state-root` flag pins an externally-trusted root, defeating a malicious full node that fabricates a fake root to make its tampered proof self-consistent. **Snapshot-level trustless verification** by the same anti-tampering pin is `determ snapshot inspect --in snap.bin --state-root <trusted-hex64>` (S-033 + S-038 gates verify the snapshot's whole state Merkle against the operator's pinned root). **Header-only sync** is the `headers` RPC + `determ headers --from N --count M` CLI: returns block-header slices (Block structure minus the heavy `transactions` / receipt / `initial_state` fields, plus an explicit `block_hash` per header), so a light client can chain prev_hash → state_root → state-proof without downloading every tx. The CLI accepts **two fetch paths**: `--rpc-port P` (against a local node's RPC) or `--peer host:port` (gossip-layer **`HEADERS_REQUEST`** / **`HEADERS_RESPONSE`** wire messages, MsgType 17/18 — light clients peer directly with full nodes without RPC binding). The envelope is byte-identical across both paths, so every downstream verifier works against either fetch source. **Header-chain integrity** is verified locally via `determ verify-headers --in headers.bin [--genesis-hash <hex64>] [--prev-hash <hex64>]`: walks consecutive header pairs and asserts `header[i].prev_hash == header[i-1].block_hash`. **K-of-K committee-signature verification** on each header is `determ verify-block-sigs --header <file> --committee <file> [--bft]`: computes `compute_block_digest(b)` over the header fields and verifies each `creators[i]`'s `creator_block_sigs[i]` against a supplied committee pubkey map; the `committee` file is a array of `{domain, ed_pub}` (same shape the `committee` / `validators` RPCs internally produce). Together these four CLIs constitute the complete v2.2 light-client trustless-verification chain: `headers` (fetch from RPC OR peer-gossip) → `verify-headers` (chain links) → `verify-block-sigs` (committee K-of-K) → anchor `state_root` → `verify-state-proof` / `snapshot inspect --state-root` (per-field / whole-state). **v2.2 has no outstanding asks** — the gossip-layer HEADERS_REQUEST/HEADERS_RESPONSE wire messages closed the last v2.2 piece.
+**Light clients.** Inclusion-proof RPC (`state_proof`) is shipped via the v2.2 foundation — light clients query a full node for a Merkle proof of any state entry against the current `state_root` (which is bound into `signing_bytes` and committee-signed). CLI `determ state-proof --ns <a|s|r|d|b|k|c> --key <name>` fetches a proof; the `d` namespace surfaces v2.18 DApp-registry entries. **Local verification of fetched proofs** is provided by `determ verify-state-proof --in proof.json [--state-root <trusted-hex64>]` which calls `crypto::merkle_verify` without trusting the responding node — the optional `--state-root` flag pins an externally-trusted root, defeating a malicious full node that fabricates a fake root to make its tampered proof self-consistent. **Snapshot-level trustless verification** by the same anti-tampering pin is `determ snapshot inspect --in snap.bin --state-root <trusted-hex64>` (S-033 + S-038 gates verify the snapshot's whole state Merkle against the operator's pinned root). **Header-only sync** is the `headers` RPC + `determ headers --from N --count M` CLI: returns block-header slices (Block JSON minus the heavy `transactions` / receipt / `initial_state` fields, plus an explicit `block_hash` per header), so a light client can chain prev_hash → state_root → state-proof without downloading every tx. The CLI accepts **two fetch paths**: `--rpc-port P` (against a local node's RPC) or `--peer host:port` (gossip-layer **`HEADERS_REQUEST`** / **`HEADERS_RESPONSE`** wire messages, MsgType 17/18 — light clients peer directly with full nodes without RPC binding). The envelope is byte-identical across both paths, so every downstream verifier works against either fetch source. **Header-chain integrity** is verified locally via `determ verify-headers --in headers.json [--genesis-hash <hex64>] [--prev-hash <hex64>]`: walks consecutive header pairs and asserts `header[i].prev_hash == header[i-1].block_hash`. **K-of-K committee-signature verification** on each header is `determ verify-block-sigs --header <file> --committee <file> [--bft]`: computes `compute_block_digest(b)` over the header fields and verifies each `creators[i]`'s `creator_block_sigs[i]` against a supplied committee pubkey map; the `committee` file is a JSON array of `{domain, ed_pub}`, or an object with that array under `members` (the shape the `committee` / `validators` RPCs internally produce). Together these four CLIs constitute the complete v2.2 light-client trustless-verification chain: `headers` (fetch from RPC OR peer-gossip) → `verify-headers` (chain links) → `verify-block-sigs` (committee K-of-K) → anchor `state_root` → `verify-state-proof` / `snapshot inspect --state-root` (per-field / whole-state). **v2.2 has no outstanding asks** — the gossip-layer HEADERS_REQUEST/HEADERS_RESPONSE wire messages closed the last v2.2 piece.
 
 **Distributed identity provider (DSSO).** The K-of-K committee is structurally a mutual-distrust operator group — the exact setting of *Identity provider in an environment of mutual distrust* (academia.edu/80188125). v2.25 + v2.26 (V2-DESIGN.md Theme 9) realize that paper's IdP as a "Sign-In With Determ" flow with two improvements: **OPAQUE in place of the paper's SRP**, and a **t-of-n, unordered threshold OPRF** in place of the paper's sequential all-node chain. RPs register via v2.18 DAPP_REGISTER; challenges and the paper's hash-challenge-response token ride v2.19 DAPP_CALL. The ceremony uses only already-shipped primitives (Ed25519, the P-256 RFC 9497 OPRF §3.9b, SHA-256/HKDF, DAPP_REGISTER/DAPP_CALL), needs **no threshold signature** and **no FROST**, and pairs with v2.26 on-chain key rotation. Full mechanism: `docs/proofs/v2.25-DSSO-DAPP-SPEC.md`; `docs/V2-DESIGN.md` Theme 9 retains the architectural narrative.
 
-**Equivocation handling — fully closed-loop:**
+**Equivocation handling — detection and on-chain record:**
 
-The disincentive depends on the chain's governance model (§5.1):
+The disincentive depends on the chain's inclusion model (§5.1):
 
 - **`STAKE_INCLUSION`** chains: a Phase-1 abort records a suspension and deducts nothing (the `SUSPENSION_SLASH` deduction was retired 2026-09-16, D13). Equivocation carries **no** L1 consequence since 2026-09-16 (O-1 step 3a; DECISION-LOG D4) — the `EquivocationEvent` is an evidence record for the L2 policy.
 - **`DOMAIN_INCLUSION`** chains: a Phase-1 abort likewise records a suspension only. Equivocation carries no L1 consequence here either (D4) — the record is the L2 policy's input.
 
-Both modes use the same `EquivocationEvent` evidence structure (two Ed25519 signatures by the same registered key over two different `block_digest`s at the same `block_index` — unambiguous proof of double-signing) and the same end-to-end pipeline:
+Both modes use the same `EquivocationEvent` evidence structure (two Ed25519 signatures by the same registered key over two different digests — block digests or contrib commitments — at the same `block_index` and round generation; proof that the key signed twice, though an honest node restarted by the stall valve can also produce such a pair, S-095) and the same end-to-end pipeline:
 
 The full pipeline:
 
 1. **Detection** (`apply_block_locked`): when a duplicate-height BFT block with a different hash arrives, the assembler computes both blocks' digests, extracts the proposer's signatures from each block's `creator_block_sigs`, and constructs an `EquivocationEvent`.
 2. **Gossip** (`EQUIVOCATION_EVIDENCE`, msg type 11): the event is broadcast so peers can validate independently and pool the evidence.
 3. **Pool** (`Node::pending_equivocation_evidence_`): each node maintains a pool of unbaked evidence. Peers receiving gossiped evidence validate the two-sig proof against the equivocator's registered key before adding.
-4. **Production** (`build_body`): producers include the evidence pool in `block.equivocation_events` when building the next block.
-5. **Validator** (`check_equivocation_events`): rejects malformed events (digests equal, sigs equal, equivocator not in registry, sigs don't verify against the registered key).
+4. **Production** (`build_body`): producers include pooled evidence that the verifier's per-event rule admits (S-105) in `block.equivocation_events`, deduplicated, sorted by event hash and truncated to `EQUIVOCATION_EVENTS_PER_BLOCK_MAX = 16`.
+5. **Validator** (`check_equivocation_events`): rejects a block carrying more than 16 events or a duplicate event (O-1 step 3b), and any malformed event (unknown kind, mismatched heights or round generations, equal body roots, equal sigs, equivocator not in registry, sigs that don't verify against the digests derived from the openings).
 6. **Apply** (`apply_transactions`): each `EquivocationEvent` is committed as an on-chain record and nothing else — no stake, registry or counter movement (D4, 2026-09-16; `determ test-equivocation-apply`).
-7. **Dedup**: after a block bakes evidence, that equivocator's entries are removed from the pending pool (no double-baking).
+7. **Dedup**: after a block bakes evidence, that equivocator's entries are removed from the pending pool. The verifier's duplicate rule is per block, so a later block can carry the same event again.
 
-BFT-mode safety claims are conditional on `f_h < k_bft/3` within the BFT committee and on nothing else; the accountable-safety corollary that rested on slashing (T-5.1) was WITHDRAWN on 2026-09-17 — above the bound the offenders are identifiable and nothing removes them, so accountable safety here is evidence-only (`docs/proofs/BFTSafety.md` §4).
+BFT-mode safety claims are conditional on `f_h < k_bft/3` within the BFT committee (and, like every same-height claim, on the §2 committee-intersection hypothesis) and on no economic term; the accountable-safety corollary that rested on slashing (T-5.1) was WITHDRAWN on 2026-09-17 — above the bound the offenders are identifiable and nothing removes them, so accountable safety here is evidence-only (`docs/proofs/BFTSafety.md` §4).
 
 ---
 
 ## 16. Sharding
 
-A sharded Determ deployment splits responsibility into a single **beacon chain** and `S` **shard chains**, each running the same two-phase commit-reveal consensus on its own state subset. The beacon is the trust anchor: it holds the validator pool, slashing records, cross-shard receipts, and epoch transitions. Shards process user transactions for accounts assigned to them.
+A sharded Determ deployment splits responsibility into a single **beacon chain** and `S` **shard chains**, each running the same two-phase commit-reveal consensus on its own state subset. The beacon is the trust anchor: it holds the validator pool, cross-shard receipts, and epoch transitions. Shards process user transactions for accounts assigned to them.
 
 The `ShardingMode` axis (pinned per profile) selects the topology:
 
@@ -828,7 +840,7 @@ The `ShardingMode` axis (pinned per profile) selects the topology:
      └────────┘  └────────┘    └─────────┘
 ```
 
-The beacon runs MD K-of-K only (no escalation; halts on persistent silent committee member). Shards run MD-default with per-height BFT escalation. Asymmetry rationale: the beacon is the trust anchor — strong unconditional safety on every beacon block, low volume, halt-recoverable. Shards are the throughput layer — needs liveness more than censorship in steady state.
+The beacon runs MD K-of-K only (no escalation; halts on persistent silent committee member). Shards run MD-default with per-height BFT escalation. Asymmetry rationale: the beacon is the trust anchor — MD-mode safety (§10.1) on every beacon block, low volume, halt-recoverable. Shards are the throughput layer — needs liveness more than censorship in steady state.
 
 Under `EXTENDED` sharding each shard additionally pins a `committee_region` (operator-defined string, e.g. `"us-east"`, `"eu-west"`). Validators self-declare their region at REGISTER time; the committee for shard `s` is drawn only from validators tagged with `s.committee_region`. The trade is that per-shard censorship resistance becomes regional rather than global — see §16.6.
 
@@ -841,7 +853,7 @@ shard_seed = SHA-256(beacon_epoch_seed ‖ "shard-committee" ‖ shard_id)
 shard_committee[s] = select_m_creators(shard_seed, validator_pool_size, K_per_shard)
 ```
 
-The same `select_m_creators` function used in single-chain mode. The salt makes shards' committees independent. The commit-reveal seed binding (§10.3) prevents adversaries from grinding stake placement: the K committed secrets that determine the next epoch's seed are not revealed until the current epoch's blocks finalize.
+The same `select_m_creators` function used in single-chain mode. The salt makes shards' committees independent. The commit-reveal seed binding (§10.3) keeps the seed unknown while stake is placed: the K committed secrets that determine the next epoch's seed are not revealed until the current epoch's blocks finalize. It does not stop a last revealer from withholding an unfavorable outcome (§10.3, S-077).
 
 ### 16.3 Account-to-shard assignment
 
@@ -864,7 +876,7 @@ Cross-shard finality: `~3 × shard block time`. In-shard: `~1 × shard block tim
 
 ### 16.5 Regional sharding (`EXTENDED` mode)
 
-Under `EXTENDED` sharding each shard's genesis pins a `committee_region`. Validators self-declare a `region` at REGISTER time (UTF-8 string, ≤32 bytes — opaque to the protocol). The committee for shard `s` is drawn deterministically from the registry subset matching `s.committee_region`.
+Under `EXTENDED` sharding each shard's genesis pins a `committee_region`. Validators self-declare a `region` at REGISTER time (≤ 32 bytes of `[a-z0-9-_]`, see the region taxonomy below; its meaning is opaque to the protocol). The committee for shard `s` is drawn deterministically from the registry subset matching `s.committee_region`.
 
 **Why this exists.** Per-block finality is bounded by `2 × max RTT in committee` (§13.1). Globally-distributed K-committees inherit transcontinental RTT (~150 ms one-way → ~500 ms+ blocks). Regional committees collapse this to intra-region RTT (~5-15 ms → ~125-250 ms blocks).
 
@@ -895,7 +907,7 @@ Closed deployments (consortium, enterprise) commonly use custom labels (`bank-cl
 REGISTER payload = [pubkey: 32B] [region_len: u8] [region: utf8 bytes]
 ```
 
-Legacy payload (`region_len = 0`, no trailing bytes) is wire-compatible — it means "global pool", which is the implicit default for non-`EXTENDED` chains. New `EXTENDED` deployments set the region explicitly. The tx's own Ed25519 signature binds the region into the tx hash via `Transaction::signing_bytes()`.
+The legacy payload (the bare 32-byte pubkey, no `region_len` byte) is accepted — it means "global pool", which is the implicit default for non-`EXTENDED` chains; a `region_len` byte with no region bytes after it is rejected as truncated. New `EXTENDED` deployments set the region explicitly. The tx's own Ed25519 signature binds the region into the tx hash via `Transaction::signing_bytes()`.
 
 `shard_id_for_address` is unchanged: `first_8_bytes_be(SHA-256(genesis_salt ‖ addr)) % S`. Account-region affinity is application-level — addresses can be ground for a target shard if locality matters.
 
@@ -913,9 +925,9 @@ Per-block trust is observable via `consensus_mode`:
 
 | Block | Safety | Censorship |
 |---|---|---|
-| Beacon | Unconditional (MD-only, no escalation) | K-conjunction over beacon committee |
-| Shard MD | Unconditional (MD steady-state) | K-conjunction over shard committee |
-| Shard BFT | Conditional `f_h < k_bft/3` + slashing | `k_bft`-conjunction over shard BFT committee (Phase-1 union-tx-root applies; Phase-2 sentinels affect signing only) |
+| Beacon | MD-mode, conditional on the §2 safety assumption (MD-only, no escalation) | K-conjunction over beacon committee |
+| Shard MD | MD-mode, conditional on the §2 safety assumption (MD steady-state) | K-conjunction over shard committee |
+| Shard BFT | Conditional `f_h < k_bft/3` and the §2 committee-intersection hypothesis | `k_bft`-conjunction over shard BFT committee (Phase-1 union-tx-root applies; Phase-2 sentinels affect signing only) |
 
 Applications choose which blocks they trust. Most blocks (steady state) are MD on both layers; BFT shard blocks are the tail-liveness fallback when a shard would otherwise stall.
 
@@ -936,7 +948,7 @@ Safety preservation is proven in `docs/proofs/UnderQuorumMerge.md` (FA9).
 
 ## 17. Scope
 
-Determ's design intent is intentionally narrow: a **pure C99 PoSW L1 payment + identity chain with probabilistic finality with mutual-distrust safety**. It is not trying to be Ethereum, not trying to be a DApp hosting platform, not trying to host arbitrary computation. This section names what fits, what doesn't, and what's deliberately out of scope.
+Determ's design intent is intentionally narrow: a **fork-free L1 payment + identity chain with mutual-distrust safety**. It is not trying to be Ethereum, not trying to be a DApp hosting platform, not trying to host arbitrary computation. This section names what fits, what doesn't, and what's deliberately out of scope.
 
 ### 17.1 What Determ is built for
 
@@ -945,7 +957,7 @@ Determ's design intent is intentionally narrow: a **pure C99 PoSW L1 payment + i
 - **Canonical Encrypted DApp Messaging.** Lightweight DApp service discovery and encrypted payload delivery (`DAPP_REGISTER`, `DAPP_CALL`) without VM execution overhead.
 - **Post-Quantum Bearer Payments.** Opt-in ML-DSA (FIPS 204) authenticated transfers (`PQ_TRANSFER`) coexisting seamlessly with classical Ed25519 accounts.
 - **Confidential Transfers & Audit Trails.** Amount-private payments via Pedersen commitments and Bulletproofs range proofs (`SHIELD`, `UNSHIELD`, `CONFIDENTIAL_TRANSFER`) coupled with on-chain dual-mode audit key rotation and disclosure logging (`ROTATE_AUDIT_KEY`, `LOG_AUDIT_ACCESS`, `REGISTER_NOTE_KEY`).
-- **Validator pool with cryptoeconomic accountability.** Validators register on-chain, can be staked or domain-anchored (§5.1). Misbehavior is detectable, slashable, and self-defeating regardless of adversary fraction (so long as ≥1 rule-following validator remains in the registry).
+- **Validator pool with on-chain accountability.** Validators register on-chain, can be staked or domain-anchored (§5.1). Misbehavior is detectable and recorded: a Phase-1 abort suspends the absent member from selection, and equivocation is kept as an on-chain evidence record. L1 slashes nothing — no stake deduction on aborts (D13) and no stake or registry consequence for equivocation (D4); the L2 bond policy that is to consume the record (D22) is not yet designed.
 - **Two-tier identity.** Registered domains (named, on-chain, eligible to validate) plus anonymous bearer-wallet accounts (Ed25519-pubkey-derived addresses; any user can self-issue). Both share the same balance/nonce namespace.
 - **Page-reward system.** Genesis-pinned `block_subsidy` minted per block, split across the committee with fees.
 - **Per-height BFT escalation.** Default mutual-distrust K-of-K; falls back to BFT `ceil(2K/3)` + designated proposer when the eligible pool can't form K-of-K and the abort threshold has been met. Per-block `consensus_mode` tag lets observers reason about per-block trust.
@@ -988,7 +1000,7 @@ Calling Determ a "DApp hosting network" misrepresents what it is. Calling it a "
 - Federated registries where domain-anchored validators provide identity and the chain provides ordering + auditability.
 - Regional payment networks (`EXTENDED` sharding) where in-shard sub-second finality matters and operators are explicit about regional trust assumptions.
 
-If you need contracts, build them on a different chain or build a layer-2 on top of Determ. The base protocol's job is to be very good at one narrow thing — fork-free payment + identity with cryptoeconomic safety — not to be everything.
+If you need contracts, build them on a different chain or build a layer-2 on top of Determ. The base protocol's job is to be very good at one narrow thing — fork-free payment + identity with mutual-distrust safety — not to be everything.
 
 ---
 
@@ -1027,28 +1039,23 @@ A lost Ed25519 private key today means permanent loss of the registered domain a
 - Loss of any (N − T) of N guardians (threshold reconstruction survives partial unavailability).
 - Compromise of any (T − 1) guardians (information-theoretic: zero bits of the seed leak below threshold).
 - Tampering with any individual envelope (AEAD detects single-bit modifications with probability ≥ 1 − 2⁻¹²⁸).
-- Casual inspection of a captured envelope (the PBKDF2 work factor raises the cost of an offline password grind; note that with the passphrase scheme an isolated record remains offline-grindable, so passwords must carry real entropy).
+- Casual inspection of a captured envelope (the memory-hard Argon2id work factor raises the cost of an offline password grind; note that with the passphrase scheme an isolated record remains offline-grindable, so passwords must carry real entropy).
 
 **Layered design.** Each layer addresses a distinct threat:
 
 1. **Shamir SSS over GF(2⁸)** — splits the Ed25519 seed into N shares; any T reconstruct, any T − 1 reveal nothing.
 2. **AEAD envelope (AES-256-GCM)** — wraps each share with a per-envelope salt + nonce; AAD binds guardian index + scheme version.
-3. **Passphrase key derivation (PBKDF2)** — under the `passphrase` scheme, each envelope's unwrap key is PBKDF2-derived (HMAC-SHA-256) from the user's password and the per-envelope salt.
+3. **Passphrase key derivation (Argon2id)** — under the `passphrase` scheme, each envelope's unwrap key is derived with Argon2id (t = 3, 64 MiB; the DWE2 envelope layout) from the user's password and the per-envelope salt. Envelopes in the older PBKDF2 layout (DWE1) remain readable.
 
-**Wire format.** A recovery setup is a single self-contained record document:
+**At-rest format.** A recovery setup is one canonical binary DRS1 container (D2; layout in `wallet/recovery.hpp`, integers little-endian, decoded only at its exact length):
 
 ```text
-{
-  "version": 1,
-  "scheme": "shamir-aead-passphrase-pbkdf2-v1",
-  "threshold": 3,
-  "share_count": 5,
-  "secret_len": 32,
-  "guardian_x": [1, 2, 3, 4, 5],
-  "envelopes": ["DWE1.<salt>.<iters>.<nonce>.<aad>.<ct>", ...],
-  "pubkey_checksum": "<sha256(ed25519_pubkey(seed))>"
-}
+"DRS1" | version u32 (= 1) | threshold u8 (>= 1) | share_count u8 (>= threshold)
+       | secret_len u32 (1..4096) | checksum_len u8 (0 or 32) | pubkey_checksum
+       | share_count x { guardian_x u8 (1..255, distinct) | env_len u32 | DWE envelope bytes }
 ```
+
+`pubkey_checksum` is the SHA-256 of the seed's Ed25519 public key and is re-checked after reconstruction.
 
 The setup is fully portable — it carries everything needed for threshold reconstruction (modulo the user knowing the password and having access to ≥ T envelopes).
 
@@ -1070,7 +1077,7 @@ determ-wallet recover --in <file>                  Reconstruct the seed
                       [--guardians <i,j,k,...>]
 ```
 
-**Wallet crypto status.** `determ-wallet` is libsodium-free: every crypto layer runs on the daemon's `determ::c99` stack (Ed25519, X25519, SHA-256, Argon2id) plus the determ::c99 cryptographic backend — the same library posture as the `determ` daemon and `determ-light`, neither of which ever linked libsodium. Recovery ships the `passphrase` scheme only (Shamir SSS + PBKDF2-derived AEAD envelopes); there is no OPAQUE adapter or threshold-guardian handshake in the wallet. See `docs/proofs/WalletRecovery.md` (FA12) for the formal-soundness analysis of the passphrase scheme.
+**Wallet crypto status.** `determ-wallet` is libsodium-free: every crypto layer runs on the daemon's `determ::c99` stack (Ed25519, X25519, SHA-256, Argon2id) plus the determ::c99 cryptographic backend — the same library posture as the `determ` daemon and `determ-light`, neither of which ever linked libsodium. Recovery ships the `passphrase` scheme only (Shamir SSS + Argon2id-derived AEAD envelopes); there is no OPAQUE adapter or threshold-guardian handshake in the wallet. See `docs/proofs/WalletRecovery.md` (FA12) for the formal-soundness analysis of the passphrase scheme.
 
 **Binary isolation.** `determ-wallet` is a separate executable from the `determ` daemon. Secret material never enters the chain daemon's address space — by design. The daemon handles networking and consensus; the wallet handles keys.
 
@@ -1082,14 +1089,14 @@ Determ's safety-critical mechanisms are covered by per-property analytic proofs 
 
 | Layer | Coverage |
 |---|---|
-| **FA-track** (analytic proofs) | F0 Preliminaries + FA1–FA12: safety, censorship, selective-abort, liveness, BFT-mode safety, slashing soundness, cross-shard atomicity, regional sharding, under-quorum merge, governance, economic soundness, wallet recovery. |
-| **FB-track** (TLA+ specs) | Consensus.tla, Sharding.tla, Receipts.tla + CHECK-RESULTS.md. Model-check transcripts pending TLC installation in CI; specs ready for local validation. |
-| **Test suite** (CI regression) | 329 test wrappers in `tools/ci_local.sh`, 0 failures, multi-platform coverage (Linux, macOS, Windows). |
-| **Integrity guards** (docs/ledger) | 16 automated doc, tier, link, and ledger-coherence checks gating every commit. |
+| **FA-track** (analytic proofs) | F0 Preliminaries + FA1–FA12: safety, censorship, selective-abort (FA3's completed-round unbiasedness claim is withdrawn; S-077 open), liveness, BFT-mode safety, equivocation-evidence soundness, cross-shard atomicity, regional sharding, under-quorum merge, governance, economic soundness, wallet recovery. |
+| **FB-track** (TLA+ specs) | Consensus.tla, Sharding.tla, Receipts.tla. [CHECK-RESULTS.md](docs/proofs/tla/CHECK-RESULTS.md) records the last TLC run (tla2tools v1.7.4, 2026-09-23), in which all 48 configured models passed — Consensus as the C++ K-of-K committee model (FB1). TLC runs in CI (the `tla` job); `tools/test_tla_model_check.sh` fails closed when java or a pinned jar is absent. |
+| **Test suite** (CI regression) | The FAST suite (`tools/run_all.sh`, `FAST=1`), run by `tools/ci_local.sh`; the CI workflow runs it on Linux and Windows. The C99 targets have their own gate (`tools/ci_local.sh --c99`, `--c99-sanitize`, `--c99-mutants`). |
+| **Integrity guards** (docs/ledger) | Offline doc, tier, link, citation and ledger-coherence checks, run by `tools/ci_local.sh` (standalone: `--docs-only`) in CI. |
 
-Every theorem cites its cryptographic assumptions (A1 Ed25519 EUF-CMA, A3 SHA-256 collision resistance, A4 SHA-256 preimage resistance, A5 SHA-256 as random oracle), the validity predicates it depends on (V1–V15 from F0; V12/V13 are the cross-shard receipt source/destination split, V14 is the timestamp bound, V15 is transaction apply consistency), and the source-code location that enforces it. A reviewer can trace any property end-to-end: theorem → state-machine model → implementation.
+Every theorem cites its cryptographic assumptions by the F0 labels (A1 Ed25519 EUF-CMA, A2 SHA-256 collision resistance, A3 SHA-256 preimage / second-preimage resistance, A4 CSPRNG uniform secret sampling; a theorem that models SHA-256 as a random oracle says so explicitly), the validity predicates it depends on (V1–V15 from F0; V12/V13 are the cross-shard receipt source/destination split, V14 is the timestamp bound, V15 is transaction apply consistency), and the source-code location that enforces it. A reviewer can trace any property end-to-end: theorem → state-machine model → implementation.
 
-Concrete-security bounds: every property holds with probability `≥ 1 − Q · 2⁻¹²⁸` over polynomial adversary budget `Q`. Under Grover (post-quantum), bounds degrade to `Q · 2⁻⁶⁴` for Ed25519 — operationally secure, and a **post-quantum signature path is now available**: an opt-in **`PQ_TRANSFER`** whose sender is a PQ-native bearer account bound to an **ML-DSA (Dilithium, FIPS 204)** key (CRYPTO-C99-SPEC §3.21; [`PQSignatureEnvelopeSoundness.md`](docs/proofs/PQSignatureEnvelopeSoundness.md)). It is additive and state-root-invariant — an existing Ed25519 chain is byte-identical — so PQ accounts coexist with classical ones without a migration.
+Concrete-security bounds: a proved property holds, under its stated hypotheses, with probability `≥ 1 − Q · 2⁻¹²⁸` over polynomial adversary budget `Q`. Ed25519 (A1) is a classical assumption: a scalable quantum computer running Shor's algorithm breaks it (PQE-L-2 in the soundness document linked below). A **post-quantum signature path is available**: an opt-in **`PQ_TRANSFER`** whose sender is a PQ-native bearer account bound to an **ML-DSA (Dilithium, FIPS 204)** key (CRYPTO-C99-SPEC §3.21; [`PQSignatureEnvelopeSoundness.md`](docs/proofs/PQSignatureEnvelopeSoundness.md)). It is additive and state-root-invariant — an existing Ed25519 chain is byte-identical — so PQ accounts coexist with classical ones without a migration.
 
 ---
 
@@ -1106,7 +1113,7 @@ establishes unbiased randomness, unconditional finality or production readiness.
 
 1. Nakamoto, S. "Bitcoin: A Peer-to-Peer Electronic Cash System." 2008.
 2. Buterin, V. et al. "Combining GHOST and Casper." 2020.
-3. Gilad, Y. et al. "Algorand: Scaling Agreements for Cryptocurrencies." SOSP 2017.
+3. Gilad, Y. et al. "Algorand: Scaling Byzantine Agreements for Cryptocurrencies." SOSP 2017.
 4. Kwon, J. "Tendermint: Consensus without Mining." 2014.
 5. Hanke, T., Movahedi, M., Williams, D. "DFINITY Technology Overview Series, Consensus System." 2018.
 6. Yakovenko, A. "Solana: A new architecture for a high performance blockchain." 2018.

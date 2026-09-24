@@ -4,12 +4,18 @@
  *
  * Bare-Metal C99 Peer Mesh & Gossip Protocol Engine.
  *
- * Implements full-mesh P2P networking with:
+ * Connects to explicitly configured peers and accepts inbound peers, with:
  *   1. Non-blocking POSIX TCP connections driven by net_event_loop_t.
  *   2. Strict Big-Endian [u32 len] outer framing + [0xB1 v1] canonical wire envelope.
- *   3. Automatic HELLO handshake negotiation and role-based cross-chain gossip gating.
- *   4. Zero-allocation in-memory LRU message deduplication ring.
- *   5. Per-peer token-bucket rate limiting without dynamic allocation.
+ *   3. An unauthenticated HELLO exchange (domain, port, role, shard id) on
+ *      connect; wire_version is recorded, not negotiated. Role-based
+ *      cross-chain gating of delivered and broadcast messages.
+ *   4. Broadcast dedup: a zero-allocation FIFO ring of the SHA-256
+ *      (type || payload) keys of the last PEER_MESH_DEDUP_CAPACITY locally
+ *      broadcast messages suppresses an identical re-broadcast. Inbound
+ *      messages are delivered to on_message only; the mesh does not relay them.
+ *   5. Per-peer token-bucket rate limiting of inbound non-HELLO messages
+ *      without dynamic allocation.
  */
 
 #ifndef DETERMINISTIC_NET_PEER_MESH_H
@@ -95,7 +101,7 @@ typedef struct {
     void               *user_data;
 } peer_mesh_config_t;
 
-/* Deduplication ring buffer of 32-byte message hashes */
+/* FIFO ring of 32-byte broadcast keys; the oldest key is overwritten. */
 typedef struct {
     uint8_t entries[PEER_MESH_DEDUP_CAPACITY][32];
     size_t  head;
@@ -133,13 +139,17 @@ int peer_mesh_connect(peer_mesh_t *mesh, const char *host, uint16_t port);
 void peer_mesh_disconnect(peer_mesh_t *mesh, int peer_idx);
 
 /*
- * Broadcast a message to all connected peers matching chain role rules.
- * Automatically checks and registers message digest in dedup ring.
+ * Queue a message for every active peer whose role permits it, unless
+ * SHA-256(msg_type || payload) is already in the dedup ring (then nothing is
+ * sent and 0 is returned); otherwise the key is recorded. Returns the number
+ * of peers the frame was queued for.
  */
 int peer_mesh_broadcast(peer_mesh_t *mesh, uint8_t msg_type, const uint8_t *payload, size_t payload_len);
 
 /*
- * Send a message directly to a specific peer index.
+ * Queue a message for a specific peer index as one outer frame
+ * [BE32 envelope length][envelope]. Returns 0 when the whole frame was queued;
+ * a negative return (e.g. outbound buffer full) means nothing was queued.
  */
 int peer_mesh_send_to(peer_mesh_t *mesh, int peer_idx, uint8_t msg_type, const uint8_t *payload, size_t payload_len);
 

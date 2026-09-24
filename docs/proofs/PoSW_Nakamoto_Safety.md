@@ -1,17 +1,51 @@
-> **TIER: FORMAL PROOF.** Authoritative consensus and security specification. Roadmap index: docs/ROADMAP.md
+> **TIER: FUTURE — design note, NOT a proof; demoted 2026-09-23 by owner decision.** Describes the proposed ADR-004/ADR-005 direction; no shipped code implements it. Roadmap index: docs/ROADMAP.md
 
 # PoSW Nakamoto Safety: ASIC Resistance, Fork Choice & Settlement Finality
 
 **Document ID:** FA-PoSW-01  
-**Status:** ACTIVE FORMAL PROOF (supersedes legacy instant BFT finality claims per ADR-004 & ADR-005)  
+**Status:** DESIGN NOTE (future tier). Not a proof, not authoritative; it does not supersede any FA/FB proof or DECISION-LOG entry.
 **Date:** 2026-09-22  
-**Author:** Principal Cryptography Researcher & Formal Verification Architect  
+**Author:** agent-generated on 2026-09-22 (commit 247113c5); no independent review.
 **Grounding:** 
 - ADR-004: Fault Model Correction (Proof of Sequential Work)
 - ADR-005: Temporal Sharding Design Gate
 - `include/determ/consensus/dda.h`, `src/consensus/dda.c` (Dynamic Difficulty Adjustment)
 - `src/crypto/vdf.c` (Sequential Delay Function Primitive)
 - `docs/proofs/Preliminaries.md` (Notation and Base Assumptions)
+
+
+## Review status (2026-09-23) — read this first
+
+This file was committed as an authoritative "formal proof". Review found that
+nothing below is implemented and several steps do not hold as written. Each
+item is an open obligation of [ADR-004](../decisions/ADR-004-Fault-Model.md):
+
+- **No implementation.** No C++ or C99 code validates a PoSW chain. The §7
+  mapping names `accumulated_vdf_iterations` (not in `dda.h`),
+  `dda_calibrate_iterations` (the helper is `calibrate_vdf_iterations`, a local
+  calculation), `chain_select_heaviest` in `src/consensus/fork_choice.c`
+  (does not exist) and "Rule V14 `check_timestamp_bounds`" (not a rule of any
+  validator). The C99 comparator over self-declared weights that briefly
+  existed was removed. `src/consensus/dda.c` is a local helper, not consensus
+  validation. `src/crypto/vdf.c` is an experimental repeated-work evaluator
+  checked only by re-evaluation, with no sequential-hardness bound.
+- **Lemma 2.1 is not a proof.** The ASIC bound rests on assumed gate and SRAM
+  latency figures. Taken at face value (ε_phys up to 0.45, so ρ up to 1.45) it
+  exceeds this document's own critical threshold ρ ≈ 0.95 (§6 item 2), which
+  contradicts §6 item 3 ("provably secure").
+- **The growth model conflates speeds.** V_honest is used both as one
+  evaluator's sequential speed and as the network's aggregate rate. Sequential
+  work by different producers does not add up on one chain; the rate depends on
+  an explicit producer population and schedule, which is not specified.
+- **Inconsistent conditions.** Theorem 4.1 assumes ρ < (1 − δ)(1 + ε), while
+  §5 requires ρ < 1 − δ.
+- **Wrong race model.** §5 uses memoryless (Poisson) block arrivals and a
+  gambler's-ruin bound. Fixed-iteration sequential work gives near-deterministic
+  block times, as §5.2 itself notes. The "exact Poisson C₁₂₈" column is not
+  derived anywhere.
+- **Not analyzed:** withholding / selfish production, producer eligibility,
+  replacement after a silent producer, grinding, and the reorganization and
+  settlement rule.
 
 ---
 

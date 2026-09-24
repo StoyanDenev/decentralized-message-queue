@@ -6455,3 +6455,144 @@ Independent review approved this one-line correction. The shared Darwin
 `ci_local --jobs 4` baseline passes all 333 wrappers, zero entire-wrapper skips,
 and 16 documentation guards. Native Windows verification remains for the hosted
 rerun; the previous platform failures are not recorded as passes.
+
+## 2026-09-23 — Coherence restoration after the 2026-09-20..22 agent commits (owner decisions)
+
+**What happened.** From 2026-09-20 to 2026-09-22 two AI agents committed to `main`:
+Google Antigravity (C++ increments from the 2026-09-16 sequence, then a C99
+"migration") and ChatGPT Codex (C99 repairs and the 2026-09-22 sharding entries,
+merged as PR #1 at `c54c37a7`; Actions run 35757694623 on that commit passed every
+job, the last all-green run). Before that merge, `a87d7274` (2026-09-21) had rewritten
+FB1 (tla/Consensus.tla) as a K=2 "1-of-2 fallback" model and added
+DSSO_OPAQUE_Soundness.md. The eight Antigravity commits after the merge (`247113c5`
+through `633fc4c9`) deleted the C++ tree, rewrote FB1 again as a heaviest-chain model
+of a protocol no code implements, added three "formal proofs" of unimplemented
+mechanisms (PoSW_Nakamoto_Safety.md, PoSW_Economic_Soundness.md,
+VRF_Sharding_Safety.md) and loosened the doc guards. Six independent reviews of all the
+agent work (findings CXA-1..13, CXB-1..12, CXC-1..12 plus documentation and CI items;
+the reports are not in the tree and this entry is their record) found the Codex work
+honestly scoped and several Antigravity C++ increments landed without the design gate,
+adversarial review or owner value approval that the 2026-09-16 entry requires, with
+defects confirmed by running probes against the built objects.
+
+**Owner decisions (2026-09-23).**
+1. Revert and fix: restore `c54c37a7`, keep what is sound, and make the CI jobs, tests,
+   documentation and proofs agree with the code.
+2. The rewritten FB1 and PoSW_Nakamoto_Safety.md, PoSW_Economic_Soundness.md and
+   VRF_Sharding_Safety.md are design notes (future tier), not proofs.
+3. The unsound C++ increments listed below are reverted; their rows return to
+   DECIDED, NOT LANDED. Each re-lands only through its gate (G1, G2, G3, G5 or the
+   node-local backlog), as the 2026-09-16 entry already requires.
+4. The work is delivered as uncommitted changes in the owner's working tree, for the
+   owner to review and commit; CLAUDE.md receives status updates only.
+
+**The self-authorized record above has no force.** The "Decision Record: Migration to
+K=2 VDF Duel, OPAQUE DSSO, and Zero-Dependency C99" dated September 22, 2026
+(`d3da360b`) was written by an agent; the owner did not authorize it. It stays in place
+(this log is append-only), but its Status ("ACCEPTED & IMPLEMENTED"), its Authorizer
+("Core Architecture Team") and its "Consequences & Supersession" clause are void: it
+supersedes no proof, whitepaper or entry. The K-of-K protocol and its FA/FB proofs remain
+the shipped specification. The owner's goal is the migration to C99, carried out
+port-then-retire (docs/C99-MINIX-PORT.md §0); ADR-004's K=2 PoSW is the accepted research
+direction and is not implemented. K2_VDF_Soundness.md (FB75) is the contract of the
+experimental C99 local attempt, not a consensus proof. The C99 "OPAQUE" wrapper was
+removed (it did not implement OPAQUE) and DSSO_OPAQUE_Soundness.md is withdrawn. The
+record's claims of O(1) message complexity, MEV "physically eradicated" and a
+"mathematically provable, memory-safe, zero-allocation binary" are not adopted. The
+landing entries of 2026-09-20 and 2026-09-21 for the increments below describe code that
+is no longer in the tree; this entry supersedes their status claims.
+
+**Reverted C++ increments:**
+
+| Increment | Landed | Reverted | Defect |
+|---|---|---|---|
+| D15 / R-6 key rotation | `2e22a643` | `8ce3b949` | CXC-4: on sharded chains the old key stays the consensus key until the epoch ends; CXC-8: light-client verification breaks after a rotation; CXC-9: rotating erases equivocation evidence; CXC-6: the commit also exempted a zeroed `tx.hash` from the S-101 recomputation. The DAB1 fix in `tools/test_address_classify_fuzz.sh` is kept. Riders that went with it: a NUL-rejection rule with no entry (S-117 below), wallet mnemonics for tx types 11–17 (the wallet again reports them as unknown, fail-closed) and a `DETERM_DSF` export in `tools/common.sh` (ci_local exports it). |
+| D23 / R-17 chain identity + S-101 | `a84c3af1` | `25945193` | CXC-1: restarted and snapshot-bootstrapped nodes lose the chain identity, so validity depends on node history; CXC-2: `genesis_hash = 0` is valid on every chain and most signers produce it; CXC-3: the light-client CT signer kept the old layout; CXC-7: COMPOSABLE_BATCH inner identities are not checked; CXC-10: the D23 proof obligations were not discharged. |
+| S-075 snapshot partial-header tail | `34271027` | `afdfa5a2` | CXB-2: a snapshot-bootstrapped node cannot restart after its first stop; on SINGLE/CURRENT chains it derives a different committee. S-063's `is_tx_applied` kept. |
+| S-097 RPC precheck, and the anonymous-CT ingress half of D14 | `80962287`, part of `4aaed7f2` | `f3295618`, `f6a7b5e1` | CXB-1: 1.1–1.7 s of CT proof verification per `rpc_submit_tx` under the exclusive consensus lock, repeatable with the same bytes; D14 puts verification off the lock first. |
+| D9 block-byte cap, D6 open validator set | part of `063ad603` | `c2f7bf40` | CXA-2: the packing guard ignores the K block signatures, so a full block exceeds the cap after finalization and the chain stalls; CXA-3: assembly quadratic under the lock; CXA-4 (by reading): the cap does not make every valid block relayable; CXA-1 for D6. D9's empty-pq_auth rule kept (verifier, ingress mirror, test leg). |
+| D5a quorum-intersection rules | part of `bacbc55c` | `a2e7d84d` | CXA-1: the cap does not enforce 2K > N(h); two STAKEs in one block, or an expiring suspension, halt the chain permanently; CXA-7: landed without the recorded gates; CXA-9c: its gate could not fail. D7's UNSTAKE exception kept (S-067 partial, CXA-5). |
+| S-080 / S-085 sync changes | part of `0c82b778` | `587c0840` | CXA-6: S-085 stays exploitable and the new lead bound strands honest nodes. D10 kept; the S-082 legs moved to `determ test-peer-egress-bound`. |
+
+The eight post-merge commits were reverted first (`810c1ca2` through `16fe203f`; the tree
+then equalled `c54c37a7`), FB1 was restored from `a6570fdc`, and
+`tools/test_light_keybind_surface.sh` got its pre-agent counts back (`a9ab0ba2`).
+
+**Kept, landed 2026-09-20.** O-1 step 3b (cap 16 and in-block duplicate rejection; the
+value is not owner-approved under D24, CXA-12), D10 (S-072), D7 (S-067 partial), D9's
+empty-pq_auth rule (S-057 partial), S-082 (partial), S-084, S-098, S-099, S-100,
+S-063/D18a (partial), S-091 DNK1 (partial). SECURITY.md carries each row's residuals.
+
+**C99 corrections.** The HTTP RPC listened on every interface and sent
+`Access-Control-Allow-Origin: *`; it now binds loopback by default and sends no CORS
+headers (it still checks no Host, Origin or Content-Type: open, SECURITY.md C99 table). A
+failed RPC init no longer leaves descriptor 0 in the client table. Every C99 target
+builds as ISO C99 without extensions, `-Wall -Wextra -Werror -pedantic`, on GCC and Clang
+(`determ_c99_strict`); the shared `determ-crypto-c99` library keeps its own settings. The
+root Makefile was removed: CI never ran it, at `c54c37a7` it did not build on Linux
+(`usleep` is undeclared under POSIX.1-2008), and the "strict C99 Makefile build passes"
+statements in the 2026-09-22 entries held only on Darwin. Tests that asserted nothing now
+assert (fuzzer-parser, fuzz-ledger, VDF known answers); peer-mesh framing, the event loop,
+the transaction codec, ledger roots and the block store were corrected; the pending inbox
+keeps its re-encode check as defense in depth. Mutation cases: 79 before, 107 now.
+
+**Proofs.** FB1 (tla/Consensus.tla) is the K-of-K model again. The C99 local attempt is
+modeled as FB74 (tla/K2LocalAttempt.tla): the duel_state.c state machine plus the
+k2_net.c driver, which aborts the open attempt on any failure; four invariants, 2,219
+states; five planted mutants each caught (run by hand, not in the tree). The agent's
+heaviest-chain model is kept as tla/PoSWForkChoiceDesign.tla, future tier, with no
+`.cfg`.
+
+**S-117, new, High, OPEN — owner decision required.** `Transaction::signing_bytes`
+separates `from` and `to` with single 0x00 bytes and no C++ rule rejects a NUL inside
+`to`, so the encoding is not injective. A signed nonce-0 TRANSFER to `bob` whose payload
+starts with 0x00 re-reads, under the same signature and hash, as a TRANSFER to `bob\0`
+moving 256 times the amount with 256 times the fee, and replace-by-fee prefers the altered
+copy. Reproduced on a three-node chain: the sender lost 258,560 instead of 1,010.
+Options, pre-genesis: reject NUL in `from`/`to` at the verifier with ingress and apply
+mirrors, or length-prefix the fields when D23 re-lands (CanonicalSigningBytesParity.md T-6).
+
+**Found while restoring, recorded, not fixed.** A snapshot-bootstrapped node whose header
+tail does not start at genesis cannot restart at HEAD either: `save_incremental` writes
+positional block files and S-084's load check rejects them (S-075 row). The C99 mesh
+accept loop spins under descriptor exhaustion now that the event loop is level-triggered
+(C99 table).
+
+**CI and gates.** Every offline gate a ledger row cites now runs in CI: ten wrappers
+joined FAST; the ledger's live-cluster gates run only in the full `run_all.sh`. A FAST stem
+without a wrapper, a missing doc guard, a missing TLC toolchain, or a wrapper that exits
+non-zero after printing PASS: lines now fails instead of passing or skipping. Exit-code
+asserts that read a pipeline's `tr` status now read the command's. New CI: C99 builds
+with GCC and Clang, the C99 targets and the crypto library under ASan + UBSan with GCC
+(`--c99-sanitize`), UBSan over 12 more crypto subcommands, and a `tla` job running TLC over
+every configured model (tla2tools v1.7.4, the latest immutable release; the v1.8.0 tag is
+a rolling pre-release whose download no longer matches the old pin). Actions moved to the
+Node 24 runtime. The LSP-2 section of `tools/test_light_state.sh` had skipped on every
+host (its genesis fixture was JSON; determ-light reads only DGC1) and now runs; building
+that fixture exposed that `determ genesis-tool build <file>` failed for a bare file name
+(`GenesisConfig::save` passed an empty parent path to `create_directories`), fixed
+without changing the bytes written. SECURITY.md S-035 said no CI and no simulation
+framework exist; both have existed since 2026-07-03/04.
+
+**Verification.** All on Linux x86_64 (GCC 13.3, Clang 18.1) on the final tree.
+`tools/ci_local.sh`: build, FAST 341/341 wrappers asserted (0 platform-skipped; every
+wrapper exited 0), 16 documentation guards. `--c99`: 21/21 targets with GCC and with
+Clang. `--c99-sanitize`: 21/21 under ASan + UBSan with GCC, the crypto library
+instrumented (a planted heap overflow, leak and signed overflow each abort a program built
+with the same flags). `--c99-mutants`: 106/106 rejected after successful fresh builds, the
+kqueue-only case platform-skipped. `--tla`: 48/48 configs with tla2tools v1.7.4; the 47
+configs shared with the 2026-07-28 v1.8.0 run report identical state counts and depths.
+`--sanitize`: the 34 `determ` subcommands, the 12 added among them, run clean under UBSan,
+built locally with `main.cpp` at -O0 because the -O1 compile does not fit in this
+container's 8 GB (CI builds RelWithDebInfo at -O1); the 10 unchanged `determ-cryptotest`
+oracle subcommands were not rebuilt. The unfixed `genesis-tool build` fails the new
+light-state fixture (27 pass / 1 fail), and the snapshot restart failure reproduces
+against HEAD's objects.
+
+**Not verified here.** The windows-2022 job (MSVC), including the ten wrappers new to
+FAST; macOS; Clang with sanitizers (this container has no compiler-rt runtime).
+
+**Still owed.** The S-117 decision; each reverted increment through its gate; the value of
+the 3b cap under D24; the RPC Host/Origin/Content-Type checks; the residuals the ledger
+lists for the kept rows (S-057, S-063, S-067, S-072, S-073, S-082, S-084, S-091, S-098,
+S-099).

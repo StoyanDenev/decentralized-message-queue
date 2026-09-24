@@ -16,7 +16,10 @@ The C99 foundation includes a read-only modulus-routing query, an opt-in bounded
 inbox for signed intra-shard transfers, and a bounded
 [recovery model](proofs/DSF-SPEC.md#104-bounded-c99-fork-recovery-model). The query uses local
 configuration; the inbox checks signatures/context/routing but not balances or
-nonce readiness. The model assumes a finite candidate set and fixed eligibility and
+nonce readiness. Its signature preimage binds a genesis hash and a shard id (the
+decided-but-not-landed D23 layout); the C++ `signing_bytes()` does not, so a
+transaction signed for one does not verify on the other (PROTOCOL.md §3.1).
+The model assumes a finite candidate set and fixed eligibility and
 receipt facts. These increments do not establish production shard execution or settlement.
 
 ## Abstract
@@ -46,7 +49,7 @@ This positioning suits applications where safety failures are intolerable (payme
 - **Union transaction root**: censorship requires exhaustive collusion of every validator that ever rotates onto a committee — structurally impossible without full registry capture.
 - **Regional sharding (EXTENDED mode)** with under-quorum merge: shards group validators by region tag for intra-region RTT block times; when a regional pool drops below safety threshold, the protocol transparently merges committee operations with the modular-next shard.
 - **Genesis-mode governance**: a single bit at chain creation selects "uncontrolled" (consensus constants immutable forever) or "governed" (N-of-N keyholder multisig may mutate a whitelisted subset of parameters mid-chain). The whitelist is enforced by validator; off-list parameters require a new chain identity.
-- **Distributed wallet recovery primitive**: T-of-N Shamir secret sharing layered with AES-256-GCM AEAD envelopes under a PBKDF2-derived passphrase key schedule, providing threshold key recovery without weakening the chain's identity model.
+- **Distributed wallet recovery primitive**: T-of-N Shamir secret sharing layered with AES-256-GCM AEAD envelopes under an Argon2id-derived passphrase key schedule, providing threshold key recovery without weakening the chain's identity model.
 - **Verification record:** analytic arguments and TLA+ models cover named properties under explicit assumptions. Coverage gaps, withdrawn claims and open findings are recorded in the security ledger.
 
 ### 1.3 Document organization
@@ -105,7 +108,7 @@ Each block is produced in two phases by a K-member committee selected determinis
 
 **Phase 2 (BlockSig).** Each committee member:
 1. Reveals `secret_i` via `BlockSigMsg{block_index, signer, delay_output, dh_secret, ed_sig}` where `dh_secret = secret_i`.
-2. Signs `block_digest`. Since 2026-08-12 the digest is **two-level**: `block_digest = SHA-256("DTM-BLKDIG-v3" ‖ index u64 BE ‖ gen u64 BE ‖ body_root)` (v3, with the round generation bound; tag corrected 2026-09-14 to the shipped bytes), where `body_root` is `SHA-256` over the v1 core **minus `index`** — `{prev_hash, tx_root, delay_seed, consensus_mode, bft_proposer, creators[], creator_tx_lists[][], creator_ed_sigs[], creator_dh_inputs[]}` — plus — appended **conditionally** — the v2.7 F2 reconciled view roots over `inbound_receipts` / `equivocation_events` / `abort_events` (when the block carries them) and `partner_subset_hash` (when non-zero; deterministic from merge state, so not a gossip-async field). `timestamp` is also now bound — appended **conditionally**, via the deterministic median reconciliation of the K committed proposer times (when the block carries them; commit `f99eeb8`). Fields revealed or derived after Phase 1 stay excluded (`delay_output`, `cumulative_rand`, `creator_dh_secrets`), as does `state_root` (bound instead via `signing_bytes`), so the only digest-excluded field on a fully-formed block is `cross_shard_receipts` (deterministically derived from the bound tx set). The originally narrower-than-full coverage was the structural source of S-030 D1/D2 (see `SECURITY.md` S-030 and `docs/proofs/S030-D2-Analysis.md`); D1 is effective-closed via S-033 (state_root binding into `Block::signing_bytes` enforces apply-time consistency) + S-038 (producer wires state_root into the broadcast body so the gate actually fires on production blocks rather than being dormant); D2 is consensus-closed for the three pool-fed dimensions via the shipped v2.7 F2 view reconciliation, for `partner_subset_hash` directly (commit `8585a50`), and for `timestamp` via median reconciliation (commit `f99eeb8`) — so S-030-D2 is now fully digest-closed.
+2. Signs `block_digest`. Since 2026-08-12 the digest is **two-level**: `block_digest = SHA-256("DTM-BLKDIG-v3" ‖ index u64 BE ‖ gen u64 BE ‖ body_root)` (v3, with the round generation bound; tag corrected 2026-09-14 to the shipped bytes), where `body_root` is `SHA-256` over the v1 core **minus `index`** — `{prev_hash, tx_root, delay_seed, consensus_mode, bft_proposer, creators[], creator_tx_lists[][], creator_ed_sigs[], creator_dh_inputs[]}` — plus — appended **conditionally** — the v2.7 F2 reconciled view roots over `inbound_receipts` / `equivocation_events` / `abort_events` (when the block carries them) and `partner_subset_hash` (when non-zero; deterministic from merge state, so not a gossip-async field). `timestamp` is also now bound — appended **conditionally**, via the deterministic median reconciliation of the K committed proposer times (when the block carries them; commit `f99eeb8`). Fields revealed or derived after Phase 1 stay excluded (`delay_output`, `cumulative_rand`, `creator_dh_secrets`), as does `state_root` (bound instead via `signing_bytes`, and so attested only through the next block's signed `prev_hash`). The digest also leaves out `cross_shard_receipts` (deterministically derived from the bound tx set), the resolved `transactions[]` bodies (bound through `tx_root` and `creator_tx_lists`) and `initial_state`, which on a non-genesis block sits in `signing_bytes` but is read by no validator rule (the S-102 adjudication observation, DECISION-LOG 2026-09-16). The originally narrower-than-full coverage was the structural source of S-030 D1/D2 (see `SECURITY.md` S-030 and `docs/proofs/S030-D2-Analysis.md`); D1 is effective-closed via S-033 (state_root binding into `Block::signing_bytes` enforces apply-time consistency) + S-038 (producer wires state_root into the broadcast body so the gate actually fires on production blocks rather than being dormant); D2 is consensus-closed for the three pool-fed dimensions via the shipped v2.7 F2 view reconciliation, for `partner_subset_hash` directly (commit `8585a50`), and for `timestamp` via median reconciliation (commit `f99eeb8`) — so S-030-D2 is now fully digest-closed.
 3. Receivers verify `SHA-256(dh_secret ‖ pubkey_i) == sender's dh_input`. Mismatch rejects the message; the committee member is treated as offline for this round.
 
 **Finalize.** Once K block-sigs gather:
@@ -133,9 +136,9 @@ result. An explicit caller retry resets attempt state, without claiming that it
 elects a replacement participant or advances the ledger. These are local API
 contracts, not C++ block-acceptance rules or a PoSW security proof.
 
-### 3.4 Equivocation slashing
+### 3.4 Equivocation evidence
 
-An equivocation occurs when a validator signs two distinct bodies under the same registered key at the same height, within one digest family — provable by exhibiting both signatures together with their openings. Validator V11 (`docs/proofs/Preliminaries.md` §5) is **kind-discriminated and height-bound**: the event carries `kind` (0 = block digest, 1 = contrib commitment) plus, per side, the opening `(index, body_root)`; V11 rejects `kind > 1`, asserts `index_a == index_b == block_index`, requires distinct body roots and distinct signatures, and verifies each signature against a digest it **derives** as `SHA-256(TAG(kind) ‖ index u64 BE ‖ body_root)`. Two detection paths feed the same channel, distinguished by `kind`:
+An equivocation occurs when a validator signs two distinct bodies under the same registered key at the same height, within one digest family — provable by exhibiting both signatures together with their openings. Validator V11 (`docs/proofs/Preliminaries.md` §5) is **kind-discriminated and height-bound**: the event carries `kind` (0 = block digest, 1 = contrib commitment) plus, per side, the opening `(index, gen, body_root)`; V11 rejects `kind > 1`, asserts `index_a == index_b == block_index` and `gen_a == gen_b`, requires distinct body roots and distinct signatures, and verifies each signature against a digest it **derives** as `SHA-256(TAG(kind) ‖ index u64 BE ‖ gen u64 BE ‖ body_root)`. A block may carry at most `EQUIVOCATION_EVENTS_PER_BLOCK_MAX = 16` events and no two with the same event hash (O-1 step 3b). Two detection paths feed the same channel, distinguished by `kind`:
 
 - **BlockSigMsg-level (rev.8).** The committee member signs `compute_block_digest(b)` of two different block bodies at the same height. Detection: `Node::apply_block_locked` cross-block check when a duplicate-height block arrives with a different `block_hash`.
 - **ContribMsg same-generation (S-006 closure).** The committee member signs `contrib_commit = SHA-256("DTM-CONTRIB-v3" ‖ block_index u64 BE ‖ gen u64 BE ‖ contrib_body)` over two different `(tx_hashes, dh_input)` snapshots at the same `(block_index, prev_hash, aborts_gen)`. Detection: `Node::on_contrib` recomputes commitments when a same-signer duplicate arrives.
@@ -150,7 +153,7 @@ The evidence pipeline: detection → gossip via `EQUIVOCATION_EVIDENCE` (message
 
 Evidence soundness (formerly "slashing soundness"; the L1 consequence is gone, the verifier claim is unchanged): an honest validator that participates in at most one round per height is never PROVEN to have equivocated. By Ed25519 EUF-CMA, forging a signature under an honest key is `≤ 2⁻¹²⁸` per attempt; by SHA-256 second-preimage resistance, re-presenting an honest signature under a *different* height's opening is likewise `≤ 2⁻¹²⁸`. The `kind` discriminator carries both detection paths under one bound. See `docs/proofs/EquivocationSlashing.md` (FA6).
 
-**Two things stated plainly, because they were not always.** (i) Before 2026-08-12 the height was **not** bound: the event carried two opaque digests, and an attacker who harvested one honest validator's ordinary signatures from two *different* heights — both public, both on the wire — could forge a full-stake slash remotely and unauthenticated. That was a rank-1 vulnerability (`docs/SECURITY.md` S-052), closed by the two-level openable digest above. (ii) A residual remains **open**: an honest validator legitimately signs two different bodies at the *same* height across abort re-rounds, and V11 accepts that pair. It is strictly narrower than the closed hole and is recorded, not argued away; closing it requires binding the round generation into the opening (owner decision pending).
+**Two things stated plainly, because they were not always.** (i) Before 2026-08-12 the height was **not** bound: the event carried two opaque digests, and an attacker who harvested one honest validator's ordinary signatures from two *different* heights — both public, both on the wire — could forge a full-stake slash remotely and unauthenticated. That was a rank-1 vulnerability (`docs/SECURITY.md` S-052), closed by the two-level openable digest above. (ii) A residual remains **open**: an honest validator legitimately signs two different bodies at the *same* height across abort re-rounds. The round generation is now bound (the `gen` field above), so such a cross-round pair no longer satisfies V11, but the binding is evadable — `gen` is signer-chosen, so a deliberate splitter signs its second side at `gen + 1`, and an honest node's two openings are bit-identical to a splitter's. No predicate over two signed openings is both sound and complete here; the owner's D4 decision (2026-09-16) makes a V11-accepted pair L2 evidence requiring corroboration, never an L1 verdict (PROTOCOL.md §6.1).
 
 ---
 
@@ -169,7 +172,7 @@ Both share the same balance and nonce namespace — a domain may send to a beare
 
 Real deployments have two distinct identity requirements that don't compose well into a single primitive:
 
-- **Validators need accountability.** A misbehaving validator must be identifiable for slashing, reputation, and exit consequences. Domain registration with on-chain stake or DNS-anchored names provides this.
+- **Validators need accountability.** A misbehaving validator must be identifiable: for the abort suspension, for the equivocation evidence record the L2 bond policy consumes, and for reputation and exit consequences. Domain registration with on-chain stake or DNS-anchored names provides this.
 - **End users need fungibility + offline issuance.** A payment recipient cannot wait for on-chain registration before generating an address. Bearer wallets satisfy this requirement.
 
 Determ's two-tier model preserves both: the validator pool is fully accountable, while end-user transfers are zero-friction. The bearer model has a natural privacy benefit (no on-chain identity), but Determ does not market this as the primary feature — anonymity comes from the bearer's choice to use a fresh key per transaction, not from any cryptographic mixer.
@@ -180,7 +183,7 @@ Determ's two-tier model preserves both: the validator pool is fully accountable,
 
 ### 5.1 Beacon + shards
 
-A sharded Determ deployment splits responsibility into a single **beacon chain** and `S` **shard chains**, each running the same two-phase commit-reveal consensus on its own state subset. The beacon is the trust anchor: it holds the validator pool, slashing records, cross-shard receipts, and epoch transitions. Shards process user transactions for accounts assigned to them.
+A sharded Determ deployment splits responsibility into a single **beacon chain** and `S` **shard chains**, each running the same two-phase commit-reveal consensus on its own state subset. The beacon is the trust anchor: it holds the validator pool, abort and equivocation evidence records, cross-shard receipts, and epoch transitions. Shards process user transactions for accounts assigned to them.
 
 The `ShardingMode` axis (pinned per timing profile at genesis) selects topology:
 
@@ -244,7 +247,7 @@ When a regional shard's eligible pool drops below `2K`, that shard temporarily m
 
 ### 6.2 Safety preservation across BEGIN/END
 
-The structural argument: the stress branch widens the pool from `Pool_T` to `Pool_T ∪ Pool_S_refugees` but does not relax FA1's K-of-K signature requirement. K-of-K signatures over distinct digests still require forging an honest signature (EUF-CMA bound `2⁻¹²⁸`). Validator mirrors producer's pool extension via the same chain-side helper — no divergence.
+The structural argument: the stress branch widens the pool from `Pool_T` to `Pool_T ∪ Pool_S_refugees` but does not relax FA1's K-of-K signature requirement. Under FA1's hypotheses (an honest-signing member in each committee, and intersecting committees), K-of-K signatures over distinct digests still require forging an honest signature (EUF-CMA bound `2⁻¹²⁸`). Widening the pool raises `N(h)`, so the intersection hypothesis `2K > N(h)` — not enforced at runtime (S-054) — is easier to break here. Validator mirrors producer's pool extension via the same chain-side helper — no divergence.
 
 Cross-shard receipt atomicity (FA7) is unaffected: receipt identity is `(src_shard, tx_hash)`, independent of who signed the source block. Receipts in flight across BEGIN or END boundaries are delivered exactly once via the existing dedup set.
 
@@ -279,7 +282,7 @@ Each `(keyholder_index, ed_sig)` is an Ed25519 signature over the canonical sign
 
 The whitelist (validator-enforced; off-list rejected even with full N-of-N):
 - `MIN_STAKE`, `SUSPENSION_SLASH`, `UNSTAKE_DELAY` — economic policy fields
-- `straggler_fallback_threshold` — consensus parameter
+- `bft_escalation_threshold` — consensus parameter
 - `tx_commit_ms`, `block_sig_ms`, `abort_claim_ms` — round timer durations
 - `param_keyholders`, `param_threshold` — self-referential governance metadata
 
@@ -375,7 +378,7 @@ Every Determ genesis carries an optional inscribed string field, `genesis_messag
 
 Operators may override with any UTF-8 string up to the cap: mission statements, regulatory disclosures (e.g., "Licensed by Malta Gaming Authority MGA/B2C/12345"), news-headline timestamp anchors (Bitcoin-style), or commemorative text. The message is inscribed at genesis-build time, included in `compute_genesis_hash` when non-default, and immutable thereafter. Two deployments differing only in `genesis_message` are distinct chains with distinct hashes.
 
-The mix-only-when-non-default rule preserves backward compatibility for pre-message genesis files: they load with the default value (via config-key-absent default), the hash builder skips the mix, and the resulting chain hash matches pre-message behavior. Operators who explicitly override (including overriding to the empty string to opt out of inscription entirely) get distinct chain identities.
+The mix-only-when-non-default rule preserves backward compatibility for pre-message genesis files: they load with the default value (via JSON-key-absent default), the hash builder skips the mix, and the resulting chain hash matches pre-message behavior. Operators who explicitly override (including overriding to the empty string to opt out of inscription entirely) get distinct chain identities.
 
 The inscribed message is accessible via the GenesisConfig stored at chain start; a small follow-on item adds a dedicated `genesis_info` RPC for ergonomic external access. Use cases:
 - **Cultural / philosophical anchor.** Default applies; no operator action required.
@@ -400,14 +403,14 @@ Pure client-side feature implemented in a separate `determ-wallet` binary; no pr
 Setup flow:
 
 1. Split the 32-byte Ed25519 seed `s` into `N` Shamir shares `(x_i, y_i)` over GF(2⁸) with threshold `T`.
-2. For each share `i`, derive an unwrap key `k_i` under the passphrase scheme (the only scheme in v1.x): `k_i = PBKDF2-HMAC-SHA-256(password, fresh_salt, 600000 iters)`.
+2. For each share `i`, derive an unwrap key `k_i` under the passphrase scheme (the only scheme in v1.x): `k_i = Argon2id(password, fresh_salt, t = 3, m = 64 MiB, p = 1)` — the `DWE2` default of `envelope::encrypt` (`wallet/envelope.hpp`).
 3. Encrypt each share via AES-256-GCM under `k_i` with fresh nonce and AAD binding `DWR1 ‖ guardian_id ‖ version`.
 4. Output a self-contained **binary** setup container (`DRS1`) carrying the envelopes, x-coordinates, and optional pubkey checksum. Since the D2 step-3 migration (2026-08-12) every wallet at-rest artifact is a canonical binary container — magic-prefixed, explicit little-endian, length-prefixed, EXACT-length on decode — with no text format on the storage path; the scheme tag is dropped because the passphrase scheme is the only one shipped. Human-readable hex renderings remain available as non-authoritative CLI views.
 
 Recovery flow:
 
 1. Decode the `DRS1` container (version-gated; the passphrase scheme is implied).
-2. Decrypt at least `T` envelopes via the password-derived PBKDF2 key.
+2. Decrypt at least `T` envelopes via the password-derived key (the envelope's magic selects the KDF: `DWE2` Argon2id, or the legacy `DWE1` PBKDF2).
 3. Apply Shamir Lagrange interpolation at `x = 0` to reconstruct the seed.
 4. Verify against the optional `pubkey_checksum` (defense-in-depth against AEAD false positives).
 
@@ -415,11 +418,11 @@ Recovery flow:
 
 - **Below-threshold compromise**: `T-1` shares (even with cleanly-recovered keys) reveal exactly zero bits about the secret. Information-theoretic — Shannon's measure of conditional entropy is exact.
 - **Envelope tampering**: AES-256-GCM SUF-CMA gives `≤ 2⁻¹²⁸` per single-bit modification detection.
-- **Passphrase-grind cost**: each envelope's unwrap key is stretched via PBKDF2-HMAC-SHA-256 at 600000 iterations, so a compromised envelope is grindable only at the per-guess PBKDF2 cost against the password's own entropy — there is no online-only guardian interaction to bound the attacker. Operators must choose a high-entropy passphrase accordingly.
+- **Passphrase-grind cost**: each envelope's unwrap key is stretched via memory-hard Argon2id (64 MiB, `t = 3`), so a compromised envelope is grindable only at the per-guess Argon2id cost against the password's own entropy — there is no online-only guardian interaction to bound the attacker. Operators must choose a high-entropy passphrase accordingly.
 
 ### 9.4 Scheme scope and threat posture
 
-The v1.x release ships exactly one recovery scheme — the passphrase scheme above. Because share unwrap keys are derived from the operator's password via PBKDF2, a single compromised envelope is **offline-grindable** at the per-guess PBKDF2 cost; the scheme does not provide online-only password protection. This is an accepted property, not a stub: security rests on the T-of-N Shamir threshold (below-threshold compromise leaks zero bits) plus a high-entropy passphrase and the 600000-iteration stretch. An online-only password-authenticated scheme (OPAQUE) is a future-work item (§12.2), not a shipped option. See `docs/proofs/WalletRecovery.md` (FA12) for the passphrase-mode bound.
+The v1.x release ships exactly one recovery scheme — the passphrase scheme above. Because share unwrap keys are derived from the operator's password via Argon2id, a single compromised envelope is **offline-grindable** at the per-guess Argon2id cost; the scheme does not provide online-only password protection. This is an accepted property, not a stub: security rests on the T-of-N Shamir threshold (below-threshold compromise leaks zero bits) plus a high-entropy passphrase and the memory-hard stretch. An online-only password-authenticated scheme (OPAQUE) is a future-work item (§12.2), not a shipped option. See `docs/proofs/WalletRecovery.md` (FA12) for the passphrase-mode bound.
 
 ---
 
@@ -432,18 +435,18 @@ The proof set and TLA+ models analyze specified properties under individual assu
 | # | File | Property | Bound |
 |---|---|---|---|
 | F0 | `Preliminaries.md` | Notation, validity predicates V1–V15 | — |
-| FA1 | `Safety.md` | MD-mode K-of-K safety | `2⁻¹²⁸` per fork attempt |
+| FA1 | `Safety.md` | MD-mode K-of-K safety, under the honest-signing hypothesis (per round instance) and committee intersection (the runtime `2K > N(h)` bound is open, S-054) | `2⁻¹²⁸` per fork attempt |
 | FA2 | `Censorship.md` | Union-tx-root censorship resistance | `(f/N)^K` per epoch |
 | FA3 | `SelectiveAbort.md` | Completed-round unbiasedness argument withdrawn; commitment binding only survives | No selective-abort bound established |
 | FA4 | `Liveness.md` | Bounded-round termination | Geometric in `p_honest` |
-| FA5 | `BFTSafety.md` | BFT-mode conditional safety | `f_h < |K_h|/3` + slashing recovery |
-| FA6 | `EquivocationSlashing.md` | No false-positive slashing | `2⁻¹²⁸` per fabrication |
+| FA5 | `BFTSafety.md` | BFT-mode conditional safety | `f_h < |K_h|/3` + honest single-sign; above the bound an evidence record only, no recovery (T-5.1 withdrawn, T-5.1-R) |
+| FA6 | `EquivocationSlashing.md` | No false accusation of an honest validator that ran at most one round per height (H3; the cross-round and S-095 valve-restart cases are the open residual). The record is evidence only — no L1 consequence since D4 | `2⁻¹²⁸` per fabrication |
 | FA7 | `CrossShardReceipts.md` | No double-credit, atomicity | `K · 2⁻¹²⁸` per fabrication |
 | FA8 | `RegionalSharding.md` | Properties under regional pinning | Same as FA1/FA4/FA5/FA6/FA7 |
 | FA9 | `UnderQuorumMerge.md` | R4 merge preserves FA1/FA7 | `2⁻¹²⁸` per fork attempt |
 | FA10 | `Governance.md` | A5 PARAM_CHANGE soundness | `Q · 2⁻¹²⁸·(N-1)` for N keyholders |
 | FA11 | `EconomicSoundness.md` | A1 supply invariant + E1/E3/E4 | Structural |
-| FA12 | `WalletRecovery.md` | A2 Shamir + AEAD (passphrase scheme) | Info-theoretic below threshold; PBKDF2-bounded passphrase grind |
+| FA12 | `WalletRecovery.md` | A2 Shamir + AEAD (passphrase scheme) | Info-theoretic below threshold; KDF-bounded passphrase grind (Argon2id `DWE2` by default) |
 
 Every proof cites its source-code enforcement points; reviewers can trace any theorem → state-machine → implementation.
 
@@ -463,8 +466,8 @@ Machine-checkable state-machine projections of the consensus, sharding, and rece
 - `tla/SubsidyDistribution.tla` — subsidy mint + distribution state machine (companion to FA-Apply-7).
 - `tla/GovernanceParamChange.tla` — A5 PARAM_CHANGE staging + activation state machine (companion to FA-Apply-8).
 - `tla/CrossShardReceiptDedup.tla` — cross-shard receipt dedup state machine (companion to FA-Apply-9).
-- `tla/EquivocationApply.tla` — FA6 equivocation-slashing apply-path state machine (companion to FA-Apply-10).
-- `tla/AbortApply.tla` — FA5 AbortEvent apply-path state machine (companion to FA-Apply-11).
+- `tla/EquivocationApply.tla` — HISTORICAL: models the equivocation forfeiture + deregistration that D4 removed from apply on 2026-09-16; not a model of HEAD, where applying an `EquivocationEvent` changes no state (companion to FA-Apply-10).
+- `tla/AbortApply.tla` — AbortEvent apply-path state machine (companion to FA-Apply-11); its `abort_records` half is current, its `SUSPENSION_SLASH` stake deduction is HISTORICAL (retired 2026-09-16, D13 — aborts suspend only).
 - `tla/CHECK-RESULTS.md` — generated TLC model-check results (regenerated by `tools/test_tla_model_check.sh --write`; a small QUARANTINE list carries recorded reasons).
 
 ### 10.3 Concrete-security summary
@@ -483,7 +486,7 @@ Nakamoto-style designs use validated work and an explicit adversarial resource a
 
 ### 11.2 Tendermint / Cosmos / Algorand
 
-Traditional consensus protocols with immediate finality conditional on `f < N/3`. Multi-round voting (typically 2–3 rounds per block) gives strong safety in expectation but allows forks when the honest supermajority assumption is violated. Determ's MD mode is structurally stronger (any single honest validator prevents forks); BFT mode is roughly equivalent but uses it as a fallback rather than the primary path.
+BFT-family protocols with immediate finality conditional on `f < N/3`. Multi-round voting (typically 2–3 rounds per block) gives strong safety in expectation but allows forks when the honest supermajority assumption is violated. Determ's MD mode asks for a weaker honest fraction — one honest member per committee rather than two thirds — but its no-fork claim is conditional as well: it holds under the honest-signing hypothesis (that member signs one digest per round instance) and when same-height committees intersect, and the runtime bound that guarantees intersection (`2K > N(h)`) is open (S-054 partial; §10.1 FA1). BFT mode is roughly equivalent to these protocols but serves as a fallback rather than the primary path.
 
 ### 11.3 Dfinity / Internet Computer
 
@@ -531,9 +534,9 @@ These are intentional non-goals, not roadmap items.
 - v2.4 Atomic block apply (A9) — ✅ shipped (Phase 1-2D + COMPOSABLE_BATCH).
 - v2.5 Registry cache (S-032) — ✅ shipped.
 - v2.6 Gossip out of state-lock — ✅ shipped.
-- A3/v2.X Binary message codec — ✅ shipped and, since the D2 pre-genesis envelope strip, the ONLY wire format (`src/net/binary_codec.cpp`; the legacy text envelope and the per-pair negotiation are deleted; HELLO's `wire_version` field survives as the additive post-genesis upgrade advertisement).
+- A3/v2.X Binary message codec — ✅ shipped and, since the D2 pre-genesis envelope strip, the ONLY wire format (`src/net/binary_codec.cpp`; the legacy JSON envelope and the per-pair negotiation are deleted; HELLO's `wire_version` field survives as the additive post-genesis upgrade advertisement).
 - v2.7 F2 view reconciliation (full S-030 D2 closure) — ⏳ spec'd in `docs/proofs/F2-SPEC.md`, ~3-4 days.
-- v2.10 Threshold randomness aggregation — ⏸️ **block-beacon application DE-SCOPED**: the project retains the v1 MPDH commit-reveal block beacon. Per `docs/proofs/FROST_DEVIATION_NOTICE.md` §9, FROST is not a bias-resistance upgrade over the FA3 commit-reveal guarantee and — unlike threshold-BLS — is not unbiasable-by-construction, so it does not justify the threshold-ceremony complexity for the block beacon. Residual selective-abort stays handled under MPDH by re-roll + suspension (the round-1 stake deduction was retired 2026-09-16, D13). FROST is **removed from the v1.1 chain consensus path entirely** per `FROST_DEVIATION_NOTICE.md` (2026-06-07) — the FROST C99 code is retained **only as a library** (audit history + possible DApp-layer use), not in the chain path or the v1.1 formal-verification surface. Cross-shard randomness uses **commit-reveal aggregation**; DSSO uses **threshold-OPAQUE** (t-of-n T-OPRF on the shipped P-256 RFC 9497 VOPRF stack — `docs/proofs/v2.25-DSSO-DAPP-SPEC.md`), not FROST. (Authority: Stoyan Denev, `docs/proofs/FROST_DEVIATION_NOTICE.md`; DECISION-LOG 2026-07-15.)
+- v2.10 Threshold randomness aggregation — ⏸️ **block-beacon application DE-SCOPED**: the project retains the v1 MPDH commit-reveal block beacon. Per `docs/proofs/FROST_DEVIATION_NOTICE.md` §9, FROST is not a bias-resistance upgrade over the MPDH commit-reveal (whose FA3 zero-bias claim is withdrawn; commitment binding survives) and — unlike threshold-BLS — is not unbiasable-by-construction, so it does not justify the threshold-ceremony complexity for the block beacon. Residual selective abort is only partly handled under MPDH: a round-1 abort re-rolls and suspends the aborting member (the round-1 stake deduction was retired 2026-09-16, D13), but a Phase-2 withholder is neither recorded nor suspended, so the last revealer's veto is open (S-077). FROST is **removed from the v1.1 chain consensus path entirely** per `FROST_DEVIATION_NOTICE.md` (2026-06-07) — the FROST C99 code is retained **only as a library** (audit history + possible DApp-layer use), not in the chain path or the v1.1 formal-verification surface. Cross-shard randomness uses **commit-reveal aggregation**; DSSO uses **threshold-OPAQUE** (t-of-n T-OPRF on the shipped P-256 RFC 9497 VOPRF stack — `docs/proofs/v2.25-DSSO-DAPP-SPEC.md`), not FROST. (Authority: Stoyan Denev, `docs/proofs/FROST_DEVIATION_NOTICE.md`; DECISION-LOG 2026-07-15.)
 - Stake-weighted creator selection — design item, parallel-representation analysis required first.
 - v2.8 Post-quantum signature migration (Dilithium / Falcon) — ⏳ not started.
 - v2.14 OPAQUE wallet recovery (real `libopaque`) — ⏳ not started; gated on the MSVC porting of upstream VLAs.
@@ -567,9 +570,9 @@ properties hold. No launch-readiness or unconditional-security claim follows.
 
 3. Lamport, L. *Specifying Systems: The TLA+ Language and Tools.* Addison-Wesley, 2002.
 
-4. Buchman, E. *Tendermint: Consensus in the Age of Blockchains.* M.Sc. thesis, University of Guelph, 2016.
+4. Buchman, E. *Tendermint: Byzantine Fault Tolerance in the Age of Blockchains.* M.Sc. thesis, University of Guelph, 2016.
 
-5. Gilad, Y., et al. *Algorand: Scaling Agreements for Cryptocurrencies.* SOSP, 2017.
+5. Gilad, Y., et al. *Algorand: Scaling Byzantine Agreements for Cryptocurrencies.* SOSP, 2017.
 
 6. Bonneau, J., et al. *Bitcoin and Cryptocurrency Technologies.* Princeton University Press, 2016.
 
@@ -596,7 +599,8 @@ properties hold. No launch-readiness or unconditional-security claim follows.
 | Ed25519 | Validator signatures, transaction signatures, block signatures | [1] |
 | SHA-256 | Block hashes, transaction hashes, commit-reveal commitments, address derivation | [2] |
 | AES-256-GCM | Wallet AEAD envelope (32-byte key, 12-byte nonce, 16-byte tag) | [11] |
-| PBKDF2-HMAC-SHA-256 | Wallet passphrase-scheme envelope key derivation (600000 iters) | [2] |
+| Argon2id | Wallet envelope key derivation (`DWE2` default: `t = 3`, `m = 64 MiB`, `p = 1`) | [12] |
+| PBKDF2-HMAC-SHA-256 | Legacy `DWE1` envelopes only (600000 iters; `envelope encrypt --iters`) | [2] |
 | Shamir SSS | Wallet threshold secret sharing over GF(2⁸) | [7] |
 
 ## Appendix B: Genesis configuration schema (abridged)
@@ -606,11 +610,11 @@ GenesisConfig {
   chain_id: string                     // operator-chosen unique identifier
   genesis_message: string              // inscribed cultural anchor (≤256B); see §8.6
   m_creators: u32                      // pool size per round
-  k_block_sigs: u32                    // committee size; genesis band M/2 < K <= M; runtime bound 2K > N(pool) enforced (D5a, SECURITY.md S-054)
+  k_block_sigs: u32                    // committee size; genesis band M/2 < K <= M (necessary; runtime bound 2K > N(pool) OPEN — D5a decided, not implemented; SECURITY.md S-054)
                                        // (quorum intersection — see PROTOCOL.md §12.1)
   block_subsidy: u64                   // page reward per block
   bft_enabled: bool                    // enable per-height BFT escalation
-  straggler_fallback_threshold: u32        // round-1 aborts before BFT fallback
+  bft_escalation_threshold: u32        // aborts at a height (round 1 or 2) before BFT fallback
   inclusion_model: enum                // STAKE_INCLUSION | DOMAIN_INCLUSION
   min_stake: u64                       // STAKE_INCLUSION threshold
   chain_role: enum                     // SINGLE | BEACON | SHARD
@@ -656,4 +660,4 @@ This whitepaper is a self-contained narrative; deeper technical details are spli
 | `docs/SECURITY.md` | Open findings, security triage table |
 | `docs/proofs/` | Formal-verification proofs (F0 + FA1–FA12 + FA-Apply + FA-Apply-2..FA-Apply-16, FB1–FB21) |
 
-The reference implementation lives at `src/` (chain daemon) and `wallet/` (wallet binary), totalling ~17 KLOC of C++ across both binaries plus the libsodium-free `determ::c99` cryptographic stack and the determ::c99 cryptographic backend. Integration tests at `tools/test_*.sh` cover every protocol feature in 164 self-contained suites; representative entries are listed in `docs/README.md` § "Behavioral test suite."
+The reference implementation lives at `src/` (chain daemon), `wallet/` (`determ-wallet`) and `light/` (`determ-light`), on the from-scratch, libsodium-free `determ::c99` cryptographic stack; OpenSSL is linked only by the `determ-cryptotest` test-oracle binary. Integration tests are the `tools/test_*.sh` scripts, run as the FAST suite (tools/run_all.sh, FAST=1) through `tools/ci_local.sh`; representative entries are listed in `docs/README.md` § "Behavioral test suite."

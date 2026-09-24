@@ -148,13 +148,18 @@ int peer_mesh_listen(peer_mesh_t *mesh, uint16_t port) {
     return 0;
 }
 
-static int send_raw_frame(peer_mesh_t *mesh, int peer_idx, const uint8_t *frame, size_t frame_len) {
+/* Queue one outer frame [BE32 envelope length][envelope] whole or not at all.
+ * A length header queued without its envelope would make the peer read the
+ * next frame as the missing bytes. */
+static int queue_frame(peer_mesh_t *mesh, int peer_idx, const uint8_t *env, size_t env_len) {
     peer_entry_t *peer = &mesh->peers[peer_idx];
     if (peer->state == PEER_STATE_FREE || peer->fd < 0) return -1;
-    if (peer->tx_len + frame_len > PEER_MESH_TX_BUF_SIZE) return -2; /* Outbound buffer full */
+    if (env_len > PEER_MESH_TX_BUF_SIZE - 4 || peer->tx_len > PEER_MESH_TX_BUF_SIZE - 4 - env_len)
+        return -2; /* Outbound buffer full */
 
-    memcpy(peer->tx_buf + peer->tx_len, frame, frame_len);
-    peer->tx_len += frame_len;
+    be_put_u32(peer->tx_buf + peer->tx_len, (uint32_t)env_len);
+    memcpy(peer->tx_buf + peer->tx_len + 4, env, env_len);
+    peer->tx_len += 4 + env_len;
 
     /* Register for write readiness */
     net_event_loop_mod(&mesh->loop, peer->fd, NET_EV_READ | NET_EV_WRITE, (void*)(uintptr_t)peer_idx);
@@ -181,11 +186,7 @@ static int peer_mesh_send_hello(peer_mesh_t *mesh, int peer_idx) {
     if (wire_envelope_encode(env_buf, sizeof(env_buf), WIRE_MSG_HELLO, payload, payload_len, &env_len) != WIRE_CODEC_OK) {
         return -2;
     }
-
-    uint8_t framed[516];
-    be_put_u32(framed, (uint32_t)env_len);
-    memcpy(framed + 4, env_buf, env_len);
-    return send_raw_frame(mesh, peer_idx, framed, 4 + env_len);
+    return queue_frame(mesh, peer_idx, env_buf, env_len);
 }
 
 int peer_mesh_connect(peer_mesh_t *mesh, const char *host, uint16_t port) {
@@ -264,10 +265,7 @@ int peer_mesh_send_to(peer_mesh_t *mesh, int peer_idx, uint8_t msg_type, const u
         return -3;
     }
 
-    uint8_t framed_hdr[4];
-    be_put_u32(framed_hdr, (uint32_t)env_written);
-    if (send_raw_frame(mesh, peer_idx, framed_hdr, 4) != 0) return -4;
-    return send_raw_frame(mesh, peer_idx, env_buf, env_written);
+    return queue_frame(mesh, peer_idx, env_buf, env_written) == 0 ? 0 : -4;
 }
 
 static bool dedup_check_and_insert(peer_mesh_t *mesh, const uint8_t hash[32]) {
@@ -287,8 +285,13 @@ static bool dedup_check_and_insert(peer_mesh_t *mesh, const uint8_t hash[32]) {
 
 int peer_mesh_broadcast(peer_mesh_t *mesh, uint8_t msg_type, const uint8_t *payload, size_t payload_len) {
     if (!mesh) return -1;
+    /* The key covers the type: equal bytes under another type are distinct. */
     uint8_t hash[32];
-    determ_sha256(payload, payload_len, hash);
+    determ_sha256_ctx sha;
+    determ_sha256_init(&sha);
+    determ_sha256_update(&sha, &msg_type, 1);
+    determ_sha256_update(&sha, payload, payload_len);
+    determ_sha256_final(&sha, hash);
     if (dedup_check_and_insert(mesh, hash)) {
         return 0; /* suppressed duplicate */
     }
@@ -308,39 +311,45 @@ int peer_mesh_broadcast(peer_mesh_t *mesh, uint8_t msg_type, const uint8_t *payl
     return sent_count;
 }
 
-static void handle_inbound_connection(peer_mesh_t *mesh) {
-    struct sockaddr_in caddr;
-    socklen_t clen = sizeof(caddr);
-    int cfd = accept(mesh->listen_fd, (struct sockaddr *)&caddr, &clen);
-    if (cfd < 0) return;
-
-    int slot = -1;
-    for (size_t i = 0; i < PEER_MESH_MAX_PEERS; i++) {
-        if (mesh->peers[i].state == PEER_STATE_FREE) {
-            slot = (int)i;
-            break;
+/* Accept every queued connection: one readiness report can cover several. */
+static void handle_inbound_connections(peer_mesh_t *mesh) {
+    for (;;) {
+        struct sockaddr_in caddr;
+        socklen_t clen = sizeof(caddr);
+        int cfd = accept(mesh->listen_fd, (struct sockaddr *)&caddr, &clen);
+        if (cfd < 0) {
+            if (errno == EINTR || errno == ECONNABORTED) continue;
+            return; /* EAGAIN/EWOULDBLOCK: drained; other errors: next report */
         }
+
+        int slot = -1;
+        for (size_t i = 0; i < PEER_MESH_MAX_PEERS; i++) {
+            if (mesh->peers[i].state == PEER_STATE_FREE) {
+                slot = (int)i;
+                break;
+            }
+        }
+        if (slot < 0) {
+            close(cfd);
+            continue;
+        }
+
+        net_socket_set_nonblocking(cfd);
+        net_socket_set_nodelay(cfd);
+
+        peer_entry_t *peer = &mesh->peers[slot];
+        memset(peer, 0, sizeof(*peer));
+        peer->fd = cfd;
+        peer->inbound = true;
+        peer->state = PEER_STATE_HANDSHAKING;
+
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &caddr.sin_addr, ip_str, sizeof(ip_str));
+        snprintf(peer->remote_addr, sizeof(peer->remote_addr), "%s:%u", ip_str, ntohs(caddr.sin_port));
+
+        net_event_loop_add(&mesh->loop, cfd, NET_EV_READ, (void*)(uintptr_t)slot);
+        peer_mesh_send_hello(mesh, slot);
     }
-    if (slot < 0) {
-        close(cfd);
-        return;
-    }
-
-    net_socket_set_nonblocking(cfd);
-    net_socket_set_nodelay(cfd);
-
-    peer_entry_t *peer = &mesh->peers[slot];
-    memset(peer, 0, sizeof(*peer));
-    peer->fd = cfd;
-    peer->inbound = true;
-    peer->state = PEER_STATE_HANDSHAKING;
-
-    char ip_str[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &caddr.sin_addr, ip_str, sizeof(ip_str));
-    snprintf(peer->remote_addr, sizeof(peer->remote_addr), "%s:%u", ip_str, ntohs(caddr.sin_port));
-
-    net_event_loop_add(&mesh->loop, cfd, NET_EV_READ, (void*)(uintptr_t)slot);
-    peer_mesh_send_hello(mesh, slot);
 }
 
 static void handle_peer_read(peer_mesh_t *mesh, int peer_idx) {
@@ -463,7 +472,7 @@ int peer_mesh_poll(peer_mesh_t *mesh, int timeout_ms) {
         net_event_t *ev = &events[i];
         if (ev->user_data == LISTENER_TOKEN) {
             if (ev->flags & NET_EV_READ) {
-                handle_inbound_connection(mesh);
+                handle_inbound_connections(mesh);
             }
         } else {
             int peer_idx = (int)(uintptr_t)ev->user_data;

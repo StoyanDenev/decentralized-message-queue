@@ -64,10 +64,16 @@ static pending_transfer_status_t authenticate(const pending_transfer_pool_t *poo
         return PENDING_TRANSFER_ERR_FRAME;
     if (address_key(tx.from, sender) != 0 || address_key(tx.to, recipient) != 0)
         return PENDING_TRANSFER_ERR_FRAME;
-    /* Despite the C99 field names, the shipped C++ frame stores the first 32
-     * ASCII address bytes in these duplicate slots, not raw Ed25519 keys. */
+    /* Despite the C99 field names, this frame layout (the D23 C++ frame, which
+     * C++ carried from a84c3af1 until the 2026-09-23 revert) stores the first
+     * 32 ASCII address bytes in these duplicate slots, not raw Ed25519 keys. */
     if (memcmp(tx.sender_pubkey, tx.from, 32) != 0 || memcmp(tx.recipient_pubkey, tx.to, 32) != 0)
         return PENDING_TRANSFER_ERR_FRAME;
+    /* Retained frames must be the canonical encoding of their fields. Today
+     * wire_tx_decode already rejects nonzero reserved and padding bytes, so this
+     * re-encode comparison is redundant (its mutant is equivalent and is not in
+     * tools/c99_mutants.py); it is kept so a future decoder relaxation cannot
+     * admit a non-canonical stored frame. */
     if (wire_tx_encode(canonical, sizeof(canonical), &tx, &written) != WIRE_CODEC_OK ||
         written != len || memcmp(canonical, frame, len) != 0)
         return PENDING_TRANSFER_ERR_FRAME;
@@ -80,8 +86,12 @@ static pending_transfer_status_t authenticate(const pending_transfer_pool_t *poo
         destination_shard != source_shard)
         return PENDING_TRANSFER_ERR_CROSS_SHARD;
 
-    /* Exactly Transaction::signing_bytes for this fixed subset. The wire's
-     * numeric fields are little endian; its signing preimage is big endian. */
+    /* The decided D23 / R-17 preimage for this fixed subset:
+     * type || genesis_hash || shard_id || from || 0 || to || 0 || amount || fee
+     * || nonce. The C++ Transaction::signing_bytes currently omits genesis_hash
+     * and shard_id (D23 reverted 2026-09-23 pending a sound landing), so a
+     * C++-signed transaction is not accepted here. The wire's numeric fields
+     * are little endian; the signing preimage is big endian. */
     signing[0] = tx.type;
     memcpy(signing + 1, tx.genesis_hash, 32);
     for (size_t i = 0; i < 4; ++i) signing[33 + i] = (uint8_t)(tx.shard_id >> (24 - 8 * i));

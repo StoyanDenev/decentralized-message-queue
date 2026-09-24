@@ -23,8 +23,10 @@
 
 static void cleanup_dir(const char *dir) {
     char cmd[512];
-    snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
-    (void)system(cmd);
+    int n = snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
+    if (n > 0 && (size_t)n < sizeof(cmd) && system(cmd) != 0) {
+        fprintf(stderr, "warning: cleanup of %s failed\n", dir);
+    }
 }
 
 static void test_block_store_lifecycle(void) {
@@ -91,6 +93,14 @@ static void test_block_store_lifecycle(void) {
     /* Non-existent block */
     TEST_ASSERT(block_store_read_block(&store, 2, read_buf, sizeof(read_buf), &read_len) == BLOCK_STORE_ERR_NOT_FOUND);
 
+    /* Hashes of blocks appended in this session are indexed. */
+    uint8_t got_hash[32];
+    TEST_ASSERT(block_store_get_hash_by_height(&store, 0, got_hash) == BLOCK_STORE_OK);
+    TEST_ASSERT(memcmp(got_hash, genesis_hash, 32) == 0);
+    TEST_ASSERT(block_store_get_hash_by_height(&store, 1, got_hash) == BLOCK_STORE_OK);
+    TEST_ASSERT(memcmp(got_hash, block1_hash, 32) == 0);
+    TEST_ASSERT(block_store_get_hash_by_height(&store, 2, got_hash) == BLOCK_STORE_ERR_NOT_FOUND);
+
     /* 6. Close store and re-open to test crash-recovery & index reload */
     block_store_close(&store);
 
@@ -105,14 +115,47 @@ static void test_block_store_lifecycle(void) {
     TEST_ASSERT(read_len == sizeof(genesis_frame));
     TEST_ASSERT(memcmp(read_buf, genesis_frame, sizeof(genesis_frame)) == 0);
 
+    /* Block files carry no hash: after reopening only the manifest head hash
+     * is known, and no other height may report a hash. */
+    memset(got_hash, 0xEE, sizeof(got_hash));
+    TEST_ASSERT(block_store_get_hash_by_height(&store2, 1, got_hash) == BLOCK_STORE_OK);
+    TEST_ASSERT(memcmp(got_hash, block1_hash, 32) == 0);
+    TEST_ASSERT(block_store_get_hash_by_height(&store2, 0, got_hash) == BLOCK_STORE_ERR_NOT_FOUND);
+
+    /* A block appended after reopening is indexed with its hash. */
+    const uint8_t block2_frame[] = "BLOCK_2_AFTER_REOPEN";
+    uint8_t block2_hash[32];
+    memset(block2_hash, 0x33, 32);
+    TEST_ASSERT(block_store_append_block(&store2, 2, block2_hash,
+                                         block2_frame, sizeof(block2_frame)) == BLOCK_STORE_OK);
+    TEST_ASSERT(block_store_get_hash_by_height(&store2, 2, got_hash) == BLOCK_STORE_OK);
+    TEST_ASSERT(memcmp(got_hash, block2_hash, 32) == 0);
+    TEST_ASSERT(block_store_get_hash_by_height(&store2, 1, got_hash) == BLOCK_STORE_OK);
+    TEST_ASSERT(block_store_get_hash_by_height(&store2, 0, got_hash) == BLOCK_STORE_ERR_NOT_FOUND);
+
     block_store_close(&store2);
 
-    /* 7. Test corruption fail-closed: corrupt manifest to wrong size */
+    /* 7. A block file below the manifest height without the DBK1 magic fails open */
+    char bpath[512];
+    snprintf(bpath, sizeof(bpath), "%s/0.blk", test_dir);
+    int bfd = open(bpath, O_WRONLY);
+    TEST_ASSERT(bfd >= 0);
+    TEST_ASSERT(write(bfd, "X", 1) == 1);
+    close(bfd);
+    TEST_ASSERT(block_store_open(&store2, test_dir) == BLOCK_STORE_ERR_CORRUPT_BLOCK);
+    bfd = open(bpath, O_WRONLY);
+    TEST_ASSERT(bfd >= 0);
+    TEST_ASSERT(write(bfd, "D", 1) == 1);
+    close(bfd);
+    TEST_ASSERT(block_store_open(&store2, test_dir) == BLOCK_STORE_OK);
+    block_store_close(&store2);
+
+    /* 8. Test corruption fail-closed: corrupt manifest to wrong size */
     char mpath[512];
     snprintf(mpath, sizeof(mpath), "%s/manifest.bin", test_dir);
     int mfd = open(mpath, O_WRONLY | O_TRUNC);
     TEST_ASSERT(mfd >= 0);
-    write(mfd, "TRUNCATED", 9);
+    TEST_ASSERT(write(mfd, "TRUNCATED", 9) == 9);
     close(mfd);
 
     block_store_t corrupt_store;

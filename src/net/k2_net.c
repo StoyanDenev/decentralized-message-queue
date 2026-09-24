@@ -1,3 +1,4 @@
+#include "determ/net/virtual_transport.h"
 /*
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
@@ -10,9 +11,6 @@
  * Strictly zero dynamic memory allocations (no malloc/free).
  */
 
-#ifndef _DEFAULT_SOURCE
-#define _DEFAULT_SOURCE
-#endif
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -20,14 +18,12 @@
 #define _DARWIN_C_SOURCE
 #endif
 
-#include "determ/net/virtual_transport.h"
 #include <determ/net/k2_net.h>
 #include <determ/crypto/secure_zero.h>
 #include <determ/crypto/sha2/sha2.h>
 #include <determ/time/clock.h>
 
 #include <unistd.h>
-#include <time.h>
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
@@ -35,6 +31,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <poll.h>
+#include <time.h>
 
 /* Big-Endian Serialization Utilities */
 static inline void write_be16(uint8_t *p, uint16_t v) {
@@ -113,10 +110,8 @@ static int send_all(int fd, const uint8_t *data, size_t len) {
         ssize_t n = determ_net_send(fd, data + sent, len - sent, flags);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                struct timespec ts;
-                ts.tv_sec = 0;
-                ts.tv_nsec = 100000L; /* 100 microseconds */
-                nanosleep(&ts, NULL);
+                struct timespec backoff = {0, 100000L}; /* 100 us */
+                (void)nanosleep(&backoff, NULL);
                 continue;
             }
             if (errno == EINTR) continue;
@@ -285,7 +280,7 @@ int k2_aggregator_poll(k2_aggregator_t *agg, int timeout_ms) {
         uint32_t flags = evs[i].flags;
 
         if (fd == agg->listen_fd) {
-            /* Drain the listener because epoll subscriptions are edge triggered. */
+            /* Drain the listener: one readiness report can cover several connections. */
             for (;;) {
                 status = duel_state_poll_commit_timeout(&agg->duel_sm);
                 if (status == DUEL_SUCCESS) status = duel_state_poll_buzzer(&agg->duel_sm);

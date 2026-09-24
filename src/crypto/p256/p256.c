@@ -834,7 +834,7 @@ int determ_p256_msm_ct(uint8_t out33[33], const uint8_t *scalars,
      * 1 (the sum is the identity; out33 untouched), or -1 (a scalar >= n_order or a point
      * that fails to decode — public-validity gates). Byte-identical to the old
      * encoded-domain accumulation (the pedersen/bp_* corpora are the guard). */
-    pt acc, pt_i, term;
+    pt acc, P, term;
     uint8_t p65[65], enc65[65];
     int rc = 0;
     p256_init();
@@ -843,15 +843,15 @@ int determ_p256_msm_ct(uint8_t out33[33], const uint8_t *scalars,
         const uint8_t *si = scalars + i * 32;
         if (!be_lt(si, N_BE)) { rc = -1; goto done; }              /* scalar >= n (0 allowed) */
         if (determ_p256_point_decompress(p65, points33 + i * 33) != 0) { rc = -1; goto done; }
-        if (decode_point(&pt_i, p65) != 0) { rc = -1; goto done; }
-        pt_scalar_mul(&term, si, &pt_i);                              /* CT ladder; s_i == 0 -> O */
+        if (decode_point(&P, p65) != 0) { rc = -1; goto done; }
+        pt_scalar_mul(&term, si, &P);                              /* CT ladder; s_i == 0 -> O */
         pt_add(&acc, &acc, &term);                                 /* acc + O = acc */
     }
     if (encode_point(enc65, &acc) != 0) { rc = 1; goto done; }     /* the whole sum is O */
     rc = determ_p256_point_compress(out33, enc65);
 done:
     determ_secure_zero(&acc, sizeof acc);
-    determ_secure_zero(&pt_i, sizeof pt_i);
+    determ_secure_zero(&P, sizeof P);
     determ_secure_zero(&term, sizeof term);
     return rc;
 }

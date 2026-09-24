@@ -1,4 +1,4 @@
-> **TIER: FUTURE — post-1.0, non-authoritative.** Design-stage; does NOT describe shipped code and is NOT coherence-maintained against src/. Roadmap index: docs/ROADMAP.md
+> **TIER: FUTURE — post-1.0, non-authoritative.** Design-stage; does NOT describe shipped code and is NOT coherence-maintained against src/ — EXCEPT §0, which records the in-tree C99 code as it is and is kept coherent with it. Roadmap index: docs/ROADMAP.md
 
 # Determ — C99 / Minix Reference-Implementation Plan
 
@@ -19,6 +19,57 @@ This is a **clean-room reimplementation guided by the existing spec**, *not* a p
 of the C++17 tree. The current implementation (`src/`, `wallet/`, `light/`) stays as
 the **reference oracle**: the C99 build is validated byte-for-byte against it at every
 phase. When the two diverge on any canonical byte string, the C99 build is wrong.
+
+---
+
+## 0. Status on 2026-09-23 — what exists, and the retirement rule
+
+**Owner decision 2026-09-23 (DECISION-LOG):** the migration to C99 proceeds by this
+plan — port, prove parity, then retire. A C++ component is deleted only after its C99
+replacement passes the same test vectors and a differential parity gate against the
+C++ reference **in CI**, and the deletion is its own commit. The 2026-09-22 deletion of
+the whole C++ tree (838819f3) broke that rule and was reverted.
+
+**What the in-tree C99 code is.** The `determ-node` tree (`src/determ_node.c`,
+`src/{consensus,net,rpc,storage,ledger,wire,time}/`) was not built by the phases of §7.
+It is a separate experiment built around the proposed K=2 design (ADR-004): a local
+two-party commit/reveal attempt (FB74, `K2_VDF_Soundness.md`), a repeated-work
+evaluator, a bounded pending inbox, an in-memory transfer ledger and POSIX
+networking/RPC. It builds as strict ISO C99 (`determ_c99_strict` in CMake; GCC and
+Clang), and CI runs 21 targets with each compiler, again under ASan + UBSan with GCC
+(crypto library included), plus an isolated mutation gate (`tools/ci_local.sh --c99` /
+`--c99-sanitize` / `--c99-mutants`). Against this plan it stands at:
+
+| C++ component | C99 counterpart | State |
+|---|---|---|
+| Crypto primitives (`src/crypto/**`) | `determ-crypto-c99` | done (predates the experiment; used by the C++ binaries) |
+| DSSO identity service | `dapps/dsso` over `src/crypto/dsso/opaque3dh.c` | done (C99) |
+| D.5 random-selection DApp | `src/dapp/d5*.c`, `dapps/d5-random-selection` | done (C99) |
+| Transaction / block wire codec | `src/wire/binary_codec.c` | partial — envelope, HELLO, transaction (in the D23 layout; C++ carries the pre-D23 layout since the 2026-09-23 revert), BLOCK_SIG, CONTRIB, the request/status, abort, equivocation, SHARD_TIP and receipt-bundle frames, and DMF1/DBK1/DHF1 records; no Block body decoder; no differential parity gate against the C++ codec |
+| Block / transaction validation | none | not started |
+| Chain state apply + state root | `src/ledger/state.c` (transfer-only, in memory, not integrated) | skeleton |
+| Chain storage + replay (DMF1/DBK1/DSN1) | `src/storage/block_store.c` (different layout, no replay) | skeleton |
+| Genesis (DGC1) | none | not started |
+| Committee selection / registry | `src/ledger/shard_routing.c` (routing query only) | not started |
+| Producer / rounds / aborts / evidence | none (the K=2 attempt is a different protocol, not a port) | not started |
+| Mempool | `src/ledger/pending_transfer.c` (signature/route/chain-id checks; no balance or nonce) | partial |
+| Gossip / sync / networking | `src/net/*.c` (framing, HELLO, dedup; no relay, no sync) | skeleton |
+| RPC | `src/rpc/*.c` (loopback-only, a few methods) | skeleton |
+| Daemon / CLI (`src/main.cpp`) | `src/determ_node.c` | skeleton |
+| Wallet, light client, DSF simulator | none | not started |
+| Cross-shard receipts / beacon | none | not started |
+
+**Where the protocol itself changes** (ADR-004 PoSW, D23 chain identity, …) parity is
+judged against the decided specification and its test vectors, not against C++ bytes,
+and the change goes design-and-prove first (DECISION-LOG doctrine). The C99 pending
+inbox already verifies the decided D23 preimage; the C++ reference will match it only
+when D23 re-lands soundly.
+
+**Build note.** The root `Makefile` that briefly existed was never run by CI and did not
+build on Linux (`usleep` is not declared under POSIX.1-2008; it built on Darwin only); it
+was removed on 2026-09-23. The plain
+`Makefile` of Phase 0 belongs to the Minix bring-up; until then CMake enforces the same
+ISO C99 + `-Wall -Wextra -Werror -pedantic` discipline on GCC and Clang.
 
 ---
 

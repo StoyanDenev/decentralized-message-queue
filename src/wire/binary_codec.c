@@ -167,6 +167,12 @@ wire_codec_status_t wire_tx_encode(uint8_t *out_buf, size_t buf_cap,
     if (!out_buf || !tx || !out_written) {
         return WIRE_CODEC_ERR_INVALID_ARG;
     }
+    /* A declared length without its bytes would emit a malformed frame. */
+    if ((tx->payload_len > 0 && !tx->payload) || (tx->payload_len > 32 && !tx->payload_overflow) ||
+        (tx->from_len > 0 && !tx->from) || (tx->to_len > 0 && !tx->to) ||
+        (tx->pq_auth_len > 0 && !tx->pq_auth)) {
+        return WIRE_CODEC_ERR_INVALID_ARG;
+    }
     size_t overflow = (tx->payload_len > 32) ? (size_t)(tx->payload_len - 32) : 0;
     size_t required = 128 + 1 + 2 + overflow + 1 + tx->from_len + 1 + tx->to_len + 64 + 32 + 32 + 4;
     if (tx->pq_auth_len > 0) {
@@ -195,8 +201,8 @@ wire_codec_status_t wire_tx_encode(uint8_t *out_buf, size_t buf_cap,
     le_put_u16(out_buf + off, tx->payload_len);
     off += 2;
 
-    if (overflow > 0 && tx->payload) {
-        memcpy(out_buf + off, tx->payload + 32, overflow);
+    if (overflow > 0) {
+        memcpy(out_buf + off, tx->payload_overflow, overflow);
         off += overflow;
     }
 
@@ -256,15 +262,20 @@ wire_codec_status_t wire_tx_decode(const uint8_t *data, size_t len,
     tx->payload_len = le_get_u16(data + off);
     off += 2;
 
-    if (tx->payload_len <= 32) {
-        tx->payload = data + 96;
-    } else {
+    /* Slot bytes past a short payload are padding and must be zero. */
+    for (size_t i = 96 + (tx->payload_len < 32 ? tx->payload_len : 32); i < 128; ++i) {
+        if (data[i] != 0) {
+            return WIRE_CODEC_ERR_NONZERO_RESERVED;
+        }
+    }
+    tx->payload = data + 96;
+    tx->payload_overflow = NULL;
+    if (tx->payload_len > 32) {
         size_t overflow = tx->payload_len - 32;
         if (off + overflow > len) {
             return WIRE_CODEC_ERR_TRUNCATED;
         }
-        /* Caller can inspect 32 bytes at data+96 and remainder at data+off */
-        tx->payload = data + 96;
+        tx->payload_overflow = data + off;
         off += overflow;
     }
 

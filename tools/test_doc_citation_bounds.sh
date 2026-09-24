@@ -21,7 +21,8 @@
 # RESOLUTION: a path-qualified citation (a '/' in the path) must exist verbatim from the
 # repo root. A bare basename (chain.cpp:NNN) is resolved ONLY when it matches exactly one
 # tracked source file (else skipped as ambiguous — e.g. main.cpp exists in src/, wallet/,
-# light/). Only code files are checked (cpp/hpp/h/tla); .md/.sh self-references are not.
+# light/). Only code files are checked (c/cpp/hpp/h/tla); .md/.sh self-references are not.
+# Corpus: docs/ and the root README.md.
 #
 # A KNOWN-BAD quarantine list (CITATION_QUARANTINE) acknowledges a deliberately-archival
 # citation without weakening the guard (same pattern as test_docs_link_check.sh). Keep it
@@ -49,25 +50,24 @@ resolve_citation() {
     */*) [ -f "$p" ] && printf '%s' "$p"; return;;
   esac
   local matches n
-  matches=$(find src include sim tests tools -type f -name "$p" 2>/dev/null)
+  matches=$(find src light include wallet tools sim tests dapps -type f -name "$p" 2>/dev/null)
   n=$(printf '%s\n' "$matches" | grep -c .)
   [ "$n" = "1" ] && printf '%s' "$matches"
 }
 
 check_corpus() {
-  # $1 = docs root to scan. Increments VIOLATIONS for each out-of-bounds/missing cite.
+  # $1 = docs root (or file) to scan. Increments VIOLATIONS for each out-of-bounds/missing cite.
   local root="$1"
+  declare -A LINECOUNT RESOLVED
   local checked=0 oob=0 skipped=0 tok cpath line f tot
   local cites
-  cites=$(grep -rhoE "[A-Za-z0-9_./-]+\.(c|cpp|hpp|h|tla):[0-9]+" "$root" 2>/dev/null | sort -u)
+  cites=$(grep -rhoE "[A-Za-z0-9_./-]+\.(cpp|hpp|h|c|tla):[0-9]+" "$root" 2>/dev/null | sort -u)
   while IFS= read -r tok; do
     [ -z "$tok" ] && continue
     is_quarantined "$tok" && { skipped=$((skipped+1)); continue; }
     cpath="${tok%:*}"; line="${tok##*:}"
-    case "$cpath" in
-      *.cpp|*.hpp) skipped=$((skipped+1)); continue;;
-    esac
-    f="$(resolve_citation "$cpath")"
+    if [ -z "${RESOLVED[$cpath]+x}" ]; then RESOLVED[$cpath]="$(resolve_citation "$cpath")"; fi
+    f="${RESOLVED[$cpath]}"
     # A path-qualified citation that does NOT resolve = a missing/renamed file (hard
     # error). A bare basename that doesn't resolve uniquely is skipped (ambiguous).
     if [ -z "$f" ]; then
@@ -77,13 +77,14 @@ check_corpus() {
       esac
       continue
     fi
-    tot="$(wc -l < "$f" | tr -d ' ')"
+    if [ -z "${LINECOUNT[$f]+x}" ]; then LINECOUNT[$f]="$(wc -l < "$f" | tr -d ' ')"; fi
+    tot="${LINECOUNT[$f]}"
     checked=$((checked+1))
     if [ "$line" -gt "$tot" ] 2>/dev/null; then
       bad "OUT-OF-BOUNDS citation $tok -> $f has only $tot lines"; oob=$((oob+1))
     fi
   done <<< "$cites"
-  [ "$oob" = "0" ] && ok "$checked resolvable citations in-bounds under $root/ ($skipped ambiguous/quarantined skipped)"
+  [ "$oob" = "0" ] && ok "$checked resolvable citations in-bounds under $root ($skipped ambiguous/quarantined skipped)"
 }
 
 # ── SELFTEST: confirm the bounds check is live ───────────────────────────────────
@@ -104,6 +105,7 @@ fi
 
 echo "=== doc source-line citations: resolvable + in-bounds (out-of-bounds / missing-file) ==="
 check_corpus docs
+check_corpus README.md
 
 echo ""
 if [ "$VIOLATIONS" -eq 0 ]; then

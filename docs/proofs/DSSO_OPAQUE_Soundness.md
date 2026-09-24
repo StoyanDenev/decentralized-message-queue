@@ -1,7 +1,28 @@
-# DSSO_OPAQUE_Soundness — Formal Security Proof of OPAQUE aPAKE in Distributed Single-Sign On
+> **TIER: FUTURE — withdrawn design note, NOT a proof; demoted 2026-09-23 by owner decision.** The authoritative DSSO specification is [v2.25-DSSO-DAPP-SPEC.md](v2.25-DSSO-DAPP-SPEC.md). Roadmap index: docs/ROADMAP.md
 
-**Status:** ACTIVE / CANONICAL SPECIFICATION  
-**Companion Documents:** `Preliminaries.md` (F0), `include/determ/crypto/opaque_dsso.h`, `src/crypto/opaque_dsso.c`, `include/determ/ledger/state.h`.
+# DSSO_OPAQUE_Soundness — withdrawn analysis of a removed "OPAQUE" wrapper
+
+**Status:** WITHDRAWN (future tier). Agent-generated on 2026-09-21 (a87d7274); no independent review.
+**Companion code:** none. `src/crypto/opaque_dsso.c` and `include/determ/crypto/opaque_dsso.h`, which this note described, were removed on 2026-09-23.
+
+## Review status (2026-09-23) — read this first
+
+The removed wrapper was not OPAQUE (RFC 9807). It implemented an RFC 9497
+P-256 OPRF (mode 0), keys derived by HMAC-SHA256 over the OPRF output with
+fixed tags, a ChaCha20-Poly1305 envelope, and a **static 32-byte identity
+proof** compared by `memcmp`. There was no registration record, masking,
+key-stretching function, per-credential OPRF key or 3DH AKE. So there was no
+server authentication and no session key, and a proof observed once could be
+replayed. The text below also misstates the derivation (it names HKDF with
+`DETERM-DSSO-SALT-V1` / `DETERM-DSSO-KEY-V1`, which the code never used). It
+calls RFC 9497 "OPAQUE" and calls the construction "unconditionally immune"
+(the removed header also claimed "zero-knowledge"), although its own reduction
+is to CDH. No ledger stored the
+envelopes. The shipped DSSO — `dapps/dsso` over `src/crypto/dsso/opaque3dh.c`
+(VOPRF with DLEQ proofs + OPAQUE-3DH) — is specified in
+[v2.25-DSSO-DAPP-SPEC.md](v2.25-DSSO-DAPP-SPEC.md) and analyzed in
+[DssoThresholdOprfSoundness.md](DssoThresholdOprfSoundness.md) and
+[DssoAuthenticationAssurance.md](DssoAuthenticationAssurance.md). The original text follows for the record.
 
 ---
 

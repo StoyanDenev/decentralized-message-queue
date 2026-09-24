@@ -188,15 +188,17 @@ parity_check_light() {
 
     local determ_hash determ_rc
     set +e
-    determ_hash=$("$DETERM" tx-hash --in "$txjson" 2>/dev/null | tr -d '\r\n')
+    determ_hash=$("$DETERM" tx-hash --in "$txjson" 2>/dev/null)
     determ_rc=$?
+    determ_hash=$(printf '%s' "$determ_hash" | tr -d '\r\n')
     set -e
     assert_eq "$determ_rc" "0" "[$label] determ tx-hash exits 0"
 
     local wallet_json wallet_rc wallet_hash wallet_csb wallet_valid
     set +e
-    wallet_json=$("$DETERM_WALLET" tx-sign-verify --tx "$txjson" --pubkey "$PUB_A" --json 2>/dev/null | tr -d '\r')
+    wallet_json=$("$DETERM_WALLET" tx-sign-verify --tx "$txjson" --pubkey "$PUB_A" --json 2>/dev/null)
     wallet_rc=$?
+    wallet_json=$(printf '%s' "$wallet_json" | tr -d '\r')
     set -e
     assert_eq "$wallet_rc" "0" "[$label] wallet tx-sign-verify exits 0 (light sig valid under wallet's signing_bytes)"
     wallet_hash=$(echo "$wallet_json"  | $PY -c "import json,sys; print(json.load(sys.stdin)['tx_hash_hex'])")
@@ -257,17 +259,21 @@ PY_EOF
     # Canonical: determ tx-hash recomputes from the (full-u64) body.
     local determ_hash determ_rc
     set +e
-    determ_hash=$("$DETERM" tx-hash --in "$signed" 2>/dev/null | tr -d '\r\n')
+    determ_hash=$("$DETERM" tx-hash --in "$signed" 2>/dev/null)
     determ_rc=$?
+    determ_hash=$(printf '%s' "$determ_hash" | tr -d '\r\n')
     set -e
     assert_eq "$determ_rc" "0" "[$label] determ tx-hash exits 0 on cold-signed envelope"
 
     # Copy (A): tx-sign-verify reconstructs signing_bytes independently and
     # cryptographically verifies cold-sign's (copy B's) Ed25519 sig.
-    local wallet_json wallet_hash wallet_csb wallet_valid
+    local wallet_json wallet_rc wallet_hash wallet_csb wallet_valid
     set +e
-    wallet_json=$("$DETERM_WALLET" tx-sign-verify --tx "$signed" --pubkey "$PUB_A" --json 2>/dev/null | tr -d '\r')
+    wallet_json=$("$DETERM_WALLET" tx-sign-verify --tx "$signed" --pubkey "$PUB_A" --json 2>/dev/null)
+    wallet_rc=$?
+    wallet_json=$(printf '%s' "$wallet_json" | tr -d '\r')
     set -e
+    assert_eq "$wallet_rc" "0" "[$label] wallet tx-sign-verify exits 0 on cold-signed envelope"
     wallet_hash=$(echo "$wallet_json"  | $PY -c "import json,sys; print(json.load(sys.stdin)['tx_hash_hex'])")
     wallet_csb=$(echo "$wallet_json"   | $PY -c "import json,sys; print(json.load(sys.stdin)['computed_signing_bytes_sha256'])")
     wallet_valid=$(echo "$wallet_json" | $PY -c "import json,sys; print(json.load(sys.stdin)['valid'])")

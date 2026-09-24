@@ -120,6 +120,10 @@ def main():
                                      text=True, timeout=5)
         if help_result.returncode != 0:
             raise AssertionError("--help failed")
+        version = subprocess.run([binary, "--version"], capture_output=True,
+                                 text=True, timeout=5)
+        if version.returncode != 0 or "not the C++ node's" not in version.stdout:
+            raise AssertionError("--version must not present the C99 store as the C++ store")
         for role in ("--aggregator", "--contributor"):
             destination = Path(build_directory) / ("forbidden-store-" + role[2:])
             result = subprocess.run([binary, role, "--data-dir", str(destination)],
@@ -172,7 +176,7 @@ def main():
     except AssertionError as error:
         print("FAIL: " + str(error), file=sys.stderr)
         return 1
-    print("PASS: node help, duel persistence refusals, routing/pending flags and live configured RPC")
+    print("PASS: node help/version, duel persistence refusals, routing/pending flags and live configured RPC")
     return 0
 
 

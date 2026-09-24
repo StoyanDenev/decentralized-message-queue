@@ -24,14 +24,17 @@
 #      an honest one (its own column, not a pass, not a failure), one that claims
 #      the marker while printing assertion-level PASS: lines (a FAILURE: it
 #      asserted and lied about it), and one whose marker names no cause (a
-#      FAILURE: a skip nobody can audit is not a skip).
+#      FAILURE: a skip nobody can audit is not a skip). A ninth fixture prints
+#      PASS: lines and exits non-zero (a `set -e` abort): a FAILURE, because
+#      the exit code decides before the markers are read.
 #   A2. a run whose only non-pass outcome is a wrapper that skipped entirely
 #      exits 0 — the suite is non-zero ONLY on FAIL.
-#   B. nine mutants of that accounting, each verified to have REACHED the copied
+#   B. ten mutants of that accounting, each verified to have REACHED the copied
 #      source before its verdict is read, each of which must turn A RED: four
-#      that trip the arithmetic self-check, and five of the third outcome that
-#      leave the WIDENED arithmetic perfectly balanced and are caught only
-#      because leg A pins the value of every column and the exit code.
+#      that trip the arithmetic self-check, and six (five of the third outcome,
+#      one ignoring the exit code) that leave the WIDENED arithmetic perfectly
+#      balanced and are caught only because leg A pins the value of every column
+#      and the exit code.
 #   C. the skip and platform-skip columns are FUNCTIONS of the fixtures (a
 #      positive control): deleting the one SKIP: line from a fixture drops the
 #      skip column by one, and giving the causeless marker a cause moves that
@@ -84,7 +87,7 @@ set -u
 cd "$(dirname "$0")/.."
 
 # Loop breaker: leg A runs the REAL tools/run_all.sh inside a throwaway tree over
-# five synthetic fixtures. This file is never one of them, so the branch below is
+# nine synthetic fixtures. This file is never one of them, so the branch below is
 # unreachable in normal operation; it exists in case a future change to the inner
 # invocation ever lets it reach this file. It prints NO terminal PASS marker, so
 # run_all's markerless branch scores it a FAILURE — a branch that asserts nothing
@@ -113,7 +116,7 @@ T=$(mktemp -d "${TMPDIR:-/tmp}/determ-gatescanfail.XXXXXX") || {
 trap 'rm -rf "$T"' EXIT
 
 # ══════════════════════════════════════════════════════════════════════════════
-# The throwaway tree: the REAL run_all.sh + common.sh, five synthetic wrappers,
+# The throwaway tree: the REAL run_all.sh + common.sh, nine synthetic wrappers,
 # and a stub `determ` so the copied runner's binary probe is satisfied offline.
 # ══════════════════════════════════════════════════════════════════════════════
 build_tree() {  # build_tree <root> [--no-skip-in-b] [--cause-in-h] [--green-only]
@@ -204,11 +207,21 @@ FIX
 echo "  PLATFORM-SKIP:"
 FIX
   fi
+  # i. PASS: lines, then a non-zero exit — the shape of a wrapper that aborted
+  #    under `set -e` right after its last PASS: line. A FAILURE: the exit code
+  #    decides, whatever the tail says.
+  cat > "$R/tools/test_i_exit_nonzero.sh" <<'FIX'
+#!/usr/bin/env bash
+echo "  PASS: i1"
+echo "  PASS: fixture-i"
+exit 3
+FIX
   # --green-only: drop every fixture that fails, leaving a suite whose only
   #   non-pass outcome is the wrapper that skipped entirely (leg A2).
   if [ "$GREEN_ONLY" = "1" ]; then
     rm -f "$R/tools/test_d_fail.sh" "$R/tools/test_e_nomarker.sh" \
-          "$R/tools/test_g_pskip_liar.sh" "$R/tools/test_h_pskip_nocause.sh"
+          "$R/tools/test_g_pskip_liar.sh" "$R/tools/test_h_pskip_nocause.sh" \
+          "$R/tools/test_i_exit_nonzero.sh"
   fi
   chmod +x "$R/tools/"*.sh
 }
@@ -232,18 +245,18 @@ cols() {  # cols <runner-stdout> <rc> -> "RUN PASS FAIL PLATFORM-SKIP rc arith-c
     "$(field "$1" RUN)" "$(field "$1" PASS)" "$(field "$1" FAIL)" \
     "$(field "$1" PLATFORM-SKIP)" "$2" "$(echo "$1" | grep -c 'summary arithmetic')"
 }
-PINNED_A="8 3 4 1 1 0"   # the tuple leg A asserts, element by element, below
+PINNED_A="9 3 5 1 1 0"   # the tuple leg A asserts, element by element, below
 
-echo "=== A. run_all.sh summary arithmetic over eight synthetic wrappers ==="
+echo "=== A. run_all.sh summary arithmetic over nine synthetic wrappers ==="
 build_tree "$T/r1"
 OUT_A=$(run_tree "$T/r1"); RC_A=$?
 if [ -z "$(field "$OUT_A" RUN)" ]; then
     echo "$OUT_A" | tail -20
     bad "the runner printed no RUN: column — leg A cannot be judged (shape changed; re-pin this gate)"
 else
-    eqq "$(field "$OUT_A" RUN)"  "8" "RUN counts every wrapper executed"
+    eqq "$(field "$OUT_A" RUN)"  "9" "RUN counts every wrapper executed"
     eqq "$(field "$OUT_A" PASS)" "3" "PASS counts the three wrappers with a terminal PASS marker"
-    eqq "$(field "$OUT_A" FAIL)" "4" "FAIL counts the explicit failure, the markerless wrapper, the one that claimed the wrapper-level skip while asserting, and the one whose marker named no cause"
+    eqq "$(field "$OUT_A" FAIL)" "5" "FAIL counts the explicit failure, the markerless wrapper, the one that claimed the wrapper-level skip while asserting, the one whose marker named no cause, and the one that printed PASS: and exited non-zero"
     eqq "$(field "$OUT_A" PLATFORM-SKIP)" "1" \
         "PLATFORM-SKIP counts the one wrapper that skipped ENTIRELY, and only that one"
     eqq "$(field "$OUT_A" SKIP)" "2" "SKIP counts the two passing wrappers that declined a section"
@@ -268,6 +281,8 @@ else
         "…and is not also listed among the failures"
     eqq "$(echo "$OUT_A" | grep -c 'test_g_pskip_liar.sh (PLATFORM-SKIP claimed by a wrapper that asserted)')" "1" \
         "the wrapper that claimed the skip while asserting is named as a FAILURE, with the reason"
+    eqq "$(echo "$OUT_A" | grep -c -- '- tools/test_i_exit_nonzero.sh (exit 3)')" "1" \
+        "a wrapper that printed PASS: and exited non-zero is named as a FAILURE, with its exit code"
     eqq "$(echo "$OUT_A" | grep -c -- '- tools/test_h_pskip_nocause.sh (no marker)')" "1" \
         "a PLATFORM-SKIP: that names no cause is no marker at all and fails closed"
     # The leg-A tuple and the constant leg B mutates against must agree, or every
@@ -364,6 +379,9 @@ mutate_and_detect "P4 (the suite exits 0 with four real failures present)" \
 mutate_and_detect "P5 (a wrapper may claim the skip marker while printing assertion-level PASS: lines)" \
   's/^        ASSERTED=.*/        ASSERTED=0  # P5/' \
   'ASSERTED=0  # P5'
+mutate_and_detect "P6 (a wrapper's non-zero exit is ignored when its tail shows PASS:)" \
+  's/^    elif \[ "$RC" -ne 0 \]; then$/    elif false; then  # P6/' \
+  'elif false; then  # P6'
 
 echo
 echo "=== C. positive control: the skip columns are functions of the fixtures ==="
@@ -379,7 +397,7 @@ build_tree "$T/r3" --cause-in-h
 OUT_C2=$(run_tree "$T/r3") || true
 eqq "$(field "$OUT_C2" PLATFORM-SKIP)" "2" \
     "naming a cause after PLATFORM-SKIP: moves fixture h into the skipped-entirely column (1 -> 2)"
-eqq "$(field "$OUT_C2" FAIL)" "3" "…and out of the failure column (4 -> 3)"
+eqq "$(field "$OUT_C2" FAIL)" "4" "…and out of the failure column (5 -> 4)"
 eqq "$(field "$OUT_C2" PASS)" "3" "and no verdict moved: PASS is still 3"
 
 echo

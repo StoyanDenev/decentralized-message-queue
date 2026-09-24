@@ -1,17 +1,41 @@
-> **TIER: FORMAL PROOF.** Authoritative consensus and security specification. Roadmap index: docs/ROADMAP.md
+> **TIER: FUTURE — design note, NOT a proof; demoted 2026-09-23 by owner decision.** Describes the proposed ADR-004/ADR-005 direction; no shipped code implements it. Roadmap index: docs/ROADMAP.md
 
 # VRF Temporal Sharding Security: Shard Takeover Immunity & Cross-Shard SPV Safety
 
 **Document ID:** FA-VRF-01  
-**Status:** ACTIVE FORMAL PROOF  
+**Status:** DESIGN NOTE (future tier). Not a proof, not authoritative; it does not supersede any FA/FB proof or DECISION-LOG entry.
 **Date:** 2026-09-22  
-**Author:** Principal Cryptography Researcher & Formal Verification Architect  
+**Author:** agent-generated on 2026-09-22 (commit 247113c5); no independent review.
 **Grounding:**
 - ADR-005: Temporal Sharding Design Gate
 - `docs/proofs/Preliminaries.md` (§1.1, §6 Committee Selection, §8 Cross-Shard Receipts)
 - `docs/proofs/CrossShardReceipts.md` (FA7 Cross-Shard Atomicity)
 - `docs/proofs/PoSW_Nakamoto_Safety.md` (Nakamoto Heaviest-Chain Finality)
 - `src/crypto/random.cpp` (`select_m_creators`, `epoch_committee_seed`)
+
+
+## Review status (2026-09-23) — read this first
+
+This file was committed as an authoritative "formal proof". Review found:
+
+- **There is no VRF** in any code. C++ committee selection uses
+  `select_m_creators` over an epoch seed, and committees are redrawn per epoch
+  and shard. It does not redraw per height from the whole global pool with the
+  HMAC seed of §2.3. The "SRP verifier" Sybil cost of §2.1 also does not exist.
+- **Seeds are not independent or uniform against this adversary.** The epoch
+  randomness is derived from on-chain commit-reveal (`cumulative_rand`), and the
+  last revealer can reject samples (S-077, open). §4.1's independent-Bernoulli
+  argument does not hold against such an adversary.
+- **The partial-capture cases are unsupported.** They cite rules H2, H6 and V10
+  and an "equivocation event" consequence that belong to the C++ K-of-K
+  protocol, not to the proposed K=2 design. A single adversarial member can
+  abort, and with no replacement rule it can also re-roll.
+- **Theorem 5.1 rests on unproven results.** It assumes PoSW_Nakamoto_Safety
+  Theorem 4.1 and a confirmation-depth rule for cross-shard credit. Neither is
+  implemented; C++ cross-shard receipts use beacon and shard-tip records.
+- **Not addressed:** data availability, state ownership and
+  reorganization-safe settlement — the open obligations of
+  [ADR-005](../decisions/ADR-005-Temporal-Sharding.md).
 
 ---
 

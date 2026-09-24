@@ -5,17 +5,25 @@
  * Canonical Binary Wire & Storage Frame Codec (C99 Bare-Metal)
  *
  * Implements strict zero-allocation serialization and deserialization for:
- *   1. Canonical P2P binary envelope (0xB1, v1) across all 19 MsgTypes.
- *   2. Fixed-layout transaction framing (4x256-bit core + trailer).
- *   3. Consensus chatter frames (BLOCK_SIG, CONTRIB, ABORT_CLAIM, ABORT_EVENT, EQUIVOCATION).
- *   4. Control / sync frames (GET_CHAIN, CHAIN_RESPONSE, STATUS, SNAPSHOT, HEADERS).
- *   5. Canonical storage records: DBK1 (Block), DHF1 (Header), DMF1 (Manifest).
+ *   1. The P2P binary envelope (0xB1, v1): all 19 MsgType values are accepted;
+ *      payload codecs exist only for the frames listed below.
+ *   2. TRANSACTION: fixed-layout 4x256-bit core + trailer.
+ *   3. Consensus chatter: BLOCK_SIG, CONTRIB, ABORT_CLAIM, ABORT_EVENT,
+ *      EQUIVOCATION_EVIDENCE.
+ *   4. Control / sync: HELLO, GET_CHAIN, STATUS_RESPONSE, SNAPSHOT_REQUEST,
+ *      HEADERS_REQUEST, the SHARD_TIP / CROSS_SHARD_RECEIPT_BUNDLE wrappers and
+ *      the CHAIN_RESPONSE / HEADERS_RESPONSE containers. Block frames inside
+ *      them are returned undecoded.
+ *   5. Storage records: DBK1 (block file), DHF1 (header record), DMF1 (manifest).
  *
- * Architectural Guarantees:
  *   - Zero dynamic heap allocation (malloc/free) on encode/decode paths.
  *   - Explicit Little-Endian (LE) integer encoding for multi-byte payloads.
- *   - Strict fail-closed parsing: truncated payloads, non-zero reserved bytes,
- *     and unexpected trailing bytes result in immediate failure.
+ *   - Fail-closed decoding: truncated input, non-zero reserved or padding bytes
+ *     and trailing bytes are rejected, except where a field is defined as the
+ *     rest of the input (ABORT_EVENT claims; the SHARD_TIP, RECEIPT_BUNDLE and
+ *     DBK1 block frame). The CHAIN_RESPONSE / HEADERS_RESPONSE iterators return
+ *     one record per call; checking that exactly `count` records fill the data
+ *     is left to the caller.
  */
 
 #ifndef DETERMINISTIC_WIRE_BINARY_CODEC_H
@@ -109,14 +117,21 @@ wire_codec_status_t wire_hello_decode(const uint8_t *data, size_t len,
                                       wire_hello_t *msg);
 
 /* ─── 3. TRANSACTION Frame (MsgType 2) ──────────────────────────────────── */
-/* 4x256-bit fixed frame + trailer */
+/* 4x256-bit fixed frame + trailer. The payload travels in two segments: its
+ * first min(payload_len, 32) bytes in the 32-byte slot at frame offset 96
+ * (the rest of the slot is zero padding, and decode rejects non-zero
+ * padding), and bytes 32..payload_len-1, if any, in the trailer after
+ * payload_len. `payload` and `payload_overflow` point at those two segments
+ * on encode and on decode (payload_overflow is NULL when payload_len <= 32),
+ * so encoding a decoded frame reproduces it byte for byte. */
 typedef struct {
     uint8_t        sender_pubkey[32];
     uint64_t       amount;
     uint64_t       fee;
     uint64_t       nonce;
     uint8_t        recipient_pubkey[32];
-    const uint8_t *payload;
+    const uint8_t *payload;          /* first min(payload_len, 32) bytes */
+    const uint8_t *payload_overflow; /* payload_len - 32 bytes, or NULL */
     uint16_t       payload_len;
     uint8_t        type;
     const char    *from;

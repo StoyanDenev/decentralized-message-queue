@@ -1,23 +1,16 @@
+#include <determ/net/virtual_transport.h>
 /*
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
  * Core Zero-Dependency C99 Non-Blocking Event Loop.
  * Strictly zero dynamic memory allocations.
- * Native OS Multiplexer:
- *   #if defined(__linux__) -> epoll
- *   #elif defined(__APPLE__) -> kqueue
- *   #elif defined(_WIN32) -> select() fallback
  */
 
+#if defined(__linux__)
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
-
-#include <determ/net/virtual_transport.h>
-#include <determ/net/event_loop.h>
-
-#if defined(__linux__)
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -49,7 +42,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <string.h>
-#define NET_USE_SELECT 1
+#define NET_USE_POLL 1
 #define close(s) closesocket(s)
 #define EWOULDBLOCK WSAEWOULDBLOCK
 #define EAGAIN WSAEWOULDBLOCK
@@ -65,9 +58,11 @@ typedef int socklen_t;
 #include <fcntl.h>
 #include <errno.h>
 #include <string.h>
-#define NET_USE_SELECT 1
-#include <sys/select.h>
+#define NET_USE_POLL 1
+#include <poll.h>
 #endif
+
+#include <determ/net/event_loop.h>
 
 int net_event_loop_init(net_event_loop_t *loop) {
     if (!loop) {
@@ -123,12 +118,9 @@ int net_event_loop_add(net_event_loop_t *loop, int fd, uint32_t events, void *us
 
     if (events & NET_EV_READ)  ev.events |= EPOLLIN;
     if (events & NET_EV_WRITE) ev.events |= EPOLLOUT;
-    ev.events |= EPOLLERR | EPOLLHUP | EPOLLET;
+    ev.events |= EPOLLERR | EPOLLHUP; /* level-triggered, as mod() and kqueue */
 
     return epoll_ctl(loop->poll_fd, EPOLL_CTL_ADD, fd, &ev);
-#elif defined(NET_USE_SELECT)
-    (void)events; (void)user_data;
-    return 0;
 #else
     (void)events; (void)user_data;
     return 0;
@@ -141,7 +133,15 @@ int net_event_loop_mod(net_event_loop_t *loop, int fd, uint32_t events, void *us
     }
 
 #if defined(NET_USE_KQUEUE)
-    return net_event_loop_add(loop, fd, events, user_data);
+    /* Set both filters: EV_ADD updates or creates each one, and a filter that
+     * is no longer requested is disabled (a registered EVFILT_WRITE would
+     * otherwise keep firing while the socket is writable). */
+    struct kevent kev[2];
+    EV_SET(&kev[0], (uintptr_t)fd, EVFILT_READ,
+           EV_ADD | ((events & NET_EV_READ) ? EV_ENABLE : EV_DISABLE), 0, 0, user_data);
+    EV_SET(&kev[1], (uintptr_t)fd, EVFILT_WRITE,
+           EV_ADD | ((events & NET_EV_WRITE) ? EV_ENABLE : EV_DISABLE), 0, 0, user_data);
+    return kevent(loop->poll_fd, kev, 2, NULL, 0, NULL) < 0 ? -1 : 0;
 #elif defined(NET_USE_EPOLL)
     struct epoll_event ev;
     memset(&ev, 0, sizeof(ev));
@@ -167,6 +167,7 @@ int net_event_loop_del(net_event_loop_t *loop, int fd) {
     struct kevent kev[2];
     EV_SET(&kev[0], (uintptr_t)fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
     EV_SET(&kev[1], (uintptr_t)fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+    /* Ignore error if one of the filters was not registered */
     (void)kevent(loop->poll_fd, kev, 2, NULL, 0, NULL);
     return 0;
 #elif defined(NET_USE_EPOLL)
@@ -242,7 +243,7 @@ int net_event_loop_poll(net_event_loop_t *loop, int timeout_ms,
     }
 
     for (int i = 0; i < nev; ++i) {
-        out_events[i].fd = -1;
+        out_events[i].fd = -1; /* Epoll stores fd in data if registered, or data.ptr */
         out_events[i].flags = 0;
         out_events[i].user_data = event_list[i].data.ptr;
 
@@ -253,24 +254,6 @@ int net_event_loop_poll(net_event_loop_t *loop, int timeout_ms,
     }
     return nev;
 
-#elif defined(NET_USE_SELECT)
-    struct timeval tv;
-    struct timeval *ptv = NULL;
-    if (timeout_ms >= 0) {
-        tv.tv_sec = timeout_ms / 1000;
-        tv.tv_usec = (long)(timeout_ms % 1000) * 1000L;
-        ptv = &tv;
-    }
-    fd_set rfds, wfds, efds;
-    FD_ZERO(&rfds);
-    FD_ZERO(&wfds);
-    FD_ZERO(&efds);
-    int res = select(0, &rfds, &wfds, &efds, ptv);
-    if (res < 0) {
-        if (errno == EINTR) return 0;
-        return -1;
-    }
-    return 0;
 #else
     return 0;
 #endif

@@ -1,6 +1,8 @@
 # Determ CI — the push-triggered form of tools/ci_local.sh:
 # shared C++ binaries + FAST + doc guards on Linux and Windows/MSVC;
-# a separate Linux job runs C99 targets, isolated mutants and doc guards.
+# a Linux job for the C99 targets (strict GCC and Clang builds, ASan + UBSan,
+# isolated mutants, doc guards); UBSan over the C++ consensus surface; and TLC
+# over docs/proofs/tla.
 #
 # The local WSL2 run via tools/ci_local.sh is the primary gate on the dev box;
 # this workflow is the pushed mirror of it (repo:
@@ -29,13 +31,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Cache the FetchContent-built OpenSSL test-oracle tree (the sole vendored
       # dependency after the asio deletion / JSON vendoring). Keyed on
       # CMakeLists.txt so a dependency change invalidates it; a miss just
       # rebuilds OpenSSL from source (the pre-cache behaviour).
       - name: Cache OpenSSL (_deps)
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: build-linux/_deps
           key: ${{ runner.os }}-openssl-deps-${{ hashFiles('CMakeLists.txt') }}
@@ -47,7 +49,7 @@ jobs:
       # single line is compiled. setup-python provides a standalone (non-marked)
       # interpreter where pip works normally — and pins the version, matching
       # this file's pin-don't-roll discipline for the runner images.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Install python cryptography (vector-gate oracle)
@@ -59,17 +61,22 @@ jobs:
 
   c99:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # 45, not 30: the Clang and sanitizer passes are two extra C99 builds.
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       # The C99 gate configures with the OpenSSL oracle disabled and fetches
       # disconnected. Its mutation runner requires a successful fresh build
       # before counting a rejected mutant; no third-party Python packages.
-      - name: Build + C99 gates
+      - name: Build + C99 gates (GCC)
         run: bash tools/ci_local.sh --c99 --jobs 4
+      - name: Build + C99 gates (Clang)
+        run: CC=clang bash tools/ci_local.sh --c99 --jobs 4
+      - name: C99 gates under ASan + UBSan (GCC)
+        run: bash tools/ci_local.sh --c99-sanitize --jobs 4
       - name: Isolated C99 mutation gates
         run: bash tools/ci_local.sh --c99-mutants --jobs 4
       - name: Documentation guards
@@ -79,9 +86,9 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Cache OpenSSL (_deps)
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: build/_deps
           key: ${{ runner.os }}-openssl-deps-${{ hashFiles('CMakeLists.txt') }}
@@ -89,7 +96,7 @@ jobs:
       # Same pinned interpreter as the linux job (windows-2022's bundled python
       # is not externally-managed, so this is for version determinism, not a
       # PEP 668 fix).
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Install python cryptography (vector-gate oracle)
@@ -106,7 +113,7 @@ jobs:
   # Separate job: Linux/GCC-only.
   ubsan:
     runs-on: ubuntu-24.04
-    # The UBSan pass compiles the ~14k-line main.cpp at RelWithDebInfo with
+    # The UBSan pass compiles the ~71k-line main.cpp at RelWithDebInfo with
     # -fsanitize=undefined AND builds the vendored OpenSSL from source on a clean
     # runner; the first Actions run hit the 90-min wall (SIGTERM/143) before the
     # build finished. Give it headroom (the dev-box WSL2 run is the fast gate),
@@ -114,16 +121,16 @@ jobs:
     # CMakeLists change rather than every run.
     timeout-minutes: 150
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Cache OpenSSL (_deps, UBSan tree)
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: build-linux-ubsan/_deps
           key: ${{ runner.os }}-openssl-deps-ubsan-${{ hashFiles('CMakeLists.txt') }}
           restore-keys: ${{ runner.os }}-openssl-deps-ubsan-
       # Same PEP 668 fix as the linux job (ubuntu-24.04's system python3 is
       # EXTERNALLY-MANAGED, so a bare `pip install` there exits non-zero).
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Install python cryptography (vector-gate oracle)
@@ -132,3 +139,19 @@ jobs:
           python -m pip install cryptography argon2-cffi pynacl
       - name: UBSan build + run consensus subcommands
         run: bash tools/ci_local.sh --sanitize --jobs 4
+
+  # TLC over every docs/proofs/tla/*.cfg. The wrapper refuses a jar whose
+  # sha256 matches no pin and fails closed without java or the jar.
+  tla:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Fetch tla2tools v1.7.4
+        run: curl -fsSL --retry 3 --create-dirs -o tools/tlc/tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+      - name: TLC model check
+        run: bash tools/ci_local.sh --tla

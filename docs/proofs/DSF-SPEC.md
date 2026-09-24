@@ -1,4 +1,4 @@
-> **TIER: FUTURE — post-1.0, non-authoritative.** Design-stage; does NOT describe shipped code and is NOT coherence-maintained against src/. Roadmap index: docs/ROADMAP.md
+> **TIER: FUTURE — post-1.0, non-authoritative.** Design-stage; does NOT describe shipped code and is NOT coherence-maintained against src/ — EXCEPT §10, which is the contract of the shipped C99 CI targets `test-dsf-k2-duel`, `test-k2-duel-fallback` and `test-dsf-k2-recovery` and is kept coherent with src/ (with [K2_VDF_Soundness.md](K2_VDF_Soundness.md)). Roadmap index: docs/ROADMAP.md
 
 # Deterministic-Simulation Framework (DSF) — design specification
 
@@ -427,7 +427,7 @@ height, round, parent, pair, ordered signing-byte body commitment and a fixture
 variant. Its fixed 136-byte big-endian representation supplies numeric comparison;
 its hash is used only for immutable ancestry. This is not a production wire
 format, and the variant is not a VDF output or an anti-grinding construction. The body
-commitment uses explicit signing bytes, not the native-structure ledger-root helpers.
+commitment uses explicit signing bytes, not the ledger-root helpers.
 
 Among valid children of the common anchor, prefer more distinct included messages,
 then the smaller full numeric header. Different root bodies may contain conflicting

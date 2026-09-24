@@ -1,0 +1,346 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Determ Contributors
+//
+// determ-light trustless-read wrapper.
+//
+// Composite primitive used by `balance-trustless`, `nonce-trustless`,
+// and the end-to-end `verify-and-submit` flow. Given (genesis JSON
+// path, RPC port, account domain):
+//
+//   1. Anchor genesis: fetch block 0 via rpc_headers, recompute the
+//      block hash, compare against compute_genesis_hash(genesis). On
+//      mismatch return GENESIS_HASH_MISMATCH.
+//   2. Walk the header chain from genesis to the daemon's current head
+//      using rpc_headers (paginated, max 256 per page). Each page is
+//      verified via verify_headers (prev_hash chain) AND
+//      verify_block_sigs (K-of-K committee sigs) per block.
+//   3. Fetch a state-proof for ("a:", domain) via rpc_state_proof.
+//   4. Verify the state-proof against the head header's state_root.
+//   5. Decode the value_hash back to (balance, next_nonce) via the
+//      committed account-leaf encoding (see chain.cpp::build_state_leaves
+//      "accounts_" branch).
+//
+// The light client maintains an in-memory committee map (domain →
+// pubkey) seeded from the genesis JSON's initial_creators, then
+// extended as REGISTER txs would in a full node. v1.x light-client
+// scope per the plan defers full REGISTER tracking — the verify pass
+// extracts each block's `creators` list from the header and demands
+// every member be in the locally-known committee (seeded from genesis
+// + extended by any block whose creators appear in genesis). This
+// covers genesis-pinned chains; chains with mid-chain REGISTERs need
+// the daemon's `creators` RPC or a future stateful sync extension.
+
+#pragma once
+#include "rpc_client.hpp"
+#include "verify.hpp"
+#include <determ/chain/block.hpp>
+#include <determ/chain/genesis.hpp>
+#include <determ/types.hpp>
+#include <map>
+#include <string>
+
+namespace determ::light {
+
+// Account state extracted from a verified state-proof.
+struct AccountView {
+    uint64_t balance{0};
+    uint64_t next_nonce{0};
+    // The head header's state_root the proof verified against.
+    std::string state_root_hex;
+    // The head block index this view is anchored at.
+    uint64_t height{0};
+};
+
+// Load and parse a genesis JSON file. Throws std::runtime_error on
+// parse failure or missing required fields.
+determ::chain::GenesisConfig load_genesis(const std::string& path);
+
+// Anchor: fetch block 0 from the daemon, recompute its block_hash, and
+// compare against compute_genesis_hash(genesis). Throws on mismatch.
+// Returns the genesis-hash hex for callers that want to pass it to
+// verify_headers as --genesis-hash.
+std::string anchor_genesis(RpcClient& rpc,
+                            const determ::chain::GenesisConfig& genesis);
+
+// Composite: walk the header chain from `from_index` to the daemon's
+// current head, verifying prev_hash continuity AND K-of-K committee
+// sigs per block. Returns the head's block_hash (suitable as the
+// chain-tip pin) plus the head's state_root (suitable for anchoring
+// state-proof verifications). Throws on any verify failure.
+//
+// `committee_seed` is the initial committee map (domain → pubkey),
+// typically derived from the genesis JSON's initial_creators. The
+// function does NOT mutate it for REGISTER/DEREGISTER (scope deferred);
+// callers building against a chain with mid-chain registry changes
+// should pre-populate committee_seed with every domain that has been
+// registered, e.g. via the daemon's `creators` RPC.
+struct VerifiedChain {
+    uint64_t    height{0};        // == last-verified block's index + 1
+    std::string head_block_hash;  // block_hash hex of the tip
+    std::string head_state_root;  // state_root hex of the tip (may be empty
+                                  // if the chain hasn't activated S-033)
+    size_t      headers_verified{0};
+    size_t      blocks_with_sigs_verified{0};
+    size_t      registry_events{0};   // R52: REGISTER/DEREGISTER txs replayed
+                                      // (0 unless track_registry was on)
+};
+
+// R52 --track-registry: when `track_registry` is true the walk REPLAYS
+// mid-chain REGISTER/DEREGISTER transactions into a working registry map
+// (seeded from committee_seed with an always-active window), computing each
+// entry's active_from/inactive_from with the SAME shared formula the full
+// node's apply uses (include/determ/chain/registration_delay.hpp — one
+// definition, no mirrored reimplementation), and the per-block committee
+// check accepts a creator only when the block's index falls inside the
+// domain's [active_from, inactive_from) window. Tx bodies are not in the
+// stripped header stream, so every tx-bearing block (non-zero tx_root) is
+// re-fetched as a FULL block pinned to the already-chained block_hash (the
+// same trust step as the F-7 full-block fallback — a doctored body changes
+// the hash and fails closed). TRUST MODEL / caveat: the replay mirrors the
+// full node's structural application (payload >= 32 for REGISTER; unknown
+// domains ignored for DEREGISTER) but NOT its apply-time fee gate — a tx
+// that a full node skipped for apply-time fee failure would still enter the
+// light map (widening the known-registrant set, never forging a signature:
+// acceptance still requires a valid Ed25519 sig under the registered
+// pubkey). Default false = the pre-R52 genesis-frozen behavior, byte-for-
+// byte (existing callers unaffected).
+// D.5 collector (out_txbearing_full_blocks): when non-null, the walk also
+// COLLECTS the committee-authenticated FULL body of every tx-bearing block
+// (idx > 0, non-zero tx_root) into the vector, ascending by height. Each body
+// is re-fetched via the `block` RPC and PINNED — its recomputed block_hash must
+// equal the block_hash the header walk already committee-chained, so a doctored
+// body fails closed (the same F-7 / --track-registry pin). This is the
+// COMPLETENESS source for the D.5 verify-selection composite (SPEC §11 3a): a
+// truncatable `dapp_messages` RPC hint cannot hide a DAPP_CALL because the
+// collector reads EVERY block body. A zero-tx_root block provably carries no tx
+// ONLY when its committee sigs verified on the NORMAL stripped-header digest path
+// (that digest binds tx_root — verify.cpp:143); a block recovered via the F-7
+// full-block fallback had its HEADER tx_root UNauthenticated (the full body's
+// digest verified, not the header's), so a daemon could serve tx_root=0 to hide a
+// DAPP_CALL. The collector therefore consults the full body whenever the header
+// tx_root is non-zero OR the block was F-7-recovered (must_consult_full_body).
+// Default nullptr = no collection, byte-identical to existing callers.
+VerifiedChain verify_chain_to_head(
+    RpcClient& rpc,
+    const std::map<std::string, PubKey>& committee_seed,
+    const std::string& genesis_hash_hex,
+    bool track_registry = false,
+    // LV-1/LV-2 (inc.2b): genesis k_block_sigs + bft_enabled forwarded to the
+    // per-block verify_block_sigs so the chain walk enforces committee-size
+    // mode-eligibility on every header. Default 0 = not enforced (legacy).
+    size_t expected_k = 0,
+    bool bft_enabled = true,
+    std::vector<nlohmann::json>* out_txbearing_full_blocks = nullptr);
+
+// Whether the D.5 collector (and --track-registry replay) MUST fetch a walked
+// block's full body. The stripped header's tx_root is committee-authenticated only
+// when the block's sigs verified on the normal light-digest path (that digest binds
+// tx_root — verify.cpp:143). A block recovered via the F-7 full-block fallback had
+// its header tx_root UNauthenticated, so a daemon could zero it to make a naive
+// `tx_root != 0` test skip a real tx-bearing block (hiding e.g. a roster REMOVE →
+// false SELECTED). Returns true when the header claims txs OR the block was
+// F-7-recovered — in the latter case the (trusted) full body decides. Pure; exposed
+// for the falsify-on-mutant unit gate (selftest-verify-selection). Dropping the
+// `recovered_via_f7` term is the primary mutant.
+bool must_consult_full_body(const std::string& header_tx_root_hex,
+                            bool recovered_via_f7);
+
+// LSP-6 fast-resume. Given a previously-verified anchor (anchor_height ==
+// a prior VerifiedChain.height, anchor_block_hash == its head_block_hash),
+// verify ONLY the suffix the daemon has added ABOVE the anchor. The first
+// suffix block (index == anchor_height) must have prev_hash == anchor_block_hash
+// (enforced by verify_headers' continuity gate); under SHA-256 collision
+// resistance that block_hash transitively commits the entire skipped prefix
+// 0..anchor_height-1, which LSP-1 already committee-verified when the anchor was
+// written. The CALLER MUST have re-pinned the genesis first (the persisted
+// anchor.genesis_hash == the locally-recomputed compute_genesis_hash — LSP-2);
+// this function assumes that gate has passed.
+//
+// Returns {resumed=false} WITHOUT verifying anything when the daemon's head is
+// not strictly above the anchor (nothing new, or a rollback) — the caller falls
+// back to a full verify_chain_to_head. Returns {resumed=true, vc} after verifying
+// the suffix (vc.height = daemon tip; vc.headers_verified /
+// blocks_with_sigs_verified count ONLY the suffix). THROWS if the suffix does not
+// chain onto anchor_block_hash (a fork/rollback below the anchor) — a real
+// anomaly that must surface, never be silently re-verified from genesis.
+struct ResumeResult {
+    bool          resumed{false};
+    VerifiedChain vc;
+};
+ResumeResult verify_chain_from_anchor(
+    RpcClient& rpc,
+    const std::map<std::string, PubKey>& committee_seed,
+    uint64_t anchor_height,
+    const std::string& anchor_block_hash,
+    size_t expected_k = 0,
+    bool bft_enabled = true);
+
+// The committee-verified head a read/verify composite anchors against, obtained
+// either by a full from-genesis verify or — when `resume` is set and a valid,
+// genesis-pinned cached anchor exists and the daemon is ahead of it — by the
+// LSP-6 fast-resume suffix walk. This is the SINGLE source of truth for the
+// "resume-or-full" decision: cmd_verify_chain and every composite trustless read
+// route through it, so they all inherit the same (adversarially-verified) resume
+// soundness + genesis re-pin + fallback rules rather than reimplementing them.
+struct AnchoredHead {
+    std::string   genesis_hash_hex;  // the LOCAL compute_genesis_hash recompute
+    VerifiedChain vc;                // the verified head (full or resumed suffix tip)
+    bool          resumed{false};    // true iff the cached anchor was usable + consumed
+    std::string   note;              // "" on a plain full verify; else a resume/fallback note
+};
+
+// Always anchors genesis first (anchor_genesis). If `resume` and a valid
+// genesis-pinned anchor is cached at `state_path` (empty → default_state_path())
+// and the daemon's head is strictly above it, verifies ONLY the suffix above the
+// anchor (verify_chain_from_anchor); an absent / corrupt / wrong-chain anchor
+// falls back to a full verify_chain_to_head (NEVER weaker). A fork below the
+// anchor THROWS (verify_chain_from_anchor's hard error).
+//
+// LSP-7 head-monotonicity (a valid genesis-pinned anchor is LOAD-BEARING, not
+// just an optimization): a fork-free chain never regresses, so with such an
+// anchor at height H —
+//   * daemon head < H  → THROW (stale/truncated state; e.g. an old-snapshot
+//     restore). Clear the cache with `state --clear` if the reset was intended.
+//   * daemon head == H → full verify, then the verified tip's block_hash MUST
+//     equal the cached anchor's (same-height fork at the anchor → THROW).
+//   * daemon head > H  → the LSP-6 suffix walk; if the daemon's head then
+//     regresses to ≤ H between queries → THROW (inconsistent daemon).
+// Pre-LSP-7 the first two cases silently fell back to a full verify that
+// accepted the shorter/stale chain. With resume=false this is exactly
+// anchor_genesis + verify_chain_to_head, so existing callers are byte-for-byte
+// unaffected.
+AnchoredHead anchored_head(
+    RpcClient& rpc,
+    const std::map<std::string, PubKey>& committee_seed,
+    const determ::chain::GenesisConfig& genesis,
+    bool resume,
+    const std::string& state_path);
+
+// Composite: fetch a state-proof for the "a:" + domain key, verify it
+// against the head's state_root, and decode the value_hash back to
+// (balance, next_nonce). The decode reproduces chain.cpp's accounts_
+// leaf encoding: value_hash = SHA256(u64_be(balance) || u64_be(next_nonce)).
+// Since the encoded value is the hash (not the cleartext), the light
+// client also fetches the cleartext (balance, next_nonce) via the
+// daemon's `account` RPC, recomputes the hash, and confirms it matches
+// value_hash. If the daemon lies about the cleartext, the hash check
+// fails and the function throws.
+// resume / state_path (default off / default cache) route the head-anchoring
+// through anchored_head; with resume=false the behavior is byte-identical to the
+// original full from-genesis verify, so existing callers need no change.
+//
+// `max_wait_seconds` (default 0 = no wait, behaviour unchanged) is forwarded to
+// committee_bound_state_root: when the anchor is the chain head (its state_root
+// has no committee-signed successor yet) the reader polls up to max_wait_seconds
+// for the next block, then binds the already-held proof. Default 0 fails closed
+// at the head exactly as before.
+AccountView read_account_trustless(
+    RpcClient& rpc,
+    const std::map<std::string, PubKey>& committee_seed,
+    const determ::chain::GenesisConfig& genesis,
+    const std::string& domain,
+    bool resume = false,
+    const std::string& state_path = "",
+    uint64_t max_wait_seconds = 0);
+
+// Helper: build the genesis committee seed map (domain → ed_pub) from
+// the genesis config's initial_creators. Used by verify-chain and the
+// trustless-read paths so callers don't have to duplicate the
+// genesis-loading code.
+std::map<std::string, PubKey>
+build_genesis_committee(const determ::chain::GenesisConfig& cfg);
+
+// Return the COMMITTEE-BOUND state_root committed by the block at
+// `anchor_index` — never the daemon's bare state_root FIELD.
+//
+// WHY THIS EXISTS (soundness-critical): the committee signs
+// compute_block_digest, which EXCLUDES state_root. state_root is bound
+// to the block ONLY via Block::signing_bytes → block_hash =
+// SHA256(signing_bytes || creator_block_sigs). But the `headers` RPC
+// strips the heavy fields signing_bytes needs (transactions,
+// cross_shard_receipts, inbound_receipts, initial_state), so a light
+// client CANNOT recompute block_hash from a stripped header — and a
+// malicious daemon can swap the state_root FIELD after the committee
+// signed. This helper fetches the FULL block (so block_hash is
+// recomputable), then binds that recomputed block_hash to a
+// COMMITTEE-SIGNED successor header via successor.prev_hash == recomputed
+// block_hash. The successor's committee sigs (over its OWN digest,
+// which DOES bind prev_hash) thus transitively commit the anchor's
+// state_root.
+//
+// Returns the anchor block's state_root hex (empty string if the block
+// carries a zero state_root, i.e. a pre-S-033 / unpopulated block).
+//
+// Throws std::runtime_error on: out-of-range anchor, malformed block,
+// no committee-signed successor yet (anchor is the chain head), a
+// successor whose committee sigs fail, or — the load-bearing check — a
+// successor.prev_hash that does not equal the recomputed anchor
+// block_hash (the daemon forged the block body, e.g. a swapped
+// state_root). `committee_json` is the {members:[...]} shape
+// verify_block_sigs consumes (built once by the caller from the
+// genesis-seeded committee).
+//
+// `max_wait_seconds` (default 0 = no wait, behaviour unchanged) enables the
+// HOLD-AND-WAIT path for the chain-head case: when the anchor IS the current
+// head its state_root has no committee-signed successor yet, so binding cannot
+// complete. Because the caller has ALREADY captured the proof for this anchor
+// and the anchor block is immutable + retained, we simply poll for the next
+// block to be produced (up to max_wait_seconds, 1s between attempts) and then
+// bind the HELD proof — we NEVER re-fetch the proof (which would race a state
+// change). This is the sound, reader-side fix for the S-042 head-read regression
+// (the daemon serves the proof at the head, whose root is not yet bindable). With
+// max_wait_seconds=0 the head case fails closed immediately, exactly as before.
+//
+// `out_committee_block_hash` (optional): when non-null, on success it receives
+// the COMMITTEE-BOUND recomputed block_hash of the anchor — the same hash the
+// successor's committee signature commits (successor.prev_hash). This is the
+// ONLY committee-attested hash of the anchor block; the daemon-reported
+// `block_hash` header FIELD is NOT attested and must never be used as a trust
+// anchor. Callers that pin a full block body to the anchor (e.g. verify-ct-block
+// re-verifying the block's confidential txs) MUST pin against THIS value, not the
+// reported field, or the pin is circular. Untouched on the throw paths.
+// `expected_k` / `bft_enabled` (LV-1/LV-2, inc.2): the genesis `k_block_sigs` and
+// `bft_enabled` flag. When `expected_k > 0` they are forwarded to the successor's
+// `verify_block_sigs`, which then enforces the node's committee-size
+// mode-eligibility (MD names exactly k creators; BFT `ceil(2k/3)`; BFT only when
+// `bft_enabled`) — closing the 1-of-K / BFT-downgrade forgery on this anchor.
+// Default 0 = not enforced (byte-identical legacy behaviour for callers that do
+// not carry a genesis). Inserted BEFORE `out_committee_block_hash` so the sole
+// out-pointer caller is the only positional site that shifts.
+// `out_committee_size` (optional): set to |creators| of the COMMITTEE-BOUND full
+// block (the body whose recomputed block_hash the successor's committee sig commits)
+// — the ONLY authenticated committee size for anchor_index. Callers must use this,
+// never |creators| off a stripped header (which the daemon can inflate/deflate
+// freely, since the stripped header's block_hash is trusted, not recomputed here).
+std::string committee_bound_state_root(RpcClient& rpc,
+                                       const nlohmann::json& committee_json,
+                                       uint64_t anchor_index,
+                                       uint64_t max_wait_seconds = 0,
+                                       size_t expected_k = 0,
+                                       bool bft_enabled = true,
+                                       std::string* out_committee_block_hash = nullptr,
+                                       size_t* out_committee_size = nullptr);
+
+// The committee membership of a block, authenticated by binding the served FULL
+// body to a committee-attested block_hash. `creators` + `block_sigs` are both inputs
+// to Block::compute_hash (src/chain/block.cpp:323 / :488), so a body whose
+// recomputed block_hash equals the attested value carries a committee-committed
+// creator set AND per-slot signed/abstained status.
+struct AuthenticatedCommittee {
+    std::vector<std::string> creators;
+    std::vector<Signature>   block_sigs;   // parallel to creators (may be shorter)
+};
+
+// Recompute-bind a served FULL block to the committee-attested block_hash BEFORE
+// trusting its committee metadata, then return the authenticated committee. Requires
+// to_hex(full.compute_hash()) == attested_block_hash (the hash committee_bound_state_root
+// bound via the committee-signed successor); THROWS otherwise — a daemon that forged
+// creators[] changes compute_hash. This is the F-7-safe committee source: reading
+// creators/committee_size off a stripped header (bound only by a string-compared,
+// never-recomputed block_hash field) is a false-YES vector. Pure; the falsify-on-mutant
+// seam for committee-at-height / verify-state-root (the mutant dropping the hash-equality
+// check trusts a forged committee).
+AuthenticatedCommittee authenticated_committee(const determ::chain::Block& full,
+                                               const std::string& attested_block_hash);
+
+} // namespace determ::light

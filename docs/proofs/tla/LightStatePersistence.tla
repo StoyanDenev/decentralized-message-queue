@@ -200,7 +200,7 @@ offline gap is re-derived by the suffix verify, not cached).
 --------------------------------------------------------------------------
 Companion analytic source: `docs/proofs/LightStatePersistenceSoundness.md`
 (LSP-1..LSP-7, all modeled — LSP-7 via MonotonicityGate).
-Empirical pin: `tools/test_light_state.sh` (27 offline
+Empirical pin: `tools/test_light_state.sh` (29 offline
 assertions — `state --selftest` round-trip + 5 fail-closed reject paths;
 `--show`/`--clear`/`--show --json` graceful-absence + fail-closed-on-corrupt;
 `--verify-anchor` PASS / MISMATCH-exit-2; `--persist` arg acceptance + the LSP-1
@@ -768,7 +768,7 @@ Prop_TamperNeverLoadsAccepted ==
 \*       not-ahead fallback + fork-below-anchor hard error + --resume --persist loop.
 \*
 \* Runtime regression:
-\*   tools/test_light_state.sh (27 offline assertions) — state --selftest round-trip
+\*   tools/test_light_state.sh (29 offline assertions) — state --selftest round-trip
 \*     + 5 fail-closed reject paths (malformed JSON / bad schema_version / short
 \*     genesis_hash / missing field / empty-state_root round-trip — LSP-3 / LSP-4 /
 \*     INV_FailClosed / INV_SchemaGated); --show / --clear graceful-absence +

@@ -116,6 +116,7 @@ static void test_transaction_frame(void) {
     in_tx.nonce = 42ULL;
     memset(in_tx.recipient_pubkey, 0x22, 32);
     in_tx.payload = long_payload;
+    in_tx.payload_overflow = long_payload + 32;
     in_tx.payload_len = 64;
     in_tx.type = 1;
     in_tx.from = "determ1alice";
@@ -141,6 +142,9 @@ static void test_transaction_frame(void) {
     TEST_ASSERT(out_tx.nonce == in_tx.nonce);
     TEST_ASSERT(memcmp(out_tx.recipient_pubkey, in_tx.recipient_pubkey, 32) == 0);
     TEST_ASSERT(out_tx.payload_len == in_tx.payload_len);
+    TEST_ASSERT(memcmp(out_tx.payload, long_payload, 32) == 0);
+    TEST_ASSERT(out_tx.payload_overflow != NULL);
+    TEST_ASSERT(memcmp(out_tx.payload_overflow, long_payload + 32, 32) == 0);
     TEST_ASSERT(out_tx.type == in_tx.type);
     TEST_ASSERT(out_tx.from_len == in_tx.from_len);
     TEST_ASSERT(memcmp(out_tx.from, in_tx.from, in_tx.from_len) == 0);
@@ -152,6 +156,36 @@ static void test_transaction_frame(void) {
     TEST_ASSERT(out_tx.shard_id == in_tx.shard_id);
     TEST_ASSERT(out_tx.pq_auth_len == in_tx.pq_auth_len);
     TEST_ASSERT(memcmp(out_tx.pq_auth, in_tx.pq_auth, in_tx.pq_auth_len) == 0);
+
+    /* encode(decode(frame)) reproduces the frame, payload bytes included. */
+    uint8_t again[1024];
+    size_t again_len = 0;
+    TEST_ASSERT(wire_tx_encode(again, sizeof(again), &out_tx, &again_len) == WIRE_CODEC_OK);
+    TEST_ASSERT(again_len == written && memcmp(again, buf, written) == 0);
+
+    /* A short payload leaves zero padding in the 32-byte slot; non-zero
+     * padding is rejected. */
+    in_tx.payload_len = 5;
+    in_tx.pq_auth = NULL;
+    in_tx.pq_auth_len = 0;
+    uint8_t short_frame[1024];
+    size_t short_len = 0;
+    TEST_ASSERT(wire_tx_encode(short_frame, sizeof(short_frame), &in_tx, &short_len) == WIRE_CODEC_OK);
+    TEST_ASSERT(wire_tx_decode(short_frame, short_len, &out_tx) == WIRE_CODEC_OK);
+    TEST_ASSERT(out_tx.payload_len == 5 && memcmp(out_tx.payload, long_payload, 5) == 0);
+    TEST_ASSERT(out_tx.payload_overflow == NULL);
+    short_frame[96 + 5] = 0x01;
+    TEST_ASSERT(wire_tx_decode(short_frame, short_len, &out_tx) == WIRE_CODEC_ERR_NONZERO_RESERVED);
+    short_frame[96 + 5] = 0x00;
+    short_frame[127] = 0x80;
+    TEST_ASSERT(wire_tx_decode(short_frame, short_len, &out_tx) == WIRE_CODEC_ERR_NONZERO_RESERVED);
+    short_frame[127] = 0x00;
+    TEST_ASSERT(wire_tx_decode(short_frame, short_len, &out_tx) == WIRE_CODEC_OK);
+
+    /* A declared overflow segment without its bytes is refused, not encoded. */
+    in_tx.payload_len = 64;
+    in_tx.payload_overflow = NULL;
+    TEST_ASSERT(wire_tx_encode(short_frame, sizeof(short_frame), &in_tx, &short_len) == WIRE_CODEC_ERR_INVALID_ARG);
 
     /* Verify non-zero reserved reject */
     buf[56] = 0x01;

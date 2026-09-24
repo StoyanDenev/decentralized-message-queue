@@ -1,3 +1,5 @@
+> **Correction 2026-09-23:** §5.3 and the FA3 compositions (§6.2, §7 F-3, §8.2, §9) relied on FA3's zero-bias claim, which is withdrawn (`SelectiveAbort.md`, correction 2026-09-22). Commit-reveal gives commitment binding only. The last Phase-2 revealer knows `cumulative_rand` before it reveals and can reject that sample by withholding; a Phase-2 abort is neither recorded nor suspended, so last-revealer selective abort remains open (S-077). The uniformity, runtime, determinism and timing results T-1..T-6 are unaffected: they are properties of `select_m_creators` given its seed, not of how the seed is produced. Since D4 an equivocation event changes no registry state, so there is no post-slash change of `N`. The sections below are restated accordingly.
+
 # S-020 — Hybrid Fisher-Yates committee selection: uniformity + bounded runtime + side-channel resistance
 
 This document proves the closure of `docs/SECURITY.md` §S-020 (Rejection sampling O(K²) at K/N → 1 — Medium → Mitigated) shipped at `src/crypto/random.cpp::select_m_creators` (lines 70–100). The pre-fix code used a single rejection-sampling path that ran expected `O(K · N/(N−K))` SHA-256 hashes; as the ratio `K/N` approached 1 the final pick expected ~`N` trials and at `K = N − 1` ~`N` trials *per* committee draw, with the worst-case runtime mathematically unbounded though never a hard hang. That gradual degradation gave a producer-aligned adversary a knob to nudge committee-selection latency in pathological pool sizes, and the resulting variability was a (faint) timing side-channel into which validator-indices landed in the result.
@@ -6,7 +8,7 @@ The fix is a hybrid: keep rejection sampling on the `K/N ≤ 0.5` regime (cheap,
 
 The proof here pins the algebraic properties — branch-internal uniformity (T-1, T-2), branch-boundary correctness (T-3), bounded asymptotic runtime in both branches (T-4), determinism across replay (T-5), and absence of identity-dependent timing leakage (T-6) — that make the hybrid sound. This is companion to the higher-level `CommitteeSelection.md` (FA1 + FA8) which cites the function at the protocol level, and to `S010S011SybilEconomics.md` which uses the function's uniformity property as its sampling-fairness premise.
 
-**Companion documents:** `Preliminaries.md` (F0) for `N`, `K`, `random_state` notation; H1–H4 honest-validator assumptions; A1 Ed25519 EUF-CMA; A2 SHA-256 collision resistance; A3 SHA-256 preimage resistance + ROM assumption used in §3 below. `Safety.md` (FA1) for the K-of-K safety theorem that cites `select_m_creators` at V3. `Liveness.md` (L4) for the rotational-eligibility argument that uses the uniformity result here. `BFTSafety.md` (FA5) for the BFT-mode escalation that uses the same selection function over the BFT committee `|K_h| = ⌈2K/3⌉`. `RegionalSharding.md` (FA8) for the region-aware committee selection that wraps the same function with a region-filter. `Censorship.md` (FA2) §3 for the K-conjunction censorship bound whose probability calculation cites the per-domain selection probability `K/N`. `S010S011SybilEconomics.md` for the Sybil-cost formula that cites uniform-random selection as its first premise. `S029ForkChoiceSoundness.md` for the fork-choice rule that operates on blocks whose committees were produced by this function. `docs/SECURITY.md` §S-020 for the closure-narrative row.
+**Companion documents:** `Preliminaries.md` (F0) for `N`, `K`, `random_state` notation; H1–H4 honest-validator assumptions; A1 Ed25519 EUF-CMA; A2 SHA-256 collision resistance; A3 SHA-256 preimage resistance; and the random-oracle model for SHA-256 used in §3 below (Preliminaries §2.1 states when a theorem uses it). This document writes that model "A3 ROM"; it is stronger than A3 and carries no label of its own in Preliminaries §2.0. `Safety.md` (FA1) for the K-of-K safety theorem that cites `select_m_creators` at V3. `Liveness.md` (L4) for the rotational-eligibility argument that uses the uniformity result here. `BFTSafety.md` (FA5) for the BFT-mode escalation that uses the same selection function over the BFT committee `|K_h| = ⌈2K/3⌉`. `RegionalSharding.md` (FA8) for the region-aware committee selection that wraps the same function with a region-filter. `Censorship.md` (FA2) §3 for the K-conjunction censorship bound whose probability calculation cites the per-domain selection probability `K/N`. `S010S011SybilEconomics.md` for the Sybil-cost formula that cites uniform-random selection as its first premise. `S029ForkChoiceSoundness.md` for the fork-choice rule that operates on blocks whose committees were produced by this function. `docs/SECURITY.md` §S-020 for the closure-narrative row.
 
 ---
 
@@ -124,7 +126,7 @@ The boundary is asymmetric by one integer step — but both algorithms are unifo
 
 ### 2.4 Inputs treated as ROM oracle queries
 
-The `random_state` is the protocol-level deterministic randomness from which both branches derive their uniformly-random draws. Under A3 ROM (Preliminaries §2.1 + §2.4), the iterated SHA-256 outputs `SHA256(h || 0)`, `SHA256(h || 1)`, `SHA256(SHA256(h || 0) || 0)`, ... are treated as fresh oracle queries returning independent uniform 256-bit values. The `hash_mod` reduction (§2.1) preserves this uniformity over the integer range `[0, n)` via the inner rejection. So both branches are equivalent to drawing a stream of independent uniform integers `u_1, u_2, ... ∈ [0, N)` (rejection branch) or `u_1 ∈ [0, N), u_2 ∈ [0, N-1), u_3 ∈ [0, N-2), ...` (F-Y branch).
+The `random_state` is the protocol-level deterministic randomness from which both branches derive their uniformly-random draws. Under A3 ROM (Preliminaries §2.1), the iterated SHA-256 outputs `SHA256(h || 0)`, `SHA256(h || 1)`, `SHA256(SHA256(h || 0) || 0)`, ... are treated as fresh oracle queries returning independent uniform 256-bit values. The `hash_mod` reduction (§2.1) preserves this uniformity over the integer range `[0, n)` via the inner rejection. So both branches are equivalent to drawing a stream of independent uniform integers `u_1, u_2, ... ∈ [0, N)` (rejection branch) or `u_1 ∈ [0, N), u_2 ∈ [0, N-1), u_3 ∈ [0, N-2), ...` (F-Y branch).
 
 This abstraction is the operational meaning of "uniformly-random draw" in the theorems below.
 
@@ -274,7 +276,7 @@ So every operation in `select_m_creators` is a pure function of its inputs. The 
 
 **Cross-chain-reload determinism.** Chain reload restores `random_state` from the snapshot or replays it from the genesis seed via the `update_random_state` chain. Per the snapshot-equivalence theorem (`SnapshotEquivalence.md`), the post-reload `random_state` at any height `h` is byte-identical to the pre-reload value at the same height. So replaying `select_m_creators(random_state_h, N_h, K)` post-reload yields the same committee.
 
-**Test surface.** The in-process test `determ test-committee-selection` (`src/main.cpp:6225+`) asserts T-5 directly:
+**Test surface.** The in-process test `determ test-committee-selection` (`src/main.cpp:8478+`) asserts T-5 directly:
 
 - Assertion 1: `select_m_creators(seed(1), 100, 5) == select_m_creators(seed(1), 100, 5)` — same inputs, identical output (within-process determinism).
 - Assertion 2: `select_m_creators(seed(1), 100, 5) != select_m_creators(seed(2), 100, 5)` — different seeds, different output (seed-sensitivity).
@@ -345,7 +347,7 @@ So the output space has exactly `N! / (N − K)!` K-permutations, each with prob
 
 **Proof.** Trivial composition: the T-1 inductive step uses "the next draw is uniform on `[0, N)`" — which is exactly L-1's claim under A3 ROM. The T-2 inductive step uses "the next draw is uniform on `[i, N)`" — which is L-1's claim with `n = N − i` (translated by `+ i` after the call, deterministic shift preserving uniformity). So T-1 and T-2 both hold under L-1's correctness, which holds under A3 ROM. ∎
 
-**Implication.** The hybrid algorithm's uniformity property degrades gracefully under A3 ROM: if SHA-256 were to be broken (e.g., a structural attack making its output distinguishable from uniform), the function's uniformity claim would weaken commensurately. The protocol does not depend on uniformity claims stronger than A3 — see Preliminaries §2.4 ("What we do not assume").
+**Implication.** The hybrid algorithm's uniformity property degrades gracefully under A3 ROM: if SHA-256 were to be broken (e.g., a structural attack making its output distinguishable from uniform), the function's uniformity claim would weaken commensurately. The protocol does not depend on uniformity claims stronger than the ROM it states per theorem (Preliminaries §2.1; see also §2.4, "What we do not assume").
 
 ---
 
@@ -375,15 +377,15 @@ In the F-Y branch, the runtime is deterministic in `(K, N)` and independent of t
 
 ### 5.3 Adversary $Adv_{grind}$: committee-selection grinding via beacon manipulation
 
-**Setup.** Adversary `Adv` controls a fraction of the validator pool and attempts to manipulate `random_state` to bias the future committee in their favor. The attack is: `Adv` selectively withholds Phase-2 reveals (per the selective-abort defense `SelectiveAbort.md` FA3) to influence the next round's `random_state` derivation, hoping to bias the committee at some future height.
+**Setup.** Adversary `Adv` controls a fraction of the validator pool and attempts to manipulate `random_state` to bias the future committee in their favor. The attack is: `Adv` selectively withholds Phase-2 reveals to influence the next round's `random_state` derivation, hoping to bias the committee at some future height.
 
-**Closure.** This adversary composes with the selective-abort defense (FA3) and the fork-choice rule (S-029 / `S029ForkChoiceSoundness.md`). The relevant facts:
+**Status: open (S-077).** The relevant facts:
 
-- FA3 proves that selective-abort is information-theoretic under A3 preimage resistance — the adversary cannot gain information about `delay_output` before deciding to abort. So `Adv` cannot grind by trial-and-error on Phase-2 reveals (each abort costs them per-round opportunity, and the next round's `random_state` is still a fresh CSPRNG mix per H1).
+- FA3's zero-bias claim is withdrawn (`SelectiveAbort.md`, correction 2026-09-22). Commit-reveal gives commitment binding only: `Adv` cannot learn an honest secret before it is revealed (A3) or change its own committed secrets (A2). But the member that receives the other K−1 Phase-2 reveals first knows `cumulative_rand` before revealing and can reject that sample by withholding its own reveal. A Phase-2 abort is neither recorded nor suspended, so each veto costs only the withholder's seat at that height, and the re-round is a fresh draw it cannot choose. That is rejection sampling, not choice; `docs/SECURITY.md` S-077 bounds the gain in the withholder's own next-committee inclusion probability.
 - S-029 proves the fork-choice rule (`Chain::resolve_fork`) is deterministic on (sig_count, abort_count, block_hash). `Adv`'s grinding to produce a specific committee at height `h+1` does *not* let them produce a specific fork-choice winner at `h+1` — the fork-choice rule operates on the published block contents, not on the committee selection method.
-- `select_m_creators`'s contribution is the uniformity property (T-1 / T-2): even if `Adv` could grind 100 random_state candidates and pick the most favorable, each candidate yields a uniformly-distributed K-subset. The "best" candidate gives `Adv` a marginally better committee at the cost of `100 ×` the work — and per FA3 + S-029, that work is wasted because (a) committee selection is per-height, not per-fork, and (b) the next height's committee is re-randomized regardless.
+- `select_m_creators`'s contribution is the uniformity property (T-1 / T-2): every seed `Adv` lets through maps to a uniformly-distributed K-subset, so a veto buys a fresh uniform draw, not a chosen committee. The branch choice depends only on `(K, N)`, so `Adv` cannot steer it either.
 
-So $Adv_{grind}$ is closed by composition with FA3 (selective-abort) + S-029 (fork-choice) + T-1 / T-2 (uniformity here). `select_m_creators` itself is not vulnerable to grinding; the hybrid algorithm produces a uniform K-subset regardless of `random_state` choice.
+So $Adv_{grind}$ is not closed: the S-077 veto remains. What this proof establishes is that `select_m_creators` adds no grinding surface of its own: it maps a uniformly random seed to a uniform K-subset of whatever pool it is given.
 
 ### 5.4 Adversary $Adv_{exhaust}$: rejection-sampling resource-exhaustion via crafted pool
 
@@ -413,13 +415,13 @@ So $Adv_{exhaust}$ is closed by T-3's branch boundary: whenever the pathology wo
 ### 6.2 Companion proofs
 
 - **`CommitteeSelection.md` (sibling)** covers FA1 + FA8 at the higher protocol level; this proof goes deeper on the specific hybrid algorithm's analytic properties.
-- **`SelectiveAbort.md` (FA3)** covers the information-theoretic selective-abort defense; T-1 / T-2 here compose with FA3 (selective-abort cannot bias the uniform K-subset distribution).
+- **`SelectiveAbort.md` (FA3)** — its zero-bias claim is withdrawn: commitment binding only; last-revealer selective abort remains open (S-077). T-1 / T-2 here are unaffected, since they hold for whichever seed is accepted; the veto acts on which seed is accepted, not on the subset a seed maps to.
 - **`Liveness.md` (L4)** covers the rotational-eligibility argument that uses the per-domain `K / N` marginal probability; this proof provides T-1.1 / T-2.1 as the structural backing.
 - **`EquivocationSlashing.md` (FA6)** does not directly cite `select_m_creators` and, since D4 (2026-09-16), does not change `N` either: an `EquivocationEvent` moves no registry state, so an equivocator stays in the eligible pool. The `N`-change this bullet used to describe came from the removed `inactive_from` flip. T-1 / T-2 hold for any `N ≥ K` regardless, so nothing in the S-020 closure depended on it; the surviving `N`-changing channels are REGISTER/DEREGISTER, the stake floor and the S-032 suspension window.
 
 ### 6.3 Test surface
 
-The in-process unit test `determ test-committee-selection` (`src/main.cpp:6225+`) exercises both branches with 13 assertions across 10 scenarios:
+The in-process unit test `determ test-committee-selection` (`src/main.cpp:8478+`) exercises both branches with 13 assertions across 10 scenarios:
 
 1. **Determinism across same-input invocations** (T-5).
 2. **Seed-sensitivity** (T-5).
@@ -456,9 +458,9 @@ The rejection branch's expected runtime is `Σ_{i=0}^{K-1} N / (N − i)`, which
 
 ### F-3: No PRNG-specific concern; uniformity depends on `epoch_committee_seed` quality
 
-Both T-1 and T-2 are conditional on A3 ROM on the SHA-256 stream. If SHA-256 were to be broken (e.g., a structural attack making output distinguishable from uniform), the uniformity claims would weaken. The protocol assumes A3 globally (Preliminaries §2.4); this proof inherits that assumption.
+Both T-1 and T-2 are conditional on A3 ROM on the SHA-256 stream. If SHA-256 were to be broken (e.g., a structural attack making output distinguishable from uniform), the uniformity claims would weaken. The proof series states its ROM use per theorem (Preliminaries §2.1); this proof uses it for T-1, T-2 and L-1.
 
-The seed source `random_state` itself is built from `update_random_state(prev_state, dh_output)` at every block apply; the per-block freshness comes from the K committee members' Phase-1 secrets (uniform-CSPRNG-drawn per H1). So `random_state` is unpredictable to the adversary provided ≥ 1 honest committee member at each height (composes with Liveness L4 and Censorship T-2.1).
+The seed source `random_state` itself is built from `update_random_state(prev_state, dh_output)` at every block apply; the per-block freshness comes from the K committee members' Phase-1 secrets (uniform-CSPRNG-drawn per H1). So `random_state` is unpredictable to the adversary provided ≥ 1 honest committee member at each height (composes with Liveness L4 and Censorship T-2.1). Unpredictable is not unbiased: the last Phase-2 revealer can reject a value it has already computed (S-077, open; §5.3).
 
 **Closure status.** Acknowledged; the conditional is the standard ROM + ≥1-honest-committee composition the protocol's safety arguments make everywhere. No `select_m_creators`-specific gap.
 
@@ -492,7 +494,7 @@ The sister function `select_after_abort_m` (`random.cpp:122–163`) uses the sam
 - `src/crypto/random.cpp:20` — `update_random_state(prev_state, dh_output)` seed-mixing chain.
 - `src/crypto/random.cpp:169–175` — `epoch_committee_seed(epoch_rand, shard_id)` seed-derivation per shard.
 - `include/determ/crypto/random.hpp` — header declarations; S-020 narrative comment on hybrid choice.
-- `src/main.cpp:6225+` — `determ test-committee-selection` in-process unit harness (13 assertions across 10 scenarios).
+- `src/main.cpp:8478+` — `determ test-committee-selection` in-process unit harness (13 assertions across 10 scenarios).
 - `tools/test_committee_selection.sh` — wrapper script invoking the harness.
 - `tools/operator_committee_audit.sh` — operator command for committee-selection audit.
 
@@ -504,7 +506,7 @@ The sister function `select_after_abort_m` (`random.cpp:122–163`) uses the sam
 - `docs/proofs/BFTSafety.md` (FA5) — BFT-mode shrunk committee `|K_h| = ⌈2K/3⌉` selection.
 - `docs/proofs/RegionalSharding.md` (FA8) — region-aware committee selection wrapping `select_m_creators`.
 - `docs/proofs/Censorship.md` (FA2) §3 — K-conjunction censorship bound + `select_after_abort_m` sister-case treatment.
-- `docs/proofs/SelectiveAbort.md` (FA3) — selective-abort defense composing with the uniformity argument here.
+- `docs/proofs/SelectiveAbort.md` (FA3) — withdrawn zero-bias claim; commitment binding only, last-revealer selective abort open (S-077; §5.3 here).
 - `docs/proofs/EquivocationSlashing.md` (FA6) — the equivocation evidence channel; since D4 it does NOT affect `N_pool` (T-1 / T-2 hold for any `N ≥ K` either way).
 - `docs/proofs/S010S011SybilEconomics.md` — Sybil-cost formula citing the uniformity premise.
 - `docs/proofs/S029ForkChoiceSoundness.md` — fork-choice rule operating on committees produced here.
@@ -532,4 +534,4 @@ This proof was written to close the analytic gap on `select_m_creators`'s hybrid
 
 `docs/SECURITY.md` classifies S-020 as Mitigated (Medium → Mitigated). The regression-test surface is `tools/test_committee_selection.sh` + `determ test-committee-selection` (13 assertions, all PASS). Six identified gaps (F-1 `2K = N` boundary soft choice, F-2 smooth rejection-runtime degradation, F-3 ROM assumption inheritance, F-4 no SHA-256 memoization, F-5 partial F-Y per-call allocation, F-6 `select_after_abort_m` sister case) are documented as either acknowledged-no-issue or future-optimization opportunities — none affect the algorithm's uniformity, runtime bound, or side-channel-resistance guarantees.
 
-The S-020 closure composes cleanly with FA1 (K-of-K safety, where T-5 ensures cross-node committee agreement), FA8 (regional sharding, where T-1 / T-2 give per-region uniformity), FA5 (BFT-mode escalation, where the same hybrid handles the smaller `|K_h|`), FA2 (censorship bound, where T-1.1 / T-2.1 give the `K / N` per-validator marginal), FA3 (selective-abort, where the uniformity argument composes through the abort-hash mixing in `update_random_state`), FA6 + FA-Apply-10 (equivocation slashing, where the post-slash `N` change is absorbed by the algorithm's `N`-flexibility), and S-029 (fork-choice, where the deterministic-tiebreak operates on committees produced here). The composition produces a single uniform-and-unpredictable committee selection per height that every honest node converges on regardless of network arrival order, partition pattern, or adversarial seed-manipulation attempts.
+The S-020 closure composes cleanly with FA1 (K-of-K safety, where T-5 ensures cross-node committee agreement), FA8 (regional sharding, where T-1 / T-2 give per-region uniformity), FA5 (BFT-mode escalation, where the same hybrid handles the smaller `|K_h|`), FA2 (censorship bound, where T-1.1 / T-2.1 give the `K / N` per-validator marginal), FA3 (withdrawn zero-bias claim: commitment binding only, and the last-revealer veto on the seed is open — S-077, §5.3), FA6 + FA-Apply-10 (equivocation evidence, which since D4 changes no registry state and therefore no `N`), and S-029 (fork-choice, where the deterministic-tiebreak operates on committees produced here). The composition produces a single committee selection per height that every honest node with the same chain state converges on regardless of network arrival order or partition pattern; it is uniform given its seed, and the seed is exposed to the S-077 veto.

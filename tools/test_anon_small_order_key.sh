@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 source tools/common.sh
 
 if [ -z "${DETERM:-}" ] || [ ! -x "$DETERM" ]; then
-    echo "  SKIP: determ binary not found"; exit 0; fi
+    echo "  FAIL: test_anon_small_order_key — determ binary not found"; exit 1; fi
 
 echo "=== S-072 / D10: small-order anonymous keys rejected under consensus ==="
 OUT=$("$DETERM" test-anon-small-order-key 2>&1); rc=$?

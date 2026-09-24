@@ -10,8 +10,12 @@
 The separate C99 node now exposes a local `get_shard_for_pubkey` routing query
 matching §7.2 for canonical anonymous addresses. Its startup count/salt are not
 genesis-authenticated. Its opt-in `submit_pending_transfer` inbox additionally
-checks the existing anonymous TRANSFER signature/context and intra-shard routing,
-without checking balances or nonce readiness. See the separately scoped
+checks an anonymous TRANSFER's signature/context and intra-shard routing,
+without checking balances or nonce readiness. That inbox's frame and signature
+preimage carry a genesis hash and a shard id (the decided-but-not-landed D23
+layout, `src/ledger/pending_transfer.c`); the C++ `Transaction` frame and the
+§3.1 `signing_bytes()` carry neither, so a transaction signed for one does not
+verify on the other. See the separately scoped
 [pending contract](proofs/ShardRoutingSoundness.md#c99-signed-pending-inbox-2026-09-22). The bounded
 [C99 recovery model](proofs/DSF-SPEC.md#104-bounded-c99-fork-recovery-model) is a test target,
 not a replacement for this specification's chain rules.
@@ -20,9 +24,9 @@ This document specifies wire formats, hash inputs, and the consensus state machi
 
 **Status:** v1 (rev. 8 + sharding through B6.basic) plus shipped v2 foundation. Frozen for the v1 series.
 
-**Shipped v2 items covered here:** v2.1 state Merkle root (§4.1.1), v2.2 light-client `state_proof` RPC (§10.2), v2.3 snapshot state_root verification (§11.1), v2.4 atomic apply + COMPOSABLE_BATCH (§14.5), v2.5 registry cache (transparent), v2.6 gossip out of lock (transparent), v2.16 HMAC RPC auth (§10.1), v2.17 passphrase keyfile envelopes (§1.2), v2.18 DAPP_REGISTER (§14.5), v2.19 DAPP_CALL (§14.5), A3 binary wire codec, binary-only since the D2 envelope strip (§16.1).
+**Shipped v2 items covered here:** v2.1 state Merkle root (§4.1.1), v2.2 light-client `state_proof` RPC (§10.2), v2.3 snapshot state_root verification (§11.1), v2.4 atomic apply + COMPOSABLE_BATCH (§14.5), v2.5 registry cache (transparent), v2.6 gossip out of lock (transparent), v2.7 F2 view reconciliation (§4.3, §5.1, §8.1), v2.16 HMAC RPC auth (§10.1), v2.17 passphrase keyfile envelopes (§1.2), v2.18 DAPP_REGISTER (§14.5), v2.19 DAPP_CALL (§14.5), A3 binary wire codec, binary-only since the D2 envelope strip (§16.1).
 
-**v2 items NOT yet covered (not yet shipped):** v2.7 F2 view reconciliation (full S-030 D2 closure; `docs/proofs/F2-SPEC.md` is the implementation spec), v2.8 post-quantum signature migration, v2.10 threshold randomness aggregation (**block-beacon application de-scoped; the v1 MPDH commit-reveal beacon is retained**, see `docs/proofs/FROST_DEVIATION_NOTICE.md` §9; FROST removed from the chain consensus path entirely, then deleted from the tree 2026-07-09 per the same NOTICE §8), v2.14 real OPAQUE wallet recovery (gates on Windows MSVC porting of upstream VLAs), v2.22-v2.24 confidential transactions + cross-chain bridge + audit hooks, v2.25-v2.26 distributed identity provider + on-chain key rotation. See `docs/V2-DESIGN.md` for the full design space.
+**v2 items NOT yet covered (not yet shipped):** v2.8 post-quantum signature migration, v2.10 threshold randomness aggregation (**block-beacon application de-scoped; the v1 MPDH commit-reveal beacon is retained**, see `docs/proofs/FROST_DEVIATION_NOTICE.md` §9; FROST removed from the chain consensus path entirely, then deleted from the tree 2026-07-09 per the same NOTICE §8), v2.14 real OPAQUE wallet recovery (gates on Windows MSVC porting of upstream VLAs), v2.23 cross-chain bridge, v2.25-v2.26 distributed identity provider + on-chain key rotation. The v2.22 / v2.24 confidential-transaction and audit transaction types (`SHIELD`, `UNSHIELD`, `CONFIDENTIAL_TRANSFER`, `ROTATE_AUDIT_KEY`, `LOG_AUDIT_ACCESS`, `REGISTER_NOTE_KEY`, TxTypes 12-17) and `PQ_TRANSFER` (TxType 11) are in the code but are not specified in this document beyond §2.2 and §3. See `docs/V2-DESIGN.md` for the full design space.
 
 **Security-closure interop notes covered here:**
 - S-001 (RPC auth) §10.1
@@ -30,7 +34,7 @@ This document specifies wire formats, hash inputs, and the consensus state machi
 - S-014 (rate-limit RPC + gossip) §10.1 + framing
 - S-016 partial (cross-shard receipt soak) §8.1
 - S-017 (UNSTAKE three-layer alignment) §3.3
-- S-021 (chain.bin head_hash wrap) — storage-side; no wire surface
+- S-021 (chain.json head_hash wrap) — storage-side; no wire surface
 - S-022 (per-type message caps) §9.1
 - S-028 (anon address case normalization) §2.2 + §3.3
 - S-029 (resolve_fork) — apply-side; no wire surface
@@ -57,15 +61,14 @@ Three additional primitives appear in operator-facing or wallet-side flows but n
 
 | Primitive | Algorithm | Used in |
 |---|---|---|
-| MAC | HMAC-SHA-256 | v2.16 / S-001 RPC authentication (§10.1) — `auth = hex(HMAC-SHA-256(secret, method ‖ "|" ‖ params_canonical_data))` |
+| MAC | HMAC-SHA-256 | v2.16 / S-001 RPC authentication (§10.1) — `auth = hex(HMAC-SHA-256(secret, method ‖ "|" ‖ params.dump()))`, where `params.dump()` is the compact JSON serialization of the parsed `params` object (`canonical_for_hmac`, `src/rpc/rpc.cpp`) |
 | AEAD | AES-256-GCM | v2.17 keyfile envelopes (`account create --passphrase`); A2 wallet recovery share envelopes (§15) |
-| KDF (passphrase) | PBKDF2-HMAC-SHA-256, 600 000 iterations | v2.17 keyfile envelopes; A2 wallet recovery (passphrase scheme) |
-| KDF (memory-hard) | Argon2id | A2 wallet recovery OPAQUE adapter (§15; gated to v2.14 for the real `libopaque` integration) |
-| OPRF group + sealed-box | NIST P-256 OPRF (RFC 9497 P256-SHA256) + X25519 sealed-box (determ::c99; libsodium removed, ristretto255 never used) | A2 wallet recovery OPAQUE adapter; v2.18 DApp `service_pubkey` end-to-end encryption |
+| KDF (passphrase) | Argon2id, `t = 3`, `m = 64 MiB`, `p = 1` — the `DWE2` default of `envelope::encrypt` (`wallet/envelope.hpp`). PBKDF2-HMAC-SHA-256 at 600 000 iterations survives only as the legacy `DWE1` path (`determ-wallet envelope encrypt --iters`); both are decoded | v2.17 keyfile envelopes; A2 wallet recovery share envelopes (§15); the S-091 `DNK1` node key |
+| OPRF group + sealed-box | NIST P-256 OPRF (RFC 9497 P256-SHA256) + X25519 sealed-box (determ::c99; libsodium removed, ristretto255 never used) | DSSO threshold-OPRF (DApp layer); v2.18 DApp `service_pubkey` end-to-end encryption. Not used by wallet recovery (§15) |
 
 These are operationally important but **invisible to consensus** — none of them appear in `signing_bytes()`, `block_digest`, or any validator rule. An implementation that re-implements wallet recovery or DApp encryption against a different curve choice (e.g. P-256 sealed-box) remains consensus-compatible with the reference; only operator-facing tooling needs to match.
 
-**At-rest containers are canonical binary (D2 step 3, 2026-08-12).** The primitives above are unchanged; what they wrap is not. Wallet and light-client artifacts persist as magic-prefixed, explicit-little-endian, length-prefixed containers with EXACT-length decode — `DWE1`/`DWE2` (AEAD envelope, `wallet/envelope.hpp`), `DAK1` (68-byte plaintext keypair), `DAB1` (keypair batch), `DNK1` (encrypted node keyfile: AAD = the raw 32-byte pubkey, plaintext = the raw 32-byte seed), `DSS1` / `DBE1` (Shamir shares / share envelopes, `wallet/keyfmt.hpp`), `DRS1` (recovery setup, §15) and `DLS1` (light anchor cache `state.bin`, `light/persist.hpp`). `DAK1` and `DNK1` **derive** the public key from the seed on decode and require equality — that derive-equality check is what replaced the older stored-address cross-check (S-028). No binary and no structured text remains on these paths; hex renderings are non-authoritative CLI views. **Remainder (open):** the daemon's `node_key.binary` (`src/crypto/keys.cpp`) and the `DETERM-ACCOUNT-V1` encrypted-account header line stay src-owned binary/text until the src-side D2 storage/keyfile increment.
+**At-rest containers are canonical binary (D2 step 3, 2026-08-12).** The primitives above are unchanged; what they wrap is not. Wallet and light-client artifacts persist as magic-prefixed, explicit-little-endian, length-prefixed containers with EXACT-length decode — `DWE1`/`DWE2` (AEAD envelope, `wallet/envelope.hpp`), `DAK1` (68-byte plaintext keypair), `DAB1` (keypair batch), `DNK1` (encrypted node keyfile: AAD = the raw 32-byte pubkey, plaintext = the raw 32-byte seed), `DSS1` / `DBE1` (Shamir shares / share envelopes, `wallet/keyfmt.hpp`), `DRS1` (recovery setup, §15) and `DLS1` (light anchor cache `state.bin`, `light/persist.hpp`). `DAK1` and `DNK1` **derive** the public key from the seed on decode and require equality — that derive-equality check is what replaced the older stored-address cross-check (S-028). No JSON and no structured text remains on these paths; hex renderings are non-authoritative CLI views. **Remainder (open):** the daemon's node key (`src/crypto/keys.cpp`) is still written as plaintext JSON `node_key.json` by default; only when an operator supplies a passphrase (`determ init` / `determ start` `--passphrase` or `--passphrase-from <file:path|env:NAME|prompt>`, or `DETERM_PASSPHRASE`) is it written as `node_key.bin`, a `DNK1` container wrapping a `DWE2` envelope (S-091, PARTIAL). The `DETERM-ACCOUNT-V1` encrypted-account header line stays src-owned text. Both wait on the src-side D2 storage/keyfile increment.
 
 ## 2. Address format
 
@@ -88,14 +91,9 @@ addr = "0x" + hex(ed25519_public_key)
 
 **Wire / storage invariant.** Every `Transaction` on the wire MUST carry the canonical lowercase form for anon-shape `from` and `to`. RPC `submit_tx` rejects non-canonical with a clear `"submitted tx.from is non-canonical (uppercase hex); anon addresses MUST be lowercase"` diagnostic — server-side normalization would invalidate the client's `signing_bytes`-bound signature, so the strict-input rule keeps store-keys unambiguous. Node-authored tx-create paths (`rpc_send`, `rpc_balance`) normalize before storage so users can paste mixed-case addresses without fragmenting balances.
 
-Bearer addresses **cannot** register, stake, or be selected as creators. They can only hold balance and send/receive `TRANSFER`.
+Bearer addresses **cannot** register, stake, or be selected as creators. Apart from `PQ_TRANSFER` (authenticated by its `pq_auth` envelope against a post-quantum hash address of the same shape, not by an Ed25519 key), the verifier (`BlockValidator::check_transaction`) accepts from an anonymous sender only `TRANSFER`, `SHIELD`, `UNSHIELD`, `CONFIDENTIAL_TRANSFER`, `ROTATE_AUDIT_KEY`, `LOG_AUDIT_ACCESS` and `REGISTER_NOTE_KEY`, and rejects any of them whose sender key is a small-order point (D10 / S-072, checked after the signature). The node's ingress mirror (`Node::verify_tx_signature_locked`, called by `rpc_submit_tx` and gossip `on_tx`) admits only `TRANSFER` (and `PQ_TRANSFER`) from an anonymous sender, so a reference node never admits the other six to its mempool although its verifier accepts them in a block (S-065, open).
 
 ## 3. Transaction format
-
-### 3.0 NUL-Byte (0x00) Charset-Gating Rules (Deserialization Layer)
-To guarantee canonical signing-bytes injectivity and prevent domain/address aliasing attacks:
-- **NUL-byte (0x00) Prohibition:** Any transaction carrying an embedded NUL byte (`0x00`) within the `from`, `to`, or `domain` fields is strictly rejected fail-closed at the deserialization layer (`parser.c` / binary wire codec).
-- Deserialization immediately terminates with a parse error upon encountering any `0x00` in these fields, ensuring strict canonical injectivity across all transaction representations.
 
 ```cpp
 struct Transaction {
@@ -103,42 +101,60 @@ struct Transaction {
                               // 4=UNSTAKE, 5=REGION_CHANGE (reserved — validator rejects),
                               // 6=PARAM_CHANGE (§13), 7=MERGE_EVENT (§14),
                               // 8=COMPOSABLE_BATCH (§14.5), 9=DAPP_REGISTER (§14.5),
-                              // 10=DAPP_CALL (§14.5)
+                              // 10=DAPP_CALL (§14.5), 11=PQ_TRANSFER, 12=SHIELD,
+                              // 13=UNSHIELD, 14=CONFIDENTIAL_TRANSFER,
+                              // 15=ROTATE_AUDIT_KEY, 16=LOG_AUDIT_ACCESS,
+                              // 17=REGISTER_NOTE_KEY. No other value exists
+                              // (include/determ/chain/block.hpp TxType); the
+                              // validator rejects unknown discriminators.
     string    from;           // domain or bearer address (S-028: anon-shape MUST be
                               //   lowercase canonical at the wire — submit_tx rejects
                               //   uppercase with a diagnostic; node-authored tx-create
                               //   paths normalize automatically)
-    string    to;             // TRANSFER + DAPP_CALL; "" otherwise (S-028 same rule)
-    uint64    amount;         // TRANSFER + STAKE + DAPP_CALL
+    string    to;             // TRANSFER, PQ_TRANSFER, DAPP_CALL, UNSHIELD; "" otherwise
+                              //   (S-028 same rule)
+    uint64    amount;         // TRANSFER, PQ_TRANSFER, DAPP_CALL, SHIELD, UNSHIELD.
+                              //   STAKE / UNSTAKE carry their amount as an 8-byte
+                              //   little-endian payload instead (§3.3)
     uint64    fee;            // every type
     uint64    nonce;          // sequential per-account
     bytes     payload;        // type-specific (see §3.5 for REGISTER, §3.4 for TRANSFER,
                               //   §13 for PARAM_CHANGE, §14 for MERGE_EVENT,
                               //   §14.5 for COMPOSABLE_BATCH / DAPP_REGISTER / DAPP_CALL)
-    Signature sig;            // Ed25519 over signing_bytes()
+    Signature sig;            // Ed25519 over signing_bytes() (PQ_TRANSFER does not use it)
     Hash      hash;           // = compute_hash() = SHA256(signing_bytes()) — content-derived; sig NOT included
+    bytes     pq_auth;        // PQ_TRANSFER only: the DPQ1 (ML-DSA) envelope over
+                              //   signing_bytes(); NOT part of signing_bytes(). A non-PQ
+                              //   transaction carrying a non-empty pq_auth is rejected
+                              //   (D9; BlockValidator::check_transaction and its ingress
+                              //   mirror Node::verify_tx_signature_locked)
 };
 ```
 
 ### 3.1 `signing_bytes()`
-SHA-256 of the concatenation:
+The byte string the Ed25519 signature covers and `compute_hash()` hashes. It is not itself a hash. `Transaction::signing_bytes()` (`src/chain/block.cpp:20-32`) emits, in order:
 ```
-type (1 byte) || from || to || amount (u64) || fee (u64) || nonce (u64) || payload
+type (u8) || from || 0x00 || to || 0x00 || amount (u64 BE) || fee (u64 BE) || nonce (u64 BE) || payload
 ```
+`from`, `to` and `payload` are appended raw, with no length prefix; the two `0x00` bytes are the only delimiters. The length is `27 + |from| + |to| + |payload|` bytes. `sig`, `hash` and `pq_auth` are not included.
 
 The signature `sig` is `Ed25519_sign(priv_seed, signing_bytes())`.
 
+**No chain identity.** Nothing in these bytes names the chain or the shard, so a signed transaction is valid on any chain where `(from, nonce)` matches (S-103, open). The owner decided on 2026-09-16 to bind `genesis_hash ‖ shard_id` for every type (D23 / R-17); that decision is not implemented in the C++ code.
+
+**Embedded NUL bytes are not rejected.** The encoding is injective only over `from` and `to` values that contain no `0x00` byte, and no C++ rule enforces that: `Transaction::from_json`, `Transaction::decode_frame`, the ingress paths and `BlockValidator::check_transaction` all accept an embedded NUL in `from` or `to`. An anonymous-shape address cannot contain one, but a domain name is not charset-checked. With a NUL-bearing `to`, two different transactions can share these bytes, and therefore one signature and one hash (worked example: `docs/proofs/CanonicalSigningBytesParity.md` §4.6). The separate C99 parser (`src/wire/parser.c`, `wire_validate_charset_strict`) rejects NUL and every byte outside `[a-z0-9._-]`, but only C99 tests and fuzzers call it; it is on no node's admission path.
+
 ### 3.2 `compute_hash()`
-SHA-256 of `signing_bytes()` alone (`src/chain/block.cpp:34-37`). The signature is NOT part of the hash: the hash is a content identity — the same `(type, from, to, amount, fee, nonce, payload)` always hashes the same, whichever valid signature carries it. Nodes recompute it on every ingress (`submit_tx`, gossip `on_tx`) and reject a mismatch, so the wire `hash` field is never trusted. (Corrected 2026-09-16 — earlier revisions of this section said `|| sig`.)
+SHA-256 of `signing_bytes()` alone (`src/chain/block.cpp:34-37`). The signature is NOT part of the hash: the hash is a content identity — the same `(type, from, to, amount, fee, nonce, payload)` always hashes the same, whichever valid signature carries it. Nodes recompute it at transaction ingress (`rpc_submit_tx`, gossip `on_tx`) and reject a mismatch. The block verifier does not: `BlockValidator` never recomputes the `hash` of a transaction carried inside a block, so for block-borne transactions the unsigned wire value is what keys `tx_store_` and the mempool eviction (S-101, open). (Corrected 2026-09-16 — earlier revisions of this section said `|| sig`.)
 
 ### 3.3 Apply rules
 - Sequential nonce: a tx is applied only if `tx.nonce == account.next_nonce`. Mismatched nonces are silently skipped (no error, but the tx is not retried — the producer would need to wait for the gap-filling tx to land first, then re-submit).
 - For `TRANSFER`: requires `account.balance >= amount + fee`. Sender debited `amount + fee`; receiver credited `amount`. Fee accumulates to creators (subsidy pool path; see economics).
 - **Cross-shard variant:** if `shard_id_for_address(to) != my_shard`, sender is debited but `to` is **not** credited locally. A `CrossShardReceipt` is emitted instead (see §8). The fee still accrues to the source shard's creators; the credit waits on receipt admission at the destination.
-- For `REGISTER`: requires `balance >= fee`. Charges `fee`; inserts/updates `registrants_[tx.from]` with the payload's `ed_pub` + `region` (R1) + `registered_at = height`. New entries get `active_from = height + derive_delay(b.cumulative_rand, tx.hash)` (anti-grind randomized activation window — see S-010); **V-REG-1 (2026-09-15, owner-authorized): REGISTER is create-only** — the verifier rejects a REGISTER for any domain already present in the raw registrants map (active, pending activation, suspended or deregistered) and any REGISTER whose `nonce != 0`, so re-registration never reaches apply; a domain name is single-use, a lost key is terminal for the domain, and key rotation is a separate incumbent-signed transaction (DECISION CLOCK R-6), never a second REGISTER. Apply's re-registration branch (a fresh entry, re-randomised `active_from`, `inactive_from = UINT64_MAX`, `unlock_height = UINT64_MAX`) is unreachable through consensus and retained as belt-and-suspenders only (SECURITY.md S-060). `inactive_from = UINT64_MAX` (active). E1 NEF fires once on first-time registration of `tx.from`.
+- For `REGISTER`: requires `balance >= fee`. Charges `fee`; inserts/updates `registrants_[tx.from]` with the payload's `ed_pub` + `region` (R1) + `registered_at = height`. New entries get `active_from = height + derive_delay(b.cumulative_rand, tx.hash)` (anti-grind randomized activation window — see S-010); **V-REG-1 (2026-09-15, owner-authorized): REGISTER is create-only** — the verifier rejects a REGISTER for any domain already present in the raw registrants map (active, pending activation, suspended or deregistered) and any REGISTER whose `nonce != 0`, so re-registration never reaches apply; a domain name is single-use, a lost key is terminal for the domain, and key rotation is reserved for a separate incumbent-signed transaction (DECISION CLOCK R-6 / D15 — decided, not implemented: no rotation transaction type exists), never a second REGISTER. Apply's re-registration branch (a fresh entry, re-randomised `active_from`, `inactive_from = UINT64_MAX`, `unlock_height = UINT64_MAX`) is unreachable through consensus and retained as belt-and-suspenders only (SECURITY.md S-060). `inactive_from = UINT64_MAX` (active). E1 NEF fires once on first-time registration of `tx.from`.
 - For `DEREGISTER`: charges `fee` (no payload). Computes `inactive_from = height + derive_delay(b.cumulative_rand, tx.hash)` — same randomized delay window as REGISTER's `active_from` (S-024: bounds the grind to a 1–10-block window; formally accepted in v1.x). Sets the registry entry's `inactive_from` to that value. If the domain has a stake, the stake's `unlock_height = inactive_from + unstake_delay_` so the staked balance unlocks `unstake_delay_` blocks after deactivation completes. Nonce consumed regardless of stake / registry state.
-- For `STAKE`: requires `balance >= amount + fee`. Sender debited `amount + fee`; `stakes_[tx.from].locked` grows by `amount`. The `unlock_height` is set to `UINT64_MAX` (still staked). Suspended validators (`inactive_from <= height`, or pending suspension from FA6 slash) skip committee selection regardless of stake.
-- For `UNSTAKE` (S-017 closure): validator + producer + chain layer all enforce `b.index >= chain.stake_unlock_height(tx.from)`. Pre-fix the chain layer was the only gate (with fee refund on too-early); post-fix the validator rejects too-early UNSTAKE at the block-validation layer, the producer skips it during `build_body` assembly, and the chain layer keeps the fee-refund as belt-and-suspenders. Successful UNSTAKE: `stakes_[tx.from].locked -= amount`, sender balance credited by `amount`; the stake entry stays even at `locked == 0` (the entry is treated as "no stake" by the registry-build path).
+- For `STAKE`: the staked `amount` is the 8-byte little-endian payload (validator: payload must be exactly 8 bytes; apply does not read `tx.amount`). Requires `balance >= amount + fee`. Sender debited `amount + fee`; `stakes_[tx.from].locked` grows by `amount`. The `unlock_height` is set to `UINT64_MAX` (still staked). The sender must already be in the eligible registry. Under STAKE_INCLUSION a registered domain with no stake is not, so its STAKE is rejected ("tx sender not in registry") and no domain can join after genesis (S-069, open; the owner's D6 join rule of 2026-09-16 is not implemented). Suspended validators (`inactive_from <= height`, or inside an S-032 abort-suspension window) skip committee selection regardless of stake.
+- For `UNSTAKE` (S-017 closure): the amount is the 8-byte little-endian payload, as for STAKE. Validator + producer + chain layer all enforce `b.index >= chain.stake_unlock_height(tx.from)`. Pre-fix the chain layer was the only gate (with fee refund on too-early); post-fix the validator rejects too-early UNSTAKE at the block-validation layer, the producer skips it during `build_body` assembly, and the chain layer keeps the fee-refund as belt-and-suspenders. Successful UNSTAKE: `stakes_[tx.from].locked -= amount`, sender balance credited by `amount`; the stake entry stays even at `locked == 0` (the entry is treated as "no stake" by the registry-build path). UNSTAKE is the one type accepted from a domain that is no longer in the eligible registry (e.g. after DEREGISTER): the verifier resolves its key from the raw registrants map once `block_index >= unlock_height` (D7 / S-067). Every other type from such a domain is still rejected, so the balance the UNSTAKE credits cannot be spent (S-067, PARTIAL).
 
 S-028 case-normalization rules apply at the RPC ingress layer (see §10.2 `submit_tx`); the on-wire `Transaction` always carries the canonical lowercase form for anon-shape `from` / `to`.
 
@@ -164,7 +180,7 @@ S-028 case-normalization rules apply at the RPC ingress layer (see §10.2 `submi
 | **Fixed-prefix tagging** (e.g. 1–4 byte ASCII tag + payload) | Multi-application coexistence on the same chain. | One byte of namespace separation. Compact. Easy to grep. Recommended default. |
 | **CBOR** ([RFC 8949](https://www.rfc-editor.org/rfc/rfc8949)) | Structured records (object pointers, Ricardian-contract refs, indexed memos). Pairs with downstream features (e.g. A8 directory entries). | Self-describing, deterministic encoding profile available, broad library support. Best general-purpose choice for the 128-byte budget — fits small structured records comfortably. |
 | **MessagePack** | Same use-cases as CBOR. | Slightly more compact than CBOR for short objects; less canonical-encoding tooling. |
-| **text memo** | Quick prototyping, human-readable memos. | Verbose; fits short text objects within 128 bytes but pricey for non-trivial structures. Discouraged for production. |
+| **JSON text** | Quick prototyping, human-readable memos. | Verbose; fits short JSON objects within 128 bytes but pricey for non-trivial structures. Discouraged for production. |
 | **Encrypted payload** (e.g. `crypto_box_seal(recipient.pubkey, plaintext)`) | Confidential memos between sender and recipient. | ~48 bytes of overhead (ephemeral key + MAC); leaves ~80 bytes for plaintext. Pairs with v2.22 confidential-tx pattern. |
 
 For multi-app interoperability, a fixed-prefix tag (e.g. the first byte being a registered application identifier, the rest being that app's encoding) is the recommended convention. The protocol enforces nothing here — it is purely a coordination mechanism between applications sharing the chain.
@@ -181,7 +197,7 @@ REGISTER payload = [pubkey: 32 bytes] [region_len: u8] [region: utf8 bytes]
 
 Legacy REGISTER payloads (32 bytes exactly, just the pubkey) are wire-compatible — the trailing `region_len` byte is absent and the validator treats it as `region_len = 0`. A REGISTER tx with `payload.size() > 32 + 1 + 32` is rejected.
 
-**Validity (V-REG-1, 2026-09-15).** A REGISTER is accepted only if (1) `tx.from` is NOT present in the raw registrants map — the map itself, not the eligible registry, so deregistered, suspended and pending-activation domains are equally protected; and (2) `tx.nonce == 0` — an unregistered domain can sign nothing but its REGISTER, so its first transaction is nonce 0 by construction, and the rule makes "at most one REGISTER per domain per block" a per-transaction rule (a second one in the same block would carry nonce 1); and (3) checked after the signature, the payload key is a curve point of large order (`[8]P != O`) — the Ed25519 verifier performs no torsion check, and under a small-order key signatures are forgeable (one `(R, S)` pair verifies every message under the neutral element; one message in at most eight under the other seven torsion points), so the proof of possession would be vacuous and the identity permanently forgeable (S-068). Together they make REGISTER create-only: no key can rebind a domain it does not hold (the takeover that reopened S-052), a domain name is single-use, and key rotation is a separate incumbent-signed transaction (DECISION CLOCK R-6). Rationale and the refuted alternatives: DECISION-LOG 2026-08-14 `5e4afec` / `1c0a61d`, 2026-09-15.
+**Validity (V-REG-1, 2026-09-15).** A REGISTER is accepted only if (1) `tx.from` is NOT present in the raw registrants map — the map itself, not the eligible registry, so deregistered, suspended and pending-activation domains are equally protected; and (2) `tx.nonce == 0` — an unregistered domain can sign nothing but its REGISTER, so its first transaction is nonce 0 by construction, and the rule makes "at most one REGISTER per domain per block" a per-transaction rule (a second one in the same block would carry nonce 1); and (3) checked after the signature, the payload key is a curve point of large order (`[8]P != O`) — the Ed25519 verifier performs no torsion check, and under a small-order key signatures are forgeable (one `(R, S)` pair verifies every message under the neutral element; one message in at most eight under the other seven torsion points), so the proof of possession would be vacuous and the identity permanently forgeable (S-068). Together they make REGISTER create-only: no key can rebind a domain it does not hold (the takeover that reopened S-052), a domain name is single-use, and key rotation is reserved for a separate incumbent-signed transaction (DECISION CLOCK R-6 / D15 — decided, not implemented). Rationale and the refuted alternatives: DECISION-LOG 2026-08-14 `5e4afec` / `1c0a61d`, 2026-09-15.
 
 The region is mirrored from the REGISTER tx into the registry. `eligible_in_region(R)` (§5.2) reads it during committee selection.
 
@@ -331,7 +347,7 @@ The body is SHA-256 over the **v1 core minus `index`**: `prev_hash, tx_root, del
 2. **equivocation** — if any `creator_view_eq_roots[i]` is non-zero, append `compute_view_root` over the `hash_equivocation_event` keys of `equivocation_events` (commit `48c4b45`).
 3. **abort** — if any `creator_view_abort_roots[i]` is non-zero, append `compute_view_root` over the `hash_abort_event` keys of `abort_events` (commit `48c4b45`).
 
-Each appendage is **skipped when its gate is false**, so a v1 / non-cross-shard / no-evidence block produces a byte-identical pre-F2 *body root*. (The pre-2026-08-12 statement — byte-identical pre-F2 *digest* — no longer holds and was never meant to survive genesis: the two-level restructure changed every block-digest and contrib-commitment VALUE. That is a pre-genesis, no-shims change under the no-migrations rule; see `docs/proofs/DECISION-LOG.md` 2026-08-12.) The eq/abort gates key on a non-zero per-creator view root (the marker-stable "this block went through F2 reconciliation" signal) rather than on the events being non-empty, so a non-F2 block whose raw pool happened to be non-empty is NOT bound (binding an un-reconciled pool would reintroduce gossip-async divergence).
+Each appendage is **skipped when its gate is false**, so a v1 / non-cross-shard / no-evidence block produces a byte-identical pre-F2 *body root*. (The pre-2026-08-12 statement — byte-identical pre-F2 *digest* — no longer holds and was never meant to survive genesis: the two-level restructure changed every block-digest and contrib-commitment VALUE. That is a pre-genesis, no-shims change under the no-migrations rule; see `docs/proofs/DECISION-LOG.md` 2026-08-12.) The eq/abort gates key on a non-zero per-creator view root (the JSON-stable "this block went through F2 reconciliation" signal) rather than on the events being non-empty, so a non-F2 block whose raw pool happened to be non-empty is NOT bound (binding an un-reconciled pool would reintroduce gossip-async divergence).
 
 **Excludes** the remaining `Block` fields: `delay_output`, `cumulative_rand`, `creator_dh_secrets`, `cross_shard_receipts`, `initial_state`, `state_root`. The Phase-2-reveal fields (`delay_output`, `creator_dh_secrets`) are excluded so committee members can sign at Phase-2 entry without waiting for K secrets to gather. `cross_shard_receipts` (outbound) is deterministically derived from the committee tx set (already bound via `tx_root`). The three pool-fed dimensions (inbound + equivocation + abort) ARE bound — via the appendages above — because v2.7 F2 reconciles each to a deterministic committee-wide function of the K signed Phase-1 commits *before* digesting (intersection for inbound, union for eq/abort). `partner_subset_hash` is ALSO bound (appended when non-zero, commit `8585a50`) — it is deterministic from the merge state (every committee member at a merged height computes it identically), so it needs no reconciliation; the conditional gate keeps non-merged blocks byte-identical to the v1 *body root*. `timestamp` is now bound too, **conditionally** — when the block carries `creator_proposer_times` (i.e. it went through median reconciliation), the deterministic lower-median of those K committed times is appended to the digest (commit `f99eeb8`, the §5 mechanism); on a non-reconciled / empty-`creator_proposer_times` block there is no median to bind, so it stays excluded and the *body root* is byte-identical to the pre-`f99eeb8` form. That leaves **no genuinely-unbound digest field** except the deterministically-derived `cross_shard_receipts` (and the intentional Phase-2-reveal fields + `initial_state` + `state_root`, which is bound via `signing_bytes`). See `docs/proofs/S030-D2-Analysis.md` (S-030 D1/D2; D1 effective-closed via S-033 state_root binding in `signing_bytes`; D2 consensus-layer-closed for all three pool-fed dimensions + `timestamp` via median reconciliation) + `docs/proofs/EqAbortViewDigestExtension.md`.
 
@@ -341,18 +357,18 @@ The final values of every excluded field are bound into the **block hash** via `
 
 ### 4.4 Canonical binary container (D2-inc5)
 
-`Block::encode_frame` / `Block::decode_frame` (`src/chain/block.cpp`) are the canonical binary container for a `Block`. **As of D2 inc7a/7b + inc8 (commit 8a106aa, 2026-08-12) they ARE the bytes on the wire and on disk:** the five wire types that carry a `Block` (BLOCK, CHAIN_RESPONSE, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE — §9.2) delegate to `Block::encode_frame`, and chain storage is `<path>.blocks/<i>.blk` DBK1 frames under a fixed 44-byte DMF1 manifest (`Chain::save` and the legacy `chain.bin` read path are deleted). Since D2 inc7c (2026-09-16) the HEADERS_RESPONSE page wraps the same frame in DHF1 header records and SNAPSHOT_RESPONSE carries the DSN1 record whose tail headers are Block frames (§9.1), so no wire payload is binary. `encode_text` / `decode_text` remain as the non-authoritative human-readable view and as the `Message::payload` DOM the codecs convert to and from. (Wording corrected 2026-09-14 and 2026-09-16.)
+`Block::encode_frame` / `Block::decode_frame` (`src/chain/block.cpp`) are the canonical binary container for a `Block`. **As of D2 inc7a/7b + inc8 (commit 8a106aa, 2026-08-12) they ARE the bytes on the wire and on disk:** the five wire types that carry a `Block` (BLOCK, CHAIN_RESPONSE, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE — §9.2) delegate to `Block::encode_frame`, and chain storage is `<path>.blocks/<i>.blk` DBK1 frames under a fixed 44-byte DMF1 manifest (`Chain::save` and the legacy `chain.json` read path are deleted). Since D2 inc7c (2026-09-16) the HEADERS_RESPONSE page wraps the same frame in DHF1 header records and SNAPSHOT_RESPONSE carries the DSN1 record whose tail headers are Block frames (§9.1), so no wire payload is JSON. `to_json` / `from_json` remain as the non-authoritative human-readable view and as the `Message::payload` DOM the codecs convert to and from. (Wording corrected 2026-09-14 and 2026-09-16.)
 
-**The theorem is information equivalence with the baseline container, not field-for-field round-trip:**
-
-```
-decode_frame(encode_frame(b))  ==  decode(encode(b))
-```
-
-for every Block `b`. That is the property that makes the later container swap provably behavior-preserving — whatever a node would have believed after a binary round trip, it believes after a binary one.
+**The theorem is information equivalence with the JSON container, not field-for-field round-trip:**
 
 ```
-Layout, in Block::encode emission order so the two are diffable side by side.
+decode_frame(encode_frame(b))  ==json==  from_json(to_json(b))
+```
+
+for every Block `b`. That is the property that makes the later container swap provably behavior-preserving — whatever a node would have believed after a JSON round trip, it believes after a binary one.
+
+```
+Layout, in Block::to_json emission order so the two are diffable side by side.
 All integers little-endian; Hash = 32 raw bytes; Signature = 64 raw;
 lp_str = [u8 len][bytes]; ⟨n⟩ = [u16 LE count].
 
@@ -398,14 +414,14 @@ lp_str = [u8 len][bytes]; ⟨n⟩ = [u16 LE count].
 
 An empty Block frame — every fixed field at its width plus the 23 two-byte counts, all empty — is exactly **297 bytes** (`kMinBlockFrame`, pinned by gate BF-0 so the constant cannot drift out of agreement with the encoder; set too high it would reject legitimate one-witness frames).
 
-**Where `encode_text` discards information, the frame mirrors the discard.** The encoder writes the discarded-equivalent value rather than the live one, in exactly two places:
+**Where `to_json` discards information, the frame mirrors the discard.** The encoder writes the discarded-equivalent value rather than the live one, in exactly two places:
 
-* the six-key `creator_view_*` bundle (`_eq_roots`, `_abort_roots`, `_inbound_roots`, `_inbound_lists`, `_eq_lists`, `_abort_lists`) is written **empty** unless some inbound/eq/abort root is non-zero — `encode_text`'s `any_view_root` gate; the shard-tip pair (`creator_view_shardtip_roots` / `_shardtip_lists`) rides its own independent `any_shardtip_root` gate identically;
-* `source_shard_id` is written **zero** unless `eligible_count != 0` — the gate under which `encode_text` emits it.
+* the six-key `creator_view_*` bundle (`_eq_roots`, `_abort_roots`, `_inbound_roots`, `_inbound_lists`, `_eq_lists`, `_abort_lists`) is written **empty** unless some inbound/eq/abort root is non-zero — `to_json`'s `any_view_root` gate; the shard-tip pair (`creator_view_shardtip_roots` / `_shardtip_lists`) rides its own independent `any_shardtip_root` gate identically;
+* `source_shard_id` is written **zero** unless `eligible_count != 0` — the gate under which `to_json` emits it.
 
-Carrying those faithfully instead would preserve data text drops, which sounds strictly better but is not. **None of the discarded values is covered by `Block::signing_bytes` (§4.1) or `compute_block_digest` (§4.3):** the `creator_view_*` arrays never enter `signing_bytes` at all, and enter the digest only as the boolean `any_nonzero` gate of §4.3 — the root *values* are never appended, so an all-zero-root block binds neither the roots nor the lists; `source_shard_id` is bound by `signing_bytes` and by the digest only under the same `eligible_count != 0` gate, so at `eligible_count == 0` it is bound by neither. A relayer can therefore append any of them to a valid block without breaking its hash or invalidating a single signature. `encode_text` normalizes that injection away; a faithful binary frame would carry it through to the validator and let an otherwise-valid block be rejected — a remotely-triggerable rejection, i.e. a censorship / liveness vector under the fork-free doctrine. Mirroring is what keeps the two containers from ever disagreeing on accept/reject for the same block. (Owner decision, 2026-08-01.)
+Carrying those faithfully instead would preserve data JSON drops, which sounds strictly better but is not. **None of the discarded values is covered by `Block::signing_bytes` (§4.1) or `compute_block_digest` (§4.3):** the `creator_view_*` arrays never enter `signing_bytes` at all, and enter the digest only as the boolean `any_nonzero` gate of §4.3 — the root *values* are never appended, so an all-zero-root block binds neither the roots nor the lists; `source_shard_id` is bound by `signing_bytes` and by the digest only under the same `eligible_count != 0` gate, so at `eligible_count == 0` it is bound by neither. A relayer can therefore append any of them to a valid block without breaking its hash or invalidating a single signature. `to_json` normalizes that injection away; a faithful binary frame would carry it through to the validator and let an otherwise-valid block be rejected — a remotely-triggerable rejection, i.e. a censorship / liveness vector under the fork-free doctrine. Mirroring is what keeps the two containers from ever disagreeing on accept/reject for the same block. (Owner decision, 2026-08-01.)
 
-**Everything else is structurally always-present** — no presence bitmap, no per-section tag. Every `encode_text` emit gate is derived from the VALUE, never from a separate flag, so the container carries the value and never the gate. A bitmap would admit two encodings of one Block (bit clear, vs bit set with a zero payload) and reopen the canonicality question D2 exists to close.
+**Everything else is structurally always-present** — no presence bitmap, no per-section tag. Every `to_json` emit gate is derived from the VALUE, never from a separate flag, so the container carries the value and never the gate. A bitmap would admit two encodings of one Block (bit clear, vs bit set with a zero payload) and reopen the canonicality question D2 exists to close.
 
 **Counts are u16 LE**, matching `encode_abort_claims` (§5.4) and the `COMPOSABLE_BATCH` payload (§14.5). The encoder **throws on overflow — it never clamps**; a clamped length beside an unclamped body is exactly the defect fixed one commit earlier in the transaction codec this one delegates to.
 
@@ -413,7 +429,7 @@ Carrying those faithfully instead would preserve data text drops, which sounds s
 
 **Fail-closed.** Every count is bounds-checked against the bytes actually remaining **before** any `reserve` and before any loop (the WIRE-1 lesson — a cap that runs after the work is not a cap): a `⟨n⟩` claiming more elements than `bytes_remaining / min_element_size` is rejected having allocated nothing. Decode ends with an exact-consumption check, so trailing bytes are rejected. Reject strings are `"block frame: "`-prefixed via a dedicated block-frame helper pair — reusing the transaction-frame helpers would misreport a truncated `creators[3]` as `"tx frame: truncated lp_str body"`. A malformed shard-tip record is rejected explicitly, because `ShardTipRecord::decode` returns `nullopt` rather than throwing and would otherwise be silently dropped.
 
-**Witness recursion is bounded at depth 2 by construction.** Each `shard_tip_witnesses` entry decodes with `allow_witnesses = false`, and both leaf rules — a witness carries no nested witnesses and no `shard_tip_records` — are enforced **inline** in the decoder, before the elements they gate are parsed, so exactly one site produces each reject string. This is the same depth-1 witness rule `decode_text` enforces on the binary path.
+**Witness recursion is bounded at depth 2 by construction.** Each `shard_tip_witnesses` entry decodes with `allow_witnesses = false`, and both leaf rules — a witness carries no nested witnesses and no `shard_tip_records` — are enforced **inline** in the decoder, before the elements they gate are parsed, so exactly one site produces each reject string. This is the same depth-1 witness rule `from_json` enforces on the JSON path.
 
 Test: `tools/test_block_binary_codec.sh` + in-process `determ test-block-binary-codec` — 14 assertions (BF-0 … BF-12b), including BF-1 information equivalence over a block exercising all 37 fields, BF-2 one canonical encoding (`encode(decode(x)) == x` byte-for-byte), BF-3 `signing_bytes` + `compute_hash` byte-identical across the round trip, BF-4 an all-default block resurrecting none of the nine gated keys, BF-6 every proper prefix rejected, BF-7 a 65535 count backed by 10 bytes rejected before any reserve, BF-8a/BF-8b witness depth, BF-10/BF-11 the two mirroring properties, and BF-12a/BF-12b a hostile-bytes sweep in which every input either decodes or throws.
 
@@ -529,7 +545,7 @@ When all four hold, the round runs in BFT mode with two-level shrinkage:
 - **Committee size shrinks** from K to `k_bft = ceil(2K/3) = (2K + 2) / 3` — the producer/validator both populate `creators[]` with exactly `k_bft` entries (`src/node/node.cpp` k_use assignment).
 - **Required-signature threshold** is `required = required_block_sigs(BFT, k_bft) = ceil(2 · k_bft / 3) = (2·k_bft + 2) / 3` — standard BFT 2/3 quorum within the smaller committee (`src/node/producer.cpp::required_block_sigs`).
 
-The proposer must sign; up to `k_bft - required` positions may carry sentinel-zero signatures (all-zero Ed25519 signature; false-positive rate ~2⁻⁵¹²). Worked example: at the genesis-default K = 3, `k_bft = 2`, `required = 2` — no sentinels (effectively still K-of-K within the smaller committee). At K = 6, `k_bft = 4`, `required = 3` — one sentinel allowed. At K = 9, `k_bft = 6`, `required = 4` — two sentinels. Safety holds as long as the adversarial fraction within `k_bft` is `< k_bft/3` (standard BFT bound; see `docs/proofs/BFTSafety.md` FA5).
+The proposer must sign; up to `k_bft - required` positions may carry sentinel-zero signatures (all-zero Ed25519 signature; false-positive rate ~2⁻⁵¹²). Worked example: at the genesis-default K = 3, `k_bft = 2`, `required = 2` — no sentinels (effectively still K-of-K within the smaller committee). At K = 6, `k_bft = 4`, `required = 3` — one sentinel allowed. At K = 9, `k_bft = 6`, `required = 4` — two sentinels. Safety holds as long as the Byzantine fraction within `k_bft` is `< k_bft/3` (standard BFT bound; see `docs/proofs/BFTSafety.md` FA5).
 
 > **S-044/S-045 — ✅ MITIGATED (SECURITY.md §3).** Two shipped fixes close the escalation-reachability and abort-cascade gaps. **(1) Abort-claim quorum floor `max(2, K−1)`** — the shared helper `chain::abort_claim_quorum()` in `include/determ/chain/params.hpp` is now routed through `node.cpp::on_abort_claim` (formation), `node.cpp::on_abort_event` (gossip adoption), and `validator.cpp::check_abort_certs` (exact-count check). This is a no-op for K≥3; at K=2 the quorum is **unsatisfiable**, so no single-claim abort event forms and the former K=2 wedge-by-cascade degrades to a crash-stop 2-of-2 (a genuinely dead member halts the height; healthy-node timing skew no longer cascades). `k_bft` is likewise now via the shared helper `chain::bft_committee_size() = ceil(2K/3)`. **(2) Genesis-default `bft_escalation_threshold = 1`** — θ=1 is reached by the first abort event (which always forms), so the escalation counter can never freeze below the threshold; gate 1 (`avail < k_target`) still bars premature escalation when MD margin exists, and the quorum floor bars single-node forced escalation (S025 `A_premature` stays closed). The only residual permanent wedge is `avail < k_bft` — the **designed** R7/FA9 under-quorum-merge boundary, not a defect. Formal derivation: `docs/proofs/AbortCascadeLiveness.md`. Regression-locked by `tools/test_s044_gate_surface.sh` and validated live by `tools/test_bft_escalation.sh` (θ=1 default: 34 MD blocks then BFT escalation on node-kill).
 
@@ -609,7 +625,7 @@ struct AbortClaim {                   // the six consensus-bound fields
 };
 ```
 
-The claim list is carried and hashed in a canonical fixed-layout binary encoding (`chain::encode_abort_claims`, `src/chain/block.cpp`) — the D2 migration replaced the pre-genesis binary array:
+The claim list is carried and hashed in a canonical fixed-layout binary encoding (`chain::encode_abort_claims`, `src/chain/block.cpp`) — the D2 migration replaced the pre-genesis JSON array:
 
 ```
 [count: u16 LE]
@@ -660,7 +676,7 @@ kind == 1 → digest = SHA-256("DTM-CONTRIB-v3" ‖ index u64 BE ‖ gen u64 BE 
 
 **Why the height assert is load-bearing.** Before 2026-08-12 the two signed digests were opaque and unbound to any height: replaying one honest validator's ordinary signatures **from two different heights** satisfied every check and forged a full-stake slash, remotely and unauthenticated. An honest key only ever signs composed digests carrying its true height under the correct tag, so presenting one of those signatures under a different `(index, body_root)` opening requires a SHA-256 second-preimage. Carrying the two conflicting *headers* instead (the other candidate fix) was rejected on analysis: unbounded evidence size, and `Block ⊃ EquivocationEvent ⊃ Block` recursion. Proof: `docs/proofs/EquivocationSlashing.md`; decision record: `docs/proofs/DECISION-LOG.md` 2026-08-12.
 
-**Apply:** an `EquivocationEvent` baked into a finalized block is an on-chain **evidence record** and carries **no L1 consequence** — `apply_transactions` reads nothing from it: no stake forfeiture, no registry deactivation, no counter (owner decision 2026-09-16, DECISION-LOG D4 / O-1 option (b); the record is the input to the L2 bond policy, D22). Until 2026-09-16 apply forfeited the equivocator's full staked balance and set `inactive_from = block.index + 1`; that branch is removed (O-1 step 3a). A per-block cap and in-block duplicate rejection on `equivocation_events` follow as their own increment (step 3b).
+**Apply:** an `EquivocationEvent` baked into a finalized block is an on-chain **evidence record** and carries **no L1 consequence** — `apply_transactions` reads nothing from it: no stake forfeiture, no registry deactivation, no counter (owner decision 2026-09-16, DECISION-LOG D4 / O-1 option (b); the record is the input to the L2 bond policy, D22). Until 2026-09-16 apply forfeited the equivocator's full staked balance and set `inactive_from = block.index + 1`; that branch is removed (O-1 step 3a). The verifier bounds the record (O-1 step 3b, `BlockValidator::check_equivocation_events`): a block carrying more than `EQUIVOCATION_EVENTS_PER_BLOCK_MAX = 16` events, or two events with the same `hash_equivocation_event`, is rejected; the producer (`src/node/producer.cpp`) deduplicates the events, orders them by that hash and truncates to the cap.
 
 ### 6.1 Detection sources
 
@@ -683,7 +699,7 @@ The two paths use **the same struct + the same validator + the same apply path**
 
 ### 6.2 External submission
 
-`submit_equivocation` RPC (§10.2) runs the **same** V11 check set as the validator — `kind <= 1`, the `index_a == index_b == block_index` height assert, distinct body roots, distinct signatures, registered equivocator, and both signatures verified against the DERIVED digests — then gossips via `EQUIVOCATION_EVIDENCE` (MsgType 11) for slashing. Returns `{accepted, equivocator, block_index, kind}` or `{accepted: false, reason}` (`src/node/node.cpp:4562`). Anyone observing equivocation can submit — committee membership is not required; that is exactly why this ingress must not be weaker than the block-path gate.
+`submit_equivocation` RPC (§10.2) runs the **same** V11 check set as the validator — `kind <= 1`, the `index_a == index_b == block_index` height assert, distinct body roots, distinct signatures, registered equivocator, and both signatures verified against the DERIVED digests — then gossips via `EQUIVOCATION_EVIDENCE` (MsgType 11) for inclusion as an evidence record (§6 Apply: no L1 consequence). Returns `{accepted, equivocator, block_index, kind}` or `{accepted: false, reason}` (`src/node/node.cpp:4562`). Anyone observing equivocation can submit — committee membership is not required; that is exactly why this ingress must not be weaker than the block-path gate.
 
 ## 7. Sharding (rev.9)
 
@@ -698,7 +714,7 @@ shard_id_for_address(addr, S, salt) =
     big_endian_u64(h[0..8]) mod S
 ```
 
-`salt` is `GenesisConfig.shard_address_salt` (32 random bytes, fixed at chain creation, present in genesis binary).
+`salt` is `GenesisConfig.shard_address_salt` (32 random bytes, fixed at chain creation, present in the DGC1 genesis file).
 
 ### 7.3 Cross-chain coordination (B2c)
 - **Beacon → Shard (BEACON_HEADER):** beacon nodes broadcast each newly-applied block; shards verify K-of-K against the validator pool they derive from prior verified beacon headers; store in a light header chain.
@@ -740,7 +756,7 @@ The v2.7 F2 (`docs/proofs/F2-SPEC.md`) consensus-layer closure **SHIPPED** and s
 ## 9. Wire protocol
 
 ### 9.1 Framing
-Each message is `4-byte big-endian length || binary envelope`. The wire is **binary-only** (D2, DECISION-LOG 2026-07-28): the legacy binary envelope (`{"type", "payload"}`, wire-version 0) and the per-pair version negotiation were deleted pre-genesis; a body whose first bytes are not the envelope magic is rejected fail-closed and the connection closed (WIRE-3).
+Each message is `4-byte big-endian length || binary envelope`. The wire is **binary-only** (D2, DECISION-LOG 2026-07-28): the legacy JSON envelope (`{"type", "payload"}`, wire-version 0) and the per-pair version negotiation were deleted pre-genesis; a body whose first bytes are not the envelope magic is rejected fail-closed and the connection closed (WIRE-3).
 
 ```
 Envelope (src/net/binary_codec.cpp):
@@ -778,15 +794,15 @@ Payload encodings, all fail-closed with exact consumption:
 
   **ABORT_CLAIM cannot drift from the block-stored claim.** The frame *is* `encode_abort_claims({claim})` — the same encoder the in-block claim list uses (§5.4). The gossiped claim and the stored claim are therefore the same bytes produced by the same function, so no divergence between the two encodings is representable (the S-044 one-shared-helper discipline). Decode rejects any count other than 1 (`ABORT_CLAIM must carry exactly one claim`), keeping one encoding per claim.
 
-  **`BLOCK_SIG.dh_secret` occupies a fixed slot even when all-zero.** S-009's rule on the superseded binary path was *absent means zero*, so an all-zero 32-byte slot denotes exactly the value an absent field denoted — the mapping is total and value-preserving, and unlike an optional field it admits no second encoding of the same value. Fixing the slot is therefore what keeps the encoding canonical, not a cost paid for simplicity.
+  **`BLOCK_SIG.dh_secret` occupies a fixed slot even when all-zero.** S-009's rule on the superseded JSON path was *absent means zero*, so an all-zero 32-byte slot denotes exactly the value an absent field denoted — the mapping is total and value-preserving, and unlike an optional field it admits no second encoding of the same value. Fixing the slot is therefore what keeps the encoding canonical, not a cost paid for simplicity.
 
   **`ABORT_EVENT` puts the claim blob last** because `decode_abort_claims` consumes its input exactly; only a terminal blob makes the frame's own exact-consumption check decidable. Same rationale as the transaction frame's optional `pq_auth` tail.
 
-  **Signature transparency.** None of the four frames is covered by any signature. `make_abort_claim_message` (§5.4) and `compute_block_digest` (§4.3) hash binary field tuples that never touched the container, and the two `EQUIVOCATION_EVIDENCE` signatures verify against digests the receiver **derives** from the `(kind, index, body_root)` openings carried in the message (§6.1) — never against a digest the message states. No digest, signature or block hash changed when these types left the binary path. (The later EQV-height-bind restructure — §4.3/§6, 2026-08-12 — *did* change every block-digest and contrib-commitment value; that is a separate, pre-genesis change to the hash preimages, not to this container.)
+  **Signature transparency.** None of the four frames is covered by any signature. `make_abort_claim_message` (§5.4) and `compute_block_digest` (§4.3) hash binary field tuples that never touched the container, and the two `EQUIVOCATION_EVIDENCE` signatures verify against digests the receiver **derives** from the `(kind, index, body_root)` openings carried in the message (§6.1) — never against a digest the message states. No digest, signature or block hash changed when these types left the JSON path. (The later EQV-height-bind restructure — §4.3/§6, 2026-08-12 — *did* change every block-digest and contrib-commitment value; that is a separate, pre-genesis change to the hash preimages, not to this container.)
 
 * **Block-carrying frames (D2 inc7a/7b, commit 8a106aa)** — BLOCK and BEACON_HEADER are the `Block::encode_frame` bytes (§4.4) and nothing else; SHARD_TIP is `[shard_id u32 LE][Block frame to end]` (decoded with `allow_witnesses=false` — a tip is a leaf); CROSS_SHARD_RECEIPT_BUNDLE is `[src_shard u32 LE][Block frame to end]`; CHAIN_RESPONSE is `[has_more u8 ∈ {0,1}][count u16 LE][count × [frame_len u32 LE][Block frame]]`; CONTRIB is the always-present field layout of `ContribMsg` (`src/net/binary_codec.cpp`, "PAYLOAD: CONTRIB").
 
-* **The last two (D2 inc7c, 2026-09-16)** — no wire payload is binary any more; the `[u32 LE data_len][data_bytes]` fallback and the WIRE-2 structural binary ceiling that guarded it are deleted, and a type byte outside the 19 declared frames is rejected on both encode and decode.
+* **The last two (D2 inc7c, 2026-09-16)** — no wire payload is JSON any more; the `[u32 LE json_len][json_bytes]` fallback and the WIRE-2 structural JSON ceiling that guarded it are deleted, and a type byte outside the 19 declared frames is rejected on both encode and decode.
 
 | Type | Frame |
 |---|---|
@@ -799,11 +815,11 @@ Payload encodings, all fail-closed with exact consumption:
 * **1 MB** — consensus chatter: CONTRIB, BLOCK_SIG, ABORT_CLAIM, ABORT_EVENT, EQUIVOCATION_EVIDENCE, HELLO, STATUS_REQUEST / STATUS_RESPONSE, TRANSACTION, GET_CHAIN, SNAPSHOT_REQUEST.
 * **4 MB** — bulk payload: BLOCK, BEACON_HEADER, SHARD_TIP, CROSS_SHARD_RECEIPT_BUNDLE, HEADERS_RESPONSE.
 * **16 MB** — bootstrap-only: SNAPSHOT_RESPONSE, CHAIN_RESPONSE.
-Oversize messages close the connection. See `include/determ/net/messages.hpp::max_message_bytes` for the per-type table. Every payload is a fixed binary frame whose decoder proves each count against the bytes that remain before it allocates, so the work a body can buy is linear in its size (the WIRE-2 structural binary ceiling that bounded the deleted length-prefixed binary payloads retired with them, D2 inc7c).
+Oversize messages close the connection. See `include/determ/net/messages.hpp::max_message_bytes` for the per-type table. Every payload is a fixed binary frame whose decoder proves each count against the bytes that remain before it allocates, so the work a body can buy is linear in its size (the WIRE-2 structural JSON ceiling that bounded the deleted length-prefixed JSON payloads retired with them, D2 inc7c).
 
 ### 9.2 Message types
 
-The full enum lives in `include/determ/net/messages.hpp::MsgType`. Every entry is a `uint8_t` discriminator — the envelope's offset-2 type byte. The body-size cap column lists the per-type ceiling (`include/determ/net/messages.hpp::max_message_bytes`), applied pre-decode in `Message::deserialize` and re-checked in `Peer::read_body`; the framing layer enforces the global 16 MB ceiling first. The Payload column describes the message-specific content. All nineteen types travel as fixed binary frames (§9.1); the Payload column names the DOM each frame carries for the handlers (the `encode_text` view of the struct — a non-authoritative view, never the wire bytes).
+The full enum lives in `include/determ/net/messages.hpp::MsgType`. Every entry is a `uint8_t` discriminator — the envelope's offset-2 type byte. The body-size cap column lists the per-type ceiling (`include/determ/net/messages.hpp::max_message_bytes`), applied pre-decode in `Message::deserialize` and re-checked in `Peer::read_body`; the framing layer enforces the global 16 MB ceiling first. The Payload column describes the message-specific content. All nineteen types travel as fixed binary frames (§9.1); the Payload column names the DOM each frame carries for the handlers (the `to_json` view of the struct — a non-authoritative view, never the wire bytes).
 
 | ID | Name | Direction | Body cap | Payload |
 |---|---|---|---|---|
@@ -837,15 +853,15 @@ Cross-role traffic is restricted by the receiving peer:
 
 ## 10. RPC protocol
 
-Token-line over TCP on the configured `rpc_port`. Each line is one token object: `{"method": "<name>", "params": {...}}`. Response: `{"result": ..., "error": null | "<msg>"}`.
+JSON-line over TCP on the configured `rpc_port`. Each line is one JSON object: `{"method": "<name>", "params": {...}}`. Response: `{"result": ..., "error": null | "<msg>"}`.
 
 ### 10.1 Authentication + rate-limit gates
 
 Two gates run BEFORE method dispatch:
 
-1. **Rate limit (S-014).** If `rpc_rate_per_sec > 0 && rpc_rate_burst > 0` in config, every request consumes one token from the peer-IP bucket (refilled at `rpc_rate_per_sec`/sec up to `rpc_rate_burst`). Bucket empty → `{"result": null, "error": "rate_limited"}`. Check fires **before** binary parse + auth so rate-limited callers don't burn parse cost and don't reveal whether their auth would have succeeded.
+1. **Rate limit (S-014).** If `rpc_rate_per_sec > 0 && rpc_rate_burst > 0` in config, every request consumes one token from the peer-IP bucket (refilled at `rpc_rate_per_sec`/sec up to `rpc_rate_burst`). Bucket empty → `{"result": null, "error": "rate_limited"}`. Check fires **before** JSON parse + auth so rate-limited callers don't burn parse cost and don't reveal whether their auth would have succeeded.
 
-2. **HMAC auth (v2.16 / S-001).** If `rpc_auth_secret` is set (non-empty hex), every request MUST carry an `auth` field that's `hex(HMAC-SHA-256(secret, method || "|" || params_canonical_data))`. Missing `auth` → `{"error": "auth_required: missing 'auth' field"}`. Wrong `auth` → `{"error": "auth_failed"}`. Constant-time compare against timing side-channels.
+2. **HMAC auth (v2.16 / S-001).** If `rpc_auth_secret` is set (non-empty hex), every request MUST carry an `auth` field that's `hex(HMAC-SHA-256(secret, method || "|" || params.dump()))` — `canonical_for_hmac` in `src/rpc/rpc.cpp` concatenates the method name, a literal `|`, and nlohmann's compact JSON serialization (`dump()`, no indentation, keys in the sorted order of `nlohmann::json`'s object map) of the request's parsed `params` (an absent `params` is `{}`). Missing `auth` → `{"error": "auth_required: missing 'auth' field"}`. Wrong `auth` → `{"error": "auth_failed"}`. Constant-time compare against timing side-channels.
 
 External-bind without auth (operator sets `rpc_localhost_only=false` AND leaves `rpc_auth_secret=""`) is flagged at startup with `[WARNING: external bind without HMAC auth — set rpc_auth_secret or enable rpc_localhost_only]`.
 
@@ -856,8 +872,8 @@ External-bind without auth (operator sets `rpc_localhost_only=false` AND leaves 
 | **Chain / consensus queries** | | |
 | `status` | `{}` | head + head_hash + role + shard_id + epoch_index + peer_count + mempool + `committee_region` (this node's R1 region tag; empty = global pool) + `pending_param_changes` count (total staged A5 entries; detailed list via `pending_params`) + MD/BFT counters + `next_creators` preview + **`protections`** block (every operator-tunable security flag — see CLI-REFERENCE.md) |
 | `peers` | `{}` | `[address, ...]` |
-| `block` | `{index}` | full block record or null |
-| `headers` | `{from, count}` | `{headers: [<header>], from, count, height}` — v2.2 light-client header slice. Each header is the Block binary minus `transactions`, `cross_shard_receipts`, `inbound_receipts`, `initial_state` (the heavy fields a light client doesn't need for committee-sig verification or state_root extraction), plus an explicit `block_hash` field (server-computed: signing_bytes-based `compute_hash` uses the heavy fields the client doesn't have, so the server includes the hash so the client can verify the prev_hash chain links between consecutive headers). Server caps `count` at 256; out-of-range `from` returns empty `headers` array. Also available as gossip-layer `HEADERS_REQUEST` (MsgType 17) / `HEADERS_RESPONSE` (MsgType 18) wire messages — the gossip envelope is byte-identical so any downstream verifier (verify-headers, verify-block-sigs) works against gossip-fetched headers identically. |
+| `block` | `{index}` | full block JSON or null |
+| `headers` | `{from, count}` | `{headers: [<header>], from, count, height}` — v2.2 light-client header slice. Each header is the Block JSON minus `transactions`, `cross_shard_receipts`, `inbound_receipts`, `initial_state` (the heavy fields a light client doesn't need for committee-sig verification or state_root extraction), plus an explicit `block_hash` field (server-computed: signing_bytes-based `compute_hash` uses the heavy fields the client doesn't have, so the server includes the hash so the client can verify the prev_hash chain links between consecutive headers). Server caps `count` at 256; out-of-range `from` returns empty `headers` array. Also available as gossip-layer `HEADERS_REQUEST` (MsgType 17) / `HEADERS_RESPONSE` (MsgType 18) wire messages — the gossip payload is the binary DHF1 page of §9.1, which decodes to the same `{headers, from, count, height}` DOM (`decode_headers_response_frame`), so any downstream verifier (verify-headers, verify-block-sigs) works against gossip-fetched headers identically. |
 | `chain_summary` | `{last_n}` | array of compact block summaries |
 | `validators` | `{}` | array of pool entries |
 | `committee` | `{}` | current epoch's K-of-K committee |
@@ -871,9 +887,9 @@ External-bind without auth (operator sets `rpc_localhost_only=false` AND leaves 
 | `tx` | `{hash}` | tx + block_index + block_hash + timestamp |
 | **State commitment / light-client (v2.1 + v2.2)** | | |
 | `state_root` | `{}` | `{state_root: hex, height, head_hash}` — Merkle commitment readback (§4.1.1) |
-| `state_proof` | `{namespace, key}` | `{state_root, key_bytes, value_hash, target_index, leaf_count, proof: [hex...], height}` — Merkle inclusion proof against `state_root`. `namespace ∈ {a, s, r, d, b, k, c, i, m, p}` — covers the full ten-namespace state tree §4.1.1. For the **simple-key** namespaces `{a, s, r, d, b, k, c}` the `key` param is the ASCII suffix (`d` = v2.18 DApp registry, key = DApp's owning domain). For the **composite-key** namespaces `{i, m, p}` the leaf suffix is binary (big-endian ints + hashes), so the `key` param is the **hex-encoded** post-prefix body — the daemon hex-decodes it, length-checks it (`i` = 40B `src_be8‖tx_hash`, `m` = 4B `shard_be4`, `p` = 12B `eff_be8‖idx_be4`), and prepends `<ns>:` to rebuild the canonical leaf key byte-for-byte (raw binary can't ride a binary string — a SHA-256 hash breaks UTF-8 `dump()`). Returns `{error: "not_found", ...}` if the key is absent (membership proofs only — non-membership proofs require an SMT migration). |
+| `state_proof` | `{namespace, key}` | `{state_root, key_bytes, value_hash, target_index, leaf_count, proof: [hex...], height}` — Merkle inclusion proof against `state_root`. `namespace ∈ {a, s, r, d, b, k, c, i, m, p}` — covers the full ten-namespace state tree §4.1.1. For the **simple-key** namespaces `{a, s, r, d, b, k, c}` the `key` param is the ASCII suffix (`d` = v2.18 DApp registry, key = DApp's owning domain). For the **composite-key** namespaces `{i, m, p}` the leaf suffix is binary (big-endian ints + hashes), so the `key` param is the **hex-encoded** post-prefix body — the daemon hex-decodes it, length-checks it (`i` = 40B `src_be8‖tx_hash`, `m` = 4B `shard_be4`, `p` = 12B `eff_be8‖idx_be4`), and prepends `<ns>:` to rebuild the canonical leaf key byte-for-byte (raw binary can't ride a JSON string — a SHA-256 hash breaks UTF-8 `dump()`). Returns `{error: "not_found", ...}` if the key is absent (membership proofs only — non-membership proofs require an SMT migration). |
 
-The `headers` + `state_proof` + `block` methods are designed to support trust-minimized verification by external clients. The `determ-light` binary (a separate executable, built from the `light/` source tree; NOT a subcommand of `determ`) consumes these methods and verifies every response locally against the committee-signed `state_root`, the chain-of-hashes via prev_hash, and Ed25519 sigs from the genesis-derived committee seed — see `light/` for the implementation and `docs/CLI-REFERENCE.md` §determ-light for the consumer surface. The trust model (S-001 §Light-client trust model) is that the daemon does NOT need HMAC RPC auth for light-client reads to be safe; the light-client refuses any datum that fails verification.
+The `headers` + `state_proof` + `block` methods are designed to support trust-minimized verification by external clients. The `determ-light` binary (a separate executable, built from the `light/` source tree; NOT a subcommand of `determ`) consumes these methods and verifies every response locally against the committee-bound `state_root` (the digest excludes `state_root`; block `H`'s root is bound through block `H+1`'s signed `prev_hash`, so a read at the head waits for the next block), the chain-of-hashes via prev_hash, and Ed25519 sigs from the genesis-derived committee seed — see `light/` for the implementation and `docs/CLI-REFERENCE.md` §determ-light for the consumer surface. The trust model (S-001 §Light-client trust model) is that the daemon does NOT need HMAC RPC auth for light-client reads to be safe; the light-client refuses any datum that fails verification.
 | **Tx submission** | | |
 | `submit_tx` | `{tx}` | `{status: "queued", hash}`. S-028: anon-shape `tx.from` / `tx.to` MUST be lowercase canonical; non-canonical rejected with diagnostic. S-079: rejected with "mempool: unaffordable (S-079)" when the sender's balance at the head does not cover the transaction's transparent debit (amount + fee for value-moving types, the fee for the rest) plus the debits of its other pending transactions; the per-sender quota (100) and the fee floor over affordable residents apply as before. |
 | `send` | `{to, amount, fee}` | Node-authored TRANSFER from the RPC host's domain (uses the daemon's own privkey) |
@@ -885,7 +901,7 @@ The `headers` + `state_proof` + `block` methods are designed to support trust-mi
 | `dapp_list` | `{prefix?, topic?}` | All registered DApps (active + inactive within grace). Optional `prefix` filters by domain prefix; optional `topic` keeps only DApps whose registered topic list contains a match. |
 | `dapp_info` | `{domain}` | Per-DApp record (`domain`, `service_pubkey`, `endpoint_url`, `topics`, `retention`, `metadata`, `registered_at`, `active_from`, `inactive_from`). |
 | `dapp_messages` | `{domain, from_height?, to_height?, topic?}` | Paginated DAPP_CALL events addressed to `domain` in `[from_height, to_height]` (zeros = chain bounds), optionally filtered by `topic`. Up to 256 events per call (`DAPP_MESSAGES_PAGE_LIMIT`). |
-| `dapp_subscribe` | `{domain, topic?, since?, heartbeat_blocks?, queue_max?}` | v2.20 streaming (R53). After the S-014 rate-limit + S-001 HMAC gates, the server takes over the connection and pushes newline-binary frames (`subscribed` → catch-up `dapp_call*` → `live` → live-tail `dapp_call`/`heartbeat*`), each carrying a per-connection monotonic `seq` and the random `sid`. Catch-up replays `[since, head]`; the live tail covers `[head, ∞)`. Per-subscriber queue is bounded (`queue_max` frames, clamp `[4, 1024]`; 16 MiB) with **kill-on-overflow** (`error{code=backpressure}` + close — never a silent drop). Global cap `SUBSCRIBER_MAX_PER_NODE=256`; `since` backlog cap 10000 blocks. Validation failures return the normal one-line RPC error and leave the connection a plain RPC session. |
+| `dapp_subscribe` | `{domain, topic?, since?, heartbeat_blocks?, queue_max?}` | v2.20 streaming (R53). After the S-014 rate-limit + S-001 HMAC gates, the server takes over the connection and pushes newline-JSON frames (`subscribed` → catch-up `dapp_call*` → `live` → live-tail `dapp_call`/`heartbeat*`), each carrying a per-connection monotonic `seq` and the random `sid`. Catch-up replays `[since, head]`; the live tail covers `[head, ∞)`. Per-subscriber queue is bounded (`queue_max` frames, clamp `[4, 1024]`; 16 MiB) with **kill-on-overflow** (`error{code=backpressure}` + close — never a silent drop). Global cap `SUBSCRIBER_MAX_PER_NODE=256`; `since` backlog cap 10000 blocks. Validation failures return the normal one-line RPC error and leave the connection a plain RPC session. |
 | `dapp_subscribers` | `{}` | v2.20 observability (R54). Read-only snapshot of the live streaming subscriber fleet: `{count, max, kills_backpressure, subscribers:[{sid, domain, topic, queue_depth, queue_max, bytes_buffered, seq, killed}]}`. Takes only the per-subscriber runtime locks (never `state_mutex_`) and mutates nothing — does not perturb any stream (`StreamingObservabilityReadOnly.md` SO-1..SO-4). |
 | **Snapshot fetch (v2.3 / B6.basic)** | | |
 | `snapshot` | `{headers}` | Full state snapshot + N tail headers for state_root verification |
@@ -894,7 +910,9 @@ The `headers` + `state_proof` + `block` methods are designed to support trust-mi
 
 ## 11. Snapshot format (B6.basic)
 
-```text
+The canonical snapshot container is the DSN1 record (`Chain::encode_state` / `Chain::decode_state`), on disk and on the wire (§9.1 SNAPSHOT_RESPONSE). The structure below is its non-authoritative `serialize_state` JSON view (`determ snapshot inspect --dump`):
+
+```json
 {
   "version":      1,
   "block_index":  1234,
@@ -957,14 +975,14 @@ The `headers` + `state_proof` + `block` methods are designed to support trust-mi
   ],
 
   // Chain-continuity tail headers + per-header state_root
-  "headers": [<Block record>, ...]   // last N blocks; each carries its own
+  "headers": [<Block JSON>, ...]   // last N blocks; each carries its own
                                     // state_root (S-033)
 }
 ```
 
 > **S-037 closure (shipped).** `serialize_state` + `restore_from_snapshot` now persist and restore `dapp_registry_` with all fields that contribute to the `d:`-namespace value-hash (`service_pubkey`, `endpoint_url`, `topics[]`, `retention`, `metadata`, `registered_at`, `active_from`, `inactive_from`). Pre-v2.18 snapshots without the field load via the missing-field guard (`if (snap.contains("dapp_registry"))`). Regression test: `tools/test_dapp_snapshot.sh` exercises register-on-donor → snapshot → restore-on-receiver → verify `dapp-info` + `dapp-list` return the entry post-restore.
 
-> **S-041 closure (shipped).** The three R7 merge-detection thresholds (`merge_threshold_blocks`, `revert_threshold_blocks`, `merge_grace_blocks`) contribute `k:`-namespace `state_root` leaves (§4.1.1) but were previously omitted from `serialize_state` / `restore_from_snapshot` — an S-037-class gap invisible under the genesis defaults (100 / 200 / 10), because restore's fallback re-supplied the same values. A chain with **non-default** merge thresholds would recompute a divergent `state_root` on restore and fail the S-033 gate. Now emitted + restored (with genesis-default fallbacks for pre-fix snapshots). Regression: `test-snapshot-roundtrip` (case #10b) and `test-snapshot-full-determinism` both carry non-default thresholds (137 / 311 / 29) through the binary round-trip and assert `state_root` identity.
+> **S-041 closure (shipped).** The three R7 merge-detection thresholds (`merge_threshold_blocks`, `revert_threshold_blocks`, `merge_grace_blocks`) contribute `k:`-namespace `state_root` leaves (§4.1.1) but were previously omitted from `serialize_state` / `restore_from_snapshot` — an S-037-class gap invisible under the genesis defaults (100 / 200 / 10), because restore's fallback re-supplied the same values. A chain with **non-default** merge thresholds would recompute a divergent `state_root` on restore and fail the S-033 gate. Now emitted + restored (with genesis-default fallbacks for pre-fix snapshots). Regression: `test-snapshot-roundtrip` (case #10b) and `test-snapshot-full-determinism` both carry non-default thresholds (137 / 311 / 29) through the JSON round-trip and assert `state_root` identity.
 
 ### 11.1 `restore_from_snapshot` verification
 
@@ -978,11 +996,13 @@ The two gates together close S-012: a tampered snapshot fails one gate or the ot
 
 ## 12. Genesis
 
-Genesis is block 0 with `initial_state` carrying creator/account allocations. Its hash binds the chain identity. Operators distribute the genesis binary file; nodes compute the hash on load and refuse to start if `Config.genesis_hash` is set and doesn't match (eclipse defense). The hash binds the full consensus-critical config: chain_id, chain_role, shard_id, committee_region, genesis_message, the creator ed_pubs, governance + suspension/unstake + merge-threshold fields, **and (S-039 closure) all operational params** — `m_creators`, `k_block_sigs`, `block_subsidy`/`subsidy_pool_initial`/`subsidy_mode`/`lottery_jackpot_multiplier`, `min_stake`, `initial_shard_count`, `bft_enabled`/`bft_escalation_threshold`, `epoch_blocks`, `shard_address_salt` — bound unconditionally under a `DTM-genesis-ops-v1` tag (`src/chain/genesis.cpp::make_genesis_block`). So two operators whose configs differ in any consensus-affecting field compute distinct `genesis_hash` values and the mismatch is caught at the HELLO handshake instead of silently failing to converge.
+Genesis is block 0 with `initial_state` carrying creator/account allocations. Its hash binds the chain identity. Operators distribute the genesis file (the canonical DGC1 binary container, §12.1); nodes compute the hash on load and refuse to start if `Config.genesis_hash` is set and doesn't match (eclipse defense). The hash binds the full consensus-critical config: chain_id, chain_role, shard_id, committee_region, genesis_message, the creator ed_pubs, governance + suspension/unstake + merge-threshold fields, **and (S-039 closure) all operational params** — `m_creators`, `k_block_sigs`, `block_subsidy`/`subsidy_pool_initial`/`subsidy_mode`/`lottery_jackpot_multiplier`, `min_stake`, `initial_shard_count`, `bft_enabled`/`bft_escalation_threshold`, `epoch_blocks`, `shard_address_salt` — bound unconditionally under a `DTM-genesis-ops-v1` tag (`src/chain/genesis.cpp::make_genesis_block`). So two operators whose configs differ in any consensus-affecting field compute distinct `genesis_hash` values and the mismatch is caught at the HELLO handshake instead of silently failing to converge.
 
 ### 12.1 Schema
 
-```text
+The JSON authoring view (`GenesisConfig::from_json`); `determ genesis-tool build` validates it and rewrites the file as the canonical DGC1 binary container, which is the only form `GenesisConfig::load` (node startup) reads:
+
+```json
 {
   // Chain identity
   "chain_id":       "string",   // free-form, salts the genesis hash
@@ -1066,23 +1086,33 @@ are not independently tunable. The enforced band is
     M/2 < K <= M          i.e.   1 <= K <= M   AND   2K > M
 ```
 
-and a genesis outside it is **rejected at load**, on both the config authoring
+and a genesis outside it is **rejected at load**, on both the JSON authoring
 view and the canonical DGC1 binary container (`GenesisConfig::validate()`,
-`src/chain/genesis.cpp` — the single rule set both `decode_config` and `decode`
+`src/chain/genesis.cpp` — the single rule set both `from_json` and `decode`
 run). Diagnostic names the rule: `violates QUORUM INTERSECTION (2*K must
 exceed M)`.
 
-The **lower** bound is a safety rule, not a tuning preference — and is
-enforced at both genesis and runtime (DECISION-LOG 2026-09-20 D5a; SECURITY.md
-S-054 ✅ Mitigated). At genesis, `GenesisConfig::validate()` strictly enforces
-`2K > M`. At runtime, a block's K-member committee is drawn by
+The **lower** bound is a safety rule, not a tuning preference — but it is a
+**necessary condition at genesis, not the runtime invariant** (DECISION-LOG
+2026-08-14 `ddfe877`; SECURITY.md S-054 is PARTIAL). At runtime no accept rule
+reads `m_creators`: a block's K-member committee is drawn by
 `check_creator_selection` from the **eligible pool** `N(h)` (the registry minus
-the block's own aborters). To guarantee that two same-height committees must
-overlap, `Chain::select_creators` and `BlockValidator::check_creator_selection`
-assert `2K > N(h)`, and `BlockValidator::check_transaction` rejects any STAKE
-transaction that would cause `eligible.size() + 1 >= 2K`. Two K-subsets of an
-N-set intersect **iff** `2K > N`, so two conflicting finalized blocks *imply*
-a double-signer — every fork has a name.
+the block's own aborters), and REGISTER leaves that pool uncapped. The quantity
+that decides whether two same-height committees must overlap is therefore
+`N(h)`, not `M`. If `2K <= N(h)`, two **disjoint** K-committees exist; under
+the abort-vs-finalize race each is valid against its own `abort_events`, each
+reaches the threshold, and **both finalize — with no member ever signing
+twice**: a fork that is not merely unpunished but **unattributable**. Two
+K-subsets of an N-set intersect **iff** `2K > N`, so above that floor two
+conflicting finalized blocks *imply* a double-signer — every fork has a name.
+The shipped band `2K > M` delivers this only while `N(h) <= M`, and nothing
+checks that: no rule bounds `|initial_creators|` by `M`, and under
+DOMAIN_INCLUSION every REGISTER grows the pool. The runtime
+bound (`2K > N(h)` asserted where the committee is derived, or a genesis-pinned
+pool cap) is OPEN — DECISION CLOCK R-4, genesis-frozen. The owner decided its
+shape on 2026-09-16 (D5a: a genesis check `2K > |initial creators|`, a cap at
+REGISTER/eligibility and an assertion at selection); none of the three is in
+the code.
 
 `K == M` is the **default** (`k_block_sigs` defaults to `m_creators`) and stays
 legal: unanimity satisfies intersection trivially (`2M > M`). It is the strong
@@ -1140,7 +1170,7 @@ A node refusing to start on hash mismatch is the eclipse defense: a peer cannot 
 - At apply time (`Chain::apply_transactions` index-0 branch), pure-balance entries skip the registrant + stake creation (`if (ed_pub != zero) ...` and `if (stake > 0) ...`), so an entry with default `ed_pub` and `stake == 0` ends up as a plain `AccountState` only.
 
 **Determinism:**
-- Same `GenesisConfig` → byte-identical `Block` on every call. No wall-clock, no `/dev/urandom`, no map-iteration-order leak. Critical for cross-node genesis agreement: a node that loads the same binary file from disk and a peer that receives the same binary over gossip must compute the same `compute_genesis_hash` and the same block-0 hash.
+- Same `GenesisConfig` → byte-identical `Block` on every call. No wall-clock, no `/dev/urandom`, no map-iteration-order leak. Critical for cross-node genesis agreement: two nodes that load the same genesis file must compute the same `compute_genesis_hash` and the same block-0 hash.
 
 Test surface: `tools/test_make_genesis_block.sh` exercises every invariant above (34 in-process assertions).
 
@@ -1150,16 +1180,16 @@ Test surface: `tools/test_make_genesis_block.sh` exercises every invariant above
 
 | Profile | Timing (commit/sig/abort) | M / K | role / sharding_mode | Crypto | Confidential tx | Primary use case |
 |---|---|---|---|---|---|---|
-| **`cluster`**  | 50 / 50 / 25      | 3 / 3 (strong) | BEACON / CURRENT  | **FIPS** | ❌ Unavailable | **In-house enterprise / financial services / banking settlement / regulated single-org / single-org CBDC / HIPAA healthcare. ~125 ms blocks.** |
-| `web` (default) | 200 / 200 / 100 | 4 / 3 (hybrid) | SHARD / EXTENDED | MODERN | ❌ De-scoped (2026-07-03) | Public-internet, regional shards, commercial single-cluster non-FIPS, regulated gambling, B2B payment |
-| `regional` | 300 / 300 / 150   | 5 / 4 (hybrid) | SHARD / CURRENT  | MODERN | ❌ De-scoped (2026-07-03) | Regional / continental RTT, state lottery, multi-region commercial |
-| `global`   | 600 / 600 / 300   | 7 / 5 (hybrid) | BEACON / EXTENDED | MODERN | ❌ De-scoped (2026-07-03) | Inter-continental hub-and-spoke, international CBDC federation |
-| **`tactical`** | 20 / 20 / 10      | 3 / 3 (strong) | SHARD / EXTENDED | **FIPS** | ❌ Unavailable | **Military / defense / drone swarm / embedded mobile units / DoD deployments. Sub-30 ms private link, region-pinned units.** |
+| **`cluster`**  | 50 / 50 / 25      | 3 / 3 (strong) | BEACON / CURRENT  | **FIPS** | not set by the profile (see below) | **In-house enterprise / financial services / banking settlement / regulated single-org / single-org CBDC / HIPAA healthcare. ~125 ms blocks.** |
+| `web` (default) | 200 / 200 / 100 | 4 / 3 (hybrid) | SHARD / EXTENDED | MODERN | not set by the profile | Public-internet, regional shards, commercial single-cluster non-FIPS, regulated gambling, B2B payment |
+| `regional` | 300 / 300 / 150   | 5 / 4 (hybrid) | SHARD / CURRENT  | MODERN | not set by the profile | Regional / continental RTT, state lottery, multi-region commercial |
+| `global`   | 600 / 600 / 300   | 7 / 5 (hybrid) | BEACON / EXTENDED | MODERN | not set by the profile | Inter-continental hub-and-spoke, international CBDC federation |
+| **`tactical`** | 20 / 20 / 10      | 3 / 3 (strong) | SHARD / EXTENDED | **FIPS** | not set by the profile | **Military / defense / drone swarm / embedded mobile units / DoD deployments. Sub-30 ms private link, region-pinned units.** |
 
 **Cryptographic profile bundling.** Two of the five profiles (`cluster`, `tactical`) bundle the **FIPS** cryptographic stack for deployments where FIPS 140-2/3 compliance is non-negotiable:
 
 - **FIPS profile stack:** AES-256-GCM AEAD (FIPS 197 + SP 800-38D), PBKDF2-HMAC-SHA-256 KDF (SP 800-132), NIST P-256 prime-order operations (FIPS 186-5), Ed25519 signatures (FIPS 186-5 since 2023), X25519 KX (SP 800-186), SHA-256/SHA-512 (FIPS 180-4), HMAC/HKDF (FIPS 198/SP 800-56C).
-- **Confidential transactions (v2.22) are DE-SCOPED project-wide (2026-07-03)** — no profile ships them (the historical FIPS-specific rationale — NIST has not standardized zero-knowledge range proofs — stands independently). All deployments use clear-amount TRANSFER with v2.24 audit hooks for regulator access.
+- **Confidential transactions (v2.22) are not controlled by the profile.** The only switch is the genesis field `confidential_tx_enabled` (`GenesisConfig`, default `true`); no profile sets it, so `SHIELD` / `UNSHIELD` / `CONFIDENTIAL_TRANSFER` are accepted by the validator on any chain whose genesis does not set it to `false`, under either crypto profile (the genesis `crypto_profile` changes only the enote-commitment bookkeeping at apply, `src/chain/chain.cpp`). The 2026-07-03 de-scoping was superseded by the owner's O-4 decision of 2026-09-16 (CT stays as designed; S-083 must close before CT is enabled anywhere); the genesis default does not enforce that order. (The historical FIPS-specific caveat — NIST has not standardized zero-knowledge range proofs — stands independently.)
 - **FIPS use cases:** military embedded systems (tactical), in-house bank settlement (cluster), single-org CBDC components (cluster), healthcare-HIPAA-strict deployments (cluster), DoD/government contracts.
 
 The other three profiles (`web`, `regional`, `global`) bundle the **MODERN** cryptographic stack: XChaCha20-Poly1305 AEAD, Argon2id KDF, Ed25519 signatures, X25519 KX. Cryptographically strongest defaults but not FIPS-validated. (The formerly-listed secp256k1 + Bulletproofs confidential-transaction component was **DE-SCOPED 2026-07-03** — no secp256k1 code exists in the tree; `DECISION-LOG.md 2026-07-03`.)
@@ -1287,7 +1317,7 @@ A4 / v2.4 — atomic execution of multiple inner transactions under one outer en
 
 ```
 Payload (canonical length-prefixed binary, LE where noted; shipped by the
-D2 migration — the transitional text-array payload was deleted pre-genesis):
+D2 migration — the transitional JSON-array payload was deleted pre-genesis):
   [inner_count: u16 LE]   # 1..MAX_COMPOSABLE_INNER (= 64)
   inner_count × [frame_len: u32 LE][Transaction frame bytes]
 ```
@@ -1301,6 +1331,8 @@ Validator constraints:
 4. Inner txs MUST have `fee == 0` (outer batch pays the chain fee).
 5. Inner frames MUST NOT carry a `pq_auth` section (PQ inners are not in the v2.4 whitelist; the accept rule closes the unsigned-stuffing channel).
 6. No inner tx may originate from the Zeroth pool (`inner.from != ZEROTH_ADDRESS`, E1 asserted at the inner layer, 2026-09-15 — S-071: the pool's all-zero key is a small-order point under which signatures are forgeable, so the guard is what makes the pool a pseudo-account). Apply mirrors the rule inside `atomic_scope`.
+7. Each inner payload is at most 32 bytes.
+8. An anonymous inner sender whose key is a small-order point is rejected, after its signature (D10 / S-072, the same rule as the outer arm, §2.2).
 
 Apply semantics:
 - Outer batch consumes submitter's `next_nonce` (one slot).
@@ -1383,14 +1415,13 @@ Pure client-side feature; no chain protocol changes. The `determ-wallet` binary 
 ```
 seed → Shamir SSS (T-of-N, GF(2^8)) → per-share AEAD envelope
                                       ↑
-                              keyed by passphrase (Phase 3, default)
-                                      OR
-                              keyed by OPAQUE adapter export_key (Phase 7)
+                              keyed by the recovery passphrase
+                              (the only shipped scheme)
 ```
 
-> *Phase numbers above refer to the wallet's internal phase plan (see `wallet/PHASE6_PORTING_NOTES.md`): Phase 3 = passphrase-direct AEAD; Phase 5 = stub OPAQUE adapter (shipped in v1.x as a development scaffold); Phase 6 = real `libopaque`-vendored adapter (deferred to **v2.14** — gated on the Windows MSVC porting of upstream VLAs); Phase 7 = wallet flow that routes through the adapter (shipped). Both schemes share Phase 7's flow. See `docs/proofs/WalletRecovery.md` §Phase-numbering-note for the full mapping.*
+> *The passphrase scheme is the only one in the tree: `determ-wallet create-recovery --scheme` accepts only `passphrase`. The OPAQUE-keyed variant (an adapter whose `export_key` would key each envelope) is not implemented — its libsodium development stub was deleted and the wallet OPAQUE track was de-scoped on 2026-07-03 (`CMakeLists.txt` determ-wallet target; DECISION-LOG). A real OPAQUE scheme remains v2.14 future work.*
 
-Recovery setup — canonical **binary** `DRS1` container, persisted to disk (D2 step 3, 2026-08-12; the binary document and its dot-hex envelope strings are deleted, pre-genesis, no shims). All integers little-endian; decode requires the EXACT total length; every bound refuses rather than clamps (`wallet/recovery.hpp`):
+Recovery setup — canonical **binary** `DRS1` container, persisted to disk (D2 step 3, 2026-08-12; the JSON document and its dot-hex envelope strings are deleted, pre-genesis, no shims). All integers little-endian; decode requires the EXACT total length; every bound refuses rather than clamps (`wallet/recovery.hpp`):
 
 ```
 [0..3]   "DRS1"
@@ -1404,16 +1435,14 @@ Recovery setup — canonical **binary** `DRS1` container, persisted to disk (D2 
 share_count × { guardian_x u8 (1..=255, DISTINCT) || env_len u32 LE || DWE envelope bytes }
 ```
 
-Each embedded envelope is the canonical **`DWE` binary container** (`wallet/envelope.hpp`) — magic `DWE1` (PBKDF2) or `DWE2` (Argon2id), then `[salt_len u8][salt][params][nonce 12][aad_len u16][aad][ct_len u32][ct]`, exact-length on decode, KDF-cost caps enforced **before** any KDF runs. AEAD is AES-256-GCM, 12-byte nonce, 16-byte tag; AAD is the 8-byte tuple `"DWR1" ‖ guardian_id u8 ‖ version u32 LE` (`wallet/recovery.cpp:29`). The legacy **dot-separated** hex text form (`DWE1.<salt>.<iters>.<nonce>.<aad>.<ct>`) is **deleted**; what survives is a non-authoritative plain lowercase-hex CLI view of the same container bytes (`envelope::serialize` / `deserialize`, which reject dots, odd length and non-hex).
+Each embedded envelope is the canonical **`DWE` binary container** (`wallet/envelope.hpp`) — magic `DWE1` (PBKDF2) or `DWE2` (Argon2id; what `recovery::create` writes, via `envelope::encrypt`), then `[salt_len u8][salt][params][nonce 12][aad_len u16][aad][ct_len u32][ct]`, exact-length on decode, KDF-cost caps enforced **before** any KDF runs. AEAD is AES-256-GCM, 12-byte nonce, 16-byte tag; AAD is the 8-byte tuple `"DWR1" ‖ guardian_id u8 ‖ version` (the low three bytes of the version, little-endian; `make_aad`, `wallet/recovery.cpp:29`). The legacy **dot-separated** hex text form (`DWE1.<salt>.<iters>.<nonce>.<aad>.<ct>`) is **deleted**; what survives is a non-authoritative plain lowercase-hex CLI view of the same container bytes (`envelope::serialize` / `deserialize`, which reject dots, odd length and non-hex).
 
-OPAQUE adapter (development stub today; **v2.14** ships the real `libopaque`-vendored adapter, gated on the Windows MSVC porting of upstream VLAs — see `wallet/PHASE6_PORTING_NOTES.md`): `register_password(pw, gid) → (record, export_key)`; `authenticate_password(pw, record, gid) → export_key`. The `export_key` becomes the AEAD password for that guardian's envelope. The `is_stub()` flag gates production use until v2.14 lands.
-
-Soundness proof: `docs/proofs/WalletRecovery.md` (FA12). Concrete bounds for real OPAQUE (v2.14): `Q · 2^-bits_password + N · 2^-128` (rate-limited online grind only). For the stub adapter: offline-grindable, NOT for production.
+Soundness proof: `docs/proofs/WalletRecovery.md` (FA12). A single compromised envelope is offline-grindable at the per-guess Argon2id cost against the passphrase's own entropy; below-threshold share sets reveal nothing about the seed.
 
 ### Cross-references
 
 - [`WHITEPAPER-v1.x.md`](WHITEPAPER-v1.x.md) — standalone academic-style technical paper covering the same material at a higher level.
-- [`proofs/`](proofs/README.md) — formal-verification proofs (F0 + FA1–FA12 + FA-Apply + FA-Apply-2..FA-Apply-19 analytic + MakeContribCommitmentBackwardCompat + F2ViewReconciliationAnalysis + RpcAuthHmacSoundness + WireFormatBackwardCompat + S014RateLimiterSoundness + BlockchainStateIntegrity + S014ConcurrencyAnalysis + S017UnstakeApplyConsistency + DataValidationSoundness + S028AnonAddressNormalization + S006ContribMsgEquivocation + S010S011SybilEconomics + WalletRecoveryFlows + S022WireFormatCaps + S033StateRootNamespaceCoverage + S029ForkChoiceSoundness + RpcInputValidationDefense + S001RpcAuthSoundness + S004KeyfileAtRest + S007OverflowProtection + S012SnapshotStateRootGate + S031ConcurrencyComposition + S036UnderQuorumMerge + S013PerSignerCap + S020CommitteeSelection + S008BoundedMempool + S027InfoLeakage + S026TcpKeepalive + F2ApplyComposition + S015AsyncSavePersistence + S024EpochBlocks + S009DelayHashRemoval + S025BFTEscalationSoundness + S005PassphraseKeyfile + UnitTestCoverageMap + S014RateLimiterDDOSResistance + S022WireFormatCapsCompleteness + S016InboundReceiptTimeOrdered + S019DAppEndpointSpoof + S023NodeKeyfileEncryption + F2RPCAuthEnvComposition + LightClientThreatModel (R39+1 A7 trust-minimized light-client T-L1..T-L5 proofs) + SchemaDiscriminatorsImpl (R39+1 A5 forward-looking implementation spec for the seven v1.0 schema discriminators) + EnvelopeKeyfileCrypto (R39+2 v2.17/S-004 primitive-layer `DWE1` AEAD-with-KDF envelope proof KE-1..KE-4) + MerkleTreeSoundness (R39+3 C5 sorted-leaves balanced binary Merkle tree proof MT-1..MT-5 + CVE-2012-2459 non-applicability) + AnonAddressDerivationMigration (R39+3 C6 OPEN decision-analysis of the v1.0 `pubkey_form` address-derivation compat-break) + LightClientArchiveSoundness (R39+3 C7 offline-reverifiable header-archive soundness AR-1..AR-4) + BatchSigningSoundness (R40 D5 per-transaction soundness of the batch wallet ops `tx-batch-sign` / `verify-batch` / `account-import-many` BS-1..BS-4 — batch = N independent single-record operations, no cross-record contamination) + StakeDistributionMetrics (R40 D6 decentralization-metric arithmetic-correctness for `operator_stake_distribution.sh` SD-1..SD-4 Nakamoto integer-exactness + Gini sorted-form correctness) + AccountHistorySoundness (R40 D7 trustless verified balance/nonce trajectory soundness for `determ-light account-history` AH-1..AH-4 — per-point committee-sig anchoring; nonce monotonicity is necessary-not-sufficient; sampling-gap honesty) + CrossShardSupplyConservation (R40 E5 / FA-Apply-17 K-shard aggregate supply-conservation identity XS-1..XS-5 — the multi-shard composition of the per-shard A1 unitary-supply invariant; pinned by D1's `test-cross-shard-supply-invariant`) + TxInclusionProofSoundness (R40 E6 trustless tx-inclusion verdict soundness for `determ-light verify-tx-inclusion` TI-1..TI-4 — STRONG regime: `tx_root` is committee-signed, so INCLUDED/NOT-INCLUDED are cryptographic; tampered body → UNVERIFIABLE) + OperatorToolingReadOnly (R40 E7 `operator_*.sh` family read-only-diagnostic meta-proof OT-1/OT-2 — 91 scripts catalogued, every one issues only READ RPCs, none touches the 6 mutating endpoints) + SnapshotDeterminismComposition (R40 F5 all-namespace snapshot round-trip determinism composition SD-1..SD-5 — the full ten-namespace serialized state round-trips byte-identically AND root-identically; the S-037-bug-class drop-detection generalized to all namespaces; pinned by F1's `test-snapshot-full-determinism`) + StateRootAnchorSoundness (R40 F6 per-height committee-verified `state_root` anchor soundness SR-1..SR-5 for `determ-light verify-state-root` — `state_root` is NOT in `compute_block_digest` but is committee-certified transitively forward via `block_hash(H)=prev_hash(H+1)∈digest(H+1)`; genesis-binding, height-binding, fail-closed, pre-S-033 vacuity) + LightClientCompositionMap (R40 F7 capstone composition lattice / reading guide for the six light-client proofs — indexes T-L*/MT-*/SR-*/TI-*/AH-*/AR-* into one dependency graph bottoming out on {A1, A2}; the command→guarantee map for all 15 `determ-light` subcommands; adds zero theorems) + ParamChangeDeterminism (p: governance-namespace apply + snapshot determinism PC-1..PC-3) + GovernanceWhitelistSoundness (A5 parameter-whitelist closure + bounds + state-root binding GW-1..GW-3) + StakeProofSoundness (trust-minimized s: stakes-namespace light-client read soundness SP-1..SP-3) + SupplyProofSoundness (trust-minimized c: supply-counter-namespace read soundness SU-1..SU-4, spec-level) + SupplyInvariantComposition (A1 supply identity composed across apply / snapshot / cross-shard SI-1..SI-4) + SubsidyAccountingSoundness (FA-Apply-18 subsidy + fee distribution determinism + A1 preservation SB-1..SB-3) + RandomizedRegistrationDelaySoundness (FA-Apply-19 derive_delay registration-anchor anti-grinding unbiasability) + AppliedReceiptSnapshotSoundness (i: applied-receipts namespace snapshot + apply determinism AR-1..AR-7) + ReceiptInclusionProofSoundness (trustless cross-shard i:-receipt-membership soundness RI-1..RI-5) + CrossShardRelaySoundness (cross-shard receipt relay + untrusted-buffer staging carries zero trust CR-1..CR-7) + MergeStateSoundness (m: merge_state namespace apply + snapshot determinism MS-1..MS-6) + StateProofCompositeKeySoundness (daemon-side composite-key i:/m:/p: state_proof RPC reconstruction soundness SP-CK-1..SP-CK-3) + CompositeStateReadSoundness (trust-minimized m:/p: composite-key light-client read soundness CR-1..CR-5) + ShardRoutingSoundness (FA8-R address-to-shard routing primitive soundness SR-0..SR-5.1) + DAppRegistryReadSoundness (trust-minimized d: DApp-registry namespace read soundness DR-1..DR-6) + DAppRegistryCommitmentSoundness (d:-leaf injectivity + registry/message commitment-coverage boundary DC-1..DC-4) + RpcAuthReplayWindowSoundness (bound-timestamp + sliding-window anti-replay for HMAC RPC auth, spec) + RateLimiterKeyDerivationSoundness (S-014 bucket-key-derivation per-host fail-safe coalescing soundness L-1..L-6 / T-1..T-5) + NegativeVerdictSoundness (NOT-INCLUDED / absence-verdict soundness asymmetry across the verifier family NV-1..NV-6) + StateProofRaceWindowSoundness (state_proof temporal race-window dispatch soundness PRW-1..PRW-5) + BFTProposerElectionSoundness (within-committee deterministic proposer_idx election soundness PE-1..PE-4) + AbortCertificateSoundness (abort-certificate quorum-verification soundness V10 T-C1..T-C7) + OfflineEquivocationEvidenceSoundness (offline determ-light equivocation-evidence verifier T-OE1..T-OE4) + BinaryCodecRoundTripSoundness (A3/S8 binary wire-codec decode-correctness soundness T-1..T-4), FB1–FB53 TLA+).
+- [`proofs/`](proofs/README.md) — formal-verification proofs (F0 + FA1–FA12 + FA-Apply + FA-Apply-2..FA-Apply-19 analytic + MakeContribCommitmentBackwardCompat + F2ViewReconciliationAnalysis + RpcAuthHmacSoundness + WireFormatBackwardCompat + S014RateLimiterSoundness + BlockchainStateIntegrity + S014ConcurrencyAnalysis + S017UnstakeApplyConsistency + JsonValidationSoundness + S028AnonAddressNormalization + S006ContribMsgEquivocation + S010S011SybilEconomics + WalletRecoveryFlows + S022WireFormatCaps + S033StateRootNamespaceCoverage + S029ForkChoiceSoundness + RpcInputValidationDefense + S001RpcAuthSoundness + S004KeyfileAtRest + S007OverflowProtection + S012SnapshotStateRootGate + S031ConcurrencyComposition + S036UnderQuorumMerge + S013PerSignerCap + S020CommitteeSelection + S008BoundedMempool + S027InfoLeakage + S026TcpKeepalive + F2ApplyComposition + S015AsyncSavePersistence + S024EpochBlocks + S009DelayHashRemoval + S025BFTEscalationSoundness + S005PassphraseKeyfile + UnitTestCoverageMap + S014RateLimiterDDOSResistance + S022WireFormatCapsCompleteness + S016InboundReceiptTimeOrdered + S019DAppEndpointSpoof + S023NodeKeyfileEncryption + F2RPCAuthEnvComposition + LightClientThreatModel (R39+1 A7 trust-minimized light-client T-L1..T-L5 proofs) + SchemaDiscriminatorsImpl (R39+1 A5 forward-looking implementation spec for the seven v1.0 schema discriminators) + EnvelopeKeyfileCrypto (R39+2 v2.17/S-004 primitive-layer `DWE1` AEAD-with-KDF envelope proof KE-1..KE-4) + MerkleTreeSoundness (R39+3 C5 sorted-leaves balanced binary Merkle tree proof MT-1..MT-5 + CVE-2012-2459 non-applicability) + AnonAddressDerivationMigration (R39+3 C6 OPEN decision-analysis of the v1.0 `pubkey_form` address-derivation compat-break) + LightClientArchiveSoundness (R39+3 C7 offline-reverifiable header-archive soundness AR-1..AR-4) + BatchSigningSoundness (R40 D5 per-transaction soundness of the batch wallet ops `tx-batch-sign` / `verify-batch` / `account-import-many` BS-1..BS-4 — batch = N independent single-record operations, no cross-record contamination) + StakeDistributionMetrics (R40 D6 decentralization-metric arithmetic-correctness for `operator_stake_distribution.sh` SD-1..SD-4 Nakamoto integer-exactness + Gini sorted-form correctness) + AccountHistorySoundness (R40 D7 trustless verified balance/nonce trajectory soundness for `determ-light account-history` AH-1..AH-4 — per-point committee-sig anchoring; nonce monotonicity is necessary-not-sufficient; sampling-gap honesty) + CrossShardSupplyConservation (R40 E5 / FA-Apply-17 K-shard aggregate supply-conservation identity XS-1..XS-5 — the multi-shard composition of the per-shard A1 unitary-supply invariant; pinned by D1's `test-cross-shard-supply-invariant`) + TxInclusionProofSoundness (R40 E6 trustless tx-inclusion verdict soundness for `determ-light verify-tx-inclusion` TI-1..TI-4 — STRONG regime: `tx_root` is committee-signed, so INCLUDED/NOT-INCLUDED are cryptographic; tampered body → UNVERIFIABLE) + OperatorToolingReadOnly (R40 E7 `operator_*.sh` family read-only-diagnostic meta-proof OT-1/OT-2 — 91 scripts catalogued, every one issues only READ RPCs, none touches the 6 mutating endpoints) + SnapshotDeterminismComposition (R40 F5 all-namespace snapshot round-trip determinism composition SD-1..SD-5 — the full ten-namespace serialized state round-trips byte-identically AND root-identically; the S-037-bug-class drop-detection generalized to all namespaces; pinned by F1's `test-snapshot-full-determinism`) + StateRootAnchorSoundness (R40 F6 per-height committee-verified `state_root` anchor soundness SR-1..SR-5 for `determ-light verify-state-root` — `state_root` is NOT in `compute_block_digest` but is committee-certified transitively forward via `block_hash(H)=prev_hash(H+1)∈digest(H+1)`; genesis-binding, height-binding, fail-closed, pre-S-033 vacuity) + LightClientCompositionMap (R40 F7 capstone composition lattice / reading guide for the six light-client proofs — indexes T-L*/MT-*/SR-*/TI-*/AH-*/AR-* into one dependency graph bottoming out on {A1, A2}; the command→guarantee map for all 15 `determ-light` subcommands; adds zero theorems) + ParamChangeDeterminism (p: governance-namespace apply + snapshot determinism PC-1..PC-3) + GovernanceWhitelistSoundness (A5 parameter-whitelist closure + bounds + state-root binding GW-1..GW-3) + StakeProofSoundness (trust-minimized s: stakes-namespace light-client read soundness SP-1..SP-3) + SupplyProofSoundness (trust-minimized c: supply-counter-namespace read soundness SU-1..SU-4, spec-level) + SupplyInvariantComposition (A1 supply identity composed across apply / snapshot / cross-shard SI-1..SI-4) + SubsidyAccountingSoundness (FA-Apply-18 subsidy + fee distribution determinism + A1 preservation SB-1..SB-3) + RandomizedRegistrationDelaySoundness (FA-Apply-19 derive_delay registration-anchor anti-grinding unbiasability) + AppliedReceiptSnapshotSoundness (i: applied-receipts namespace snapshot + apply determinism AR-1..AR-7) + ReceiptInclusionProofSoundness (trustless cross-shard i:-receipt-membership soundness RI-1..RI-5) + CrossShardRelaySoundness (cross-shard receipt relay + untrusted-buffer staging carries zero trust CR-1..CR-7) + MergeStateSoundness (m: merge_state namespace apply + snapshot determinism MS-1..MS-6) + StateProofCompositeKeySoundness (daemon-side composite-key i:/m:/p: state_proof RPC reconstruction soundness SP-CK-1..SP-CK-3) + CompositeStateReadSoundness (trust-minimized m:/p: composite-key light-client read soundness CR-1..CR-5) + ShardRoutingSoundness (FA8-R address-to-shard routing primitive soundness SR-0..SR-5.1) + DAppRegistryReadSoundness (trust-minimized d: DApp-registry namespace read soundness DR-1..DR-6) + DAppRegistryCommitmentSoundness (d:-leaf injectivity + registry/message commitment-coverage boundary DC-1..DC-4) + RpcAuthReplayWindowSoundness (bound-timestamp + sliding-window anti-replay for HMAC RPC auth, spec) + RateLimiterKeyDerivationSoundness (S-014 bucket-key-derivation per-host fail-safe coalescing soundness L-1..L-6 / T-1..T-5) + NegativeVerdictSoundness (NOT-INCLUDED / absence-verdict soundness asymmetry across the verifier family NV-1..NV-6) + StateProofRaceWindowSoundness (state_proof temporal race-window dispatch soundness PRW-1..PRW-5) + BFTProposerElectionSoundness (within-committee deterministic proposer_idx election soundness PE-1..PE-4) + AbortCertificateSoundness (abort-certificate quorum-verification soundness V10 T-C1..T-C7) + OfflineEquivocationEvidenceSoundness (offline determ-light equivocation-evidence verifier T-OE1..T-OE4) + BinaryCodecRoundTripSoundness (A3/S8 binary wire-codec decode-correctness soundness T-1..T-4), FB1–FB53 TLA+).
 - [`QUICKSTART.md`](QUICKSTART.md) — operator-facing recipes for the wire formats specified here.
 - [`CLI-REFERENCE.md`](CLI-REFERENCE.md) — command-line surface for transactions described in §3.
 
@@ -1431,7 +1460,7 @@ The wire has a single shipped format:
 kWireVersionBinary = 1    # the binary envelope + codec (src/net/binary_codec.cpp)
 ```
 
-The legacy text-over-TCP envelope (wire-version 0) and the per-pair `min(ours, theirs)` negotiation were **deleted pre-genesis** (D2, DECISION-LOG 2026-07-28 — the wire portion is genesis-frozen under no-migrations, so the deletion had to land before v1 freeze). Every body is the 0xB1 binary envelope (§9.1); HELLO travels as its fixed binary frame like every other message.
+The legacy JSON-over-TCP envelope (wire-version 0) and the per-pair `min(ours, theirs)` negotiation were **deleted pre-genesis** (D2, DECISION-LOG 2026-07-28 — the wire portion is genesis-frozen under no-migrations, so the deletion had to land before v1 freeze). Every body is the 0xB1 binary envelope (§9.1); HELLO travels as its fixed binary frame like every other message.
 
 HELLO still carries a `wire_version` u8 field as an **advertisement** — the additive post-genesis upgrade escape hatch. With one shipped version it decides nothing; a future v2-capable build advertises 2, keeps *sending* v1 frames, and may upgrade a connection only after reading the peer's advertised max. The envelope's version byte (offset 1) is the per-frame discriminator a future format would bump.
 

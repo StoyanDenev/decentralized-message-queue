@@ -285,15 +285,19 @@ expiration or drain-to-execution path. It is not a production mempool or a ledge
 acceptance rule. The event loop serializes access; separate buckets establish a
 storage boundary, not parallel execution or freedom from cross-shard locks.
 
-**Format and verification.** The supported subset is exactly the existing
-397-byte anonymous, payload-empty, PQ-empty TRANSFER frame. Both addresses are
+**Format and verification.** The supported subset is exactly the 397-byte
+D23-layout anonymous, payload-empty, PQ-empty TRANSFER frame. Both addresses are
 66-byte `0x` plus lowercase hex. The first and third 32-byte core slots hold ASCII
-address prefixes, as in C++ `Transaction::encode_frame`, despite the C99 codec's
-`sender_pubkey` / `recipient_pubkey` field names. Full decode/reencode equality
-rejects alternate padding/reserved bytes; exact length rejects optional trailers.
+address prefixes, as in the D23 C++ `Transaction::encode_frame`, despite the C99 codec's
+`sender_pubkey` / `recipient_pubkey` field names. The decoder rejects nonzero
+padding/reserved bytes, full decode/reencode equality is kept as a second check,
+and exact length rejects optional trailers.
 Raw account keys are derived from the addresses. The verified 195-byte preimage is
 `type_u8 || genesis32 || shard_BE32 || from66 || 0 || to66 || 0 || amount_BE64 ||
-fee_BE64 || nonce_BE64`, matching C++ `Transaction::signing_bytes`. Its SHA-256 must
+fee_BE64 || nonce_BE64`, the decided D23 / R-17 preimage. **Divergence (2026-09-23):** the C++ D23
+implementation was reverted as unsound, so C++ `Transaction::signing_bytes` and
+`Transaction::encode_frame` currently carry no `genesis_hash` / `shard_id`; C++-signed
+transactions are not accepted by this inbox until D23 lands soundly. Its SHA-256 must
 equal the supplied hash exactly, including when that supplied hash is zero.
 Ed25519 verification and a separate sender small-order rejection are mandatory.
 
