@@ -6,6 +6,18 @@
 
 **Status:** architecture spec + Phase-0 implementation underway. Resolves the cryptographic-stack architecture for Phase 0 / Phase A: vendor every primitive Determ uses as independent C99 source organized into modular sub-libraries; eliminate libsodium dependency entirely; deliver a clean C API consumable from C++20 (current Determ) and from C99 (future NH1 Stage 2 rewrite). **Landed (validated byte-equal vs OpenSSL + published KATs, additive — not yet wired into call sites):** §3.10 constant-time primitives (`determ_ct_memcmp` + `determ_secure_zero` — the one §3.10 piece every other module consumes), §3.1 SHA-256/512 + HMAC + HKDF, §3.8b PBKDF2-HMAC-SHA-256, §3.4 ChaCha20-Poly1305 AEAD, §3.5 AES-256-GCM (complete — constant-time end to end: branchless GHASH + arithmetic, no-table S-box), §3.2 Ed25519 (RFC 8032 sign/verify + scalar/point arithmetic — the FROST EC prerequisite), §3.8c NIST P-256 (from-scratch Montgomery field + RCB complete addition + CT ladder — the FIPS-profile curve; constants gated vs OpenSSL EC_GROUP), **§3.8 FROST-Ed25519** (trusted-dealer + **trustless DKG** keygen — Pedersen DKG with Feldman VSS + proof-of-possession, RFC 9591 §6.6, so no single party learns the group secret — plus two-round threshold signing whose t-of-n aggregate verifies as a plain Ed25519 signature under the group key — all validated under OpenSSL; RFC 9591 E.1 interop now gated via `tools/vectors/frost_ed25519_rfc9591.json` through both §3.13 halves — keygen shares + group pk byte-exact, reconstruct recovers the vector sk, the RFC aggregate verifies under the C99 Ed25519, and determ_frost_sign with the RFC's own nonces yields a valid group-key signature; the binding-factor transcript itself stays deliberately domain-separated (DETERM-FROST-RHO, src/crypto/frost/README.md §5); the module was FROZEN per the NOTICE §6 amendment 2026-07-03, then REMOVED from the tree 2026-07-09 — register B2, NOTICE §8). **Note on §3.2:** the shipped implementation is a constant-time, table-free `gf[16]` (radix-2^16) field + cswap-ladder, derived from the public-domain TweetNaCl construction, rather than the originally-planned `ref10` radix-2^51 + precomputed-base-table form. The choice is correctness-first: TweetNaCl is small, auditable, and constant-time, and avoids the ~30 KB precomputed base table that is infeasible to vendor by hand; it is validated byte-equal vs OpenSSL `EVP_PKEY_ED25519` + RFC 8032 §7.1. A `ref10`/radix-2^51 variant remains a future throughput optimization (same posture as the AES S-box). Remaining Phase-0: the FROST primitives (keygen/sign/aggregate) now become implementable on this layer. Implementation tracking lived in `V210ImplementationRoadmap.md` (deleted 2026-07-09, doc-consolidation inc.1 — git history is the archive; absorbed residue in `FROST_DEVIATION_NOTICE.md` §9).
 
+**Freestanding target authority (2026-09-24).** The latest owner goal requires a
+strict C99 target with no libc, heap allocation or external runtime libraries and
+secret-independent control flow and memory addresses for secret-processing
+cryptographic operations. Earlier hosted implementation descriptions and future
+portability claims do not waive these requirements. “C99-native”, “libsodium-free”
+and a functional test result do not establish target compatibility. Only modules
+with bounded storage, audited dependencies and independently reviewed evidence for
+the selected compiler/target profile may enter that target (§9). The current
+Argon2id implementation and libc-backed erasure helper do not meet this admission
+rule (§3.6 and §3.10). Hosted callers remain as implemented; no cryptographic
+algorithm, stored format or production call site is changed by this correction.
+
 **Companion documents:**
 - `v2.22-PRIVACY-SPEC.md` — confidential transactions spec (consumer; Bulletproofs are over NIST P-256 — secp256k1 was rejected 2026-07-07 and never built)
 - `Beaconless-v2-SPEC.md` — Phase D architecture (consumer; cross-shard randomness uses MPDH commit-reveal aggregation, not FROST — switched 2026-06-07, `DECISION-LOG.md`)
@@ -351,16 +363,13 @@ The C++ wrapper provides:
 
 ### Q6: Constant-time discipline
 
-**Decision: every primitive verified constant-time against side-channel attacks via dudect (statistical) + manual review.**
+**Discipline: state and review a per-operation leakage contract; evidence is specific to the compiled artifact and threat model.** This is not a claim that every primitive has been proved constant-time against every side channel.
 
-Per-primitive validation:
-- **Static**: review each primitive against constant-time anti-patterns (branching on secrets, data-dependent memory access, variable-time arithmetic)
-- **Dynamic**: dudect or ctgrind run on each primitive; report timing-leak score (must be statistically zero per dudect's test)
-- **Documented**: each primitive's `<module>.h` notes which operations are constant-time and which are not (e.g., key generation may be variable-time; sign/verify must be constant-time)
+- **Source review:** identify secret inputs, public lengths and permitted outputs; check control flow, addresses, arithmetic, object lifetimes and bounds. Review generated instructions as well as C source.
+- **Measurements:** the in-house Welch-t probe in §3.12 supplies empirical evidence for its registered targets and tested input classes. A non-significant result means no difference was detected by that experiment, not a zero leak or a proof. External dudect/ctgrind integration remains unshipped; the deterministic statistics selftest is not a timing test of every primitive.
+- **Claims:** document each operation's assumptions and exclusions. Functional known-answer tests and a function's `ct` name do not establish side-channel resistance. For the latest freestanding target, an exclusion cannot permit secret-dependent branches or addresses: an incompatible operation remains outside that target until a conforming solution is independently qualified.
 
-Build configuration:
-- Compile with `-O2 -fno-strict-aliasing` (disable optimizations that risk constant-time violations)
-- `-DDETERM_CT_VERIFIED=1` build flag enables runtime constant-time assertions in debug builds
+Neither `-O2` nor `-fno-strict-aliasing` guarantees constant-time execution. The latter controls type-based alias optimizations; it does not disable all transformations relevant to leakage or repair otherwise undefined C. There is no implemented `DETERM_CT_VERIFIED` runtime-assertion mode; defining that macro supplies no such assurance. The freestanding compiler section below specifies the narrower review process. See [GCC optimization options](https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html#index-fstrict-aliasing).
 
 ### Q7: Test-vector validation
 
@@ -506,7 +515,10 @@ Per `include/determ/chain/params.hpp`, `TimingProfile` carries a `CryptoProfile 
 - HMAC-SHA-256 wrapper per RFC 2104 (trivial)
 - HKDF-SHA-256 wrapper per RFC 5869 (trivial)
 - Test vectors from NIST CAVP + RFC 4231 + RFC 5869
-- Constant-time verification (trivial — hashing is inherently CT)
+- Review hashing, HMAC and HKDF with explicit public-length and secret-input
+  contracts; inspect the source and generated instructions for each compiler/ISA
+  profile under §9. Algorithm names and functional vectors do not establish
+  constant-time execution.
 
 ### 3.2 Ed25519 — **SHIPPED** (as TweetNaCl-derived `gf[16]`, NOT the ref10 plan below)
 
@@ -597,10 +609,24 @@ Original plan (retained for the deviation record):
   standalone harness linking the build tree's `libsodium.a` matched 12/12 over a
   t×m grid; `determ test-argon2id-c99` pins 4 of those libsodium-generated vectors
   (the determ daemon is libsodium-free, so they are captured not computed live).
-- **Memory-hard, NOT constant-time in the data-dependent passes** by design (Argon2d
-  GPU-resistance); the Argon2id hybrid keeps the secret-derived addressing of pass-0
-  first-half data-independent (RFC 9106 §3.4). **WIRED as the passphrase keyfile
-  KDF (R58, 2026-07-04):** the wallet envelope now derives fresh keys via
+- **Memory-hard, with secret-dependent addresses in part of its execution.**
+  Argon2id uses data-independent addressing during the first half of its first
+  pass and data-dependent addressing afterward. That algorithmic property is
+  incompatible with the latest freestanding target's requirement that addresses
+  be independent of secrets; a successful timing experiment cannot waive it.
+  See [RFC 9106 §1](https://www.rfc-editor.org/rfc/rfc9106.html#section-1).
+- **Not admitted to the freestanding target.** The current
+  `src/crypto/argon2/argon2id.c` also calls `malloc`, `free`, `memcpy` and `memset`.
+  Replacing its allocation with a static arena would address only the storage
+  requirement, not its secret-dependent addressing. Before passphrase derivation
+  can enter that target, a solution with data-independent secret processing,
+  bounded caller-owned or static workspace, no libc or heap dependencies, and
+  independently reviewed compiler/target evidence is required. Its password-
+  guessing resistance, parameters and format compatibility must also be reviewed;
+  that qualification is pending. This document selects no replacement KDF and
+  changes no existing keyfile format or hosted caller.
+- **WIRED as the hosted passphrase keyfile KDF (R58, 2026-07-04):** the wallet
+  envelope now derives fresh keys via
   `determ_argon2id` (`wallet/envelope.cpp::derive_key_argon2`) by default — the
   `DWE2` layout — instead of PBKDF2 (`derive_key_pbkdf2`, the retained `DWE1`
   interop path). The switch is a versioned, back-compatible on-disk format
@@ -761,16 +787,23 @@ Original plan (retained):
   length, 0/-1 collapse via the unsigned-borrow idiom (libsodium
   `crypto_verify` shape). Consolidates the per-module local helpers the stack
   had accumulated: `ct_eq16` (aes_gcm.c, chacha20_poly1305.c), `ct_verify_32`
-  (ed25519.c), and frost.c's two PoP/VSS point-compare `memcmp`s (public
-  operands — uniform discipline there, not a leak fix).
+  (ed25519.c), and historically the removed FROST module's two public-point
+  comparisons. The current Ed25519 verifier's final encoded-R equality uses
+  `determ_ct_memcmp(sig, t, 32)`, not libc `memcmp`; this fact alone says
+  nothing about the timing of its other checks or arithmetic.
 - The "ct_zero" half shipped earlier as `determ_secure_zero`
-  (`include/determ/crypto/secure_zero.h`, volatile-indirection memset).
+  (`include/determ/crypto/secure_zero.h`; definition in `src/crypto/secure_zero.c`).
+  It calls libc `memset` through a volatile function pointer and is therefore
+  not compatible as-is with a core that forbids libc calls. The freestanding
+  example below does not replace or certify this production helper.
 - Documented usage notes live in `ct.h` (equality-only — no lexicographic
   order; use on every secret-adjacent compare; `len` is public).
 - Validated by `determ test-ct-c99` (6 assertions: boundary lengths,
   first/middle/last mismatch positions, 500-case verdict-equality fuzz vs
-  memcmp, strict 0/-1 contract, wipe + no-op pins). The TIMING property
-  itself is §3.12's dudect/ctgrind follow-up.
+  memcmp, strict 0/-1 contract, wipe + no-op pins). These are functional
+  assertions. Source-level fixed traversal, retention of wipe stores in a
+  compiled artifact and measured timing are separate obligations (§3.12 and
+  the freestanding compiler section below).
 
 ### 3.11 Unified API + C++ wrapper — **SEEDED** (two Q5 deviations recorded)
 
@@ -817,17 +850,17 @@ Original plan (retained):
 - `determ ct-timing-probe` — IN-HOUSE fix-vs-random Welch-t leakage probe
   implemented from the published dudect method (design + statistical
   soundness analysis: `TimingProbeDesign.md`; targets: ConstantTimeInventory
-  §5). 23 registered targets across four tranches: the tranche-1 core
+  §5). The current registry in `src/main.cpp` has 23 targets: the tranche-1 core
   (ct-memcmp with 4 mismatch-position classes, chacha/gcm-tag-verify,
   ed25519-sign, x25519, sha256-content negative control), tranche 2
   (aes-core, chacha20-core, poly1305-key, ed25519-pubkey, sc-canonical
   boundary scalars, hmac-key), tranche 3 (p256-base-mul / p256-h2c /
   p256-sc-mul — full-range [1, n) secret classes incl. an n-prefix FIX
   class, the P256-CT-1 lesson), tranche 4 (x25519-base, sc-muladd,
-  hmac-sha512, blake2b-keyed, pbkdf2, frost-reconstruct, frost-dkg,
-  frost-sign-partial — closing the design-§4 id list except the dedicated
-  `ghash` id, which is a static internal exercised via
-  gcm-tag-verify/aes-core). REPORTING tool by design — measurement mode stays out of
+  hmac-sha512, blake2b-keyed, pbkdf2), plus p256-msm-zeroskip,
+  p256-balance-prove and rangeproof-prove. FROST targets are no longer
+  registered. The dedicated `ghash` id is absent; that internal routine is
+  exercised via gcm-tag-verify/aes-core. REPORTING tool by design — measurement mode stays out of
   run_all.sh/FAST (environmentally flaky); only the deterministic `--selftest`
   statistics fixture is suite-eligible (`tools/test_ct_timing_selftest.sh`).
 - Vendoring dudect or ctgrind (third-party code into the tree) remains
@@ -835,6 +868,11 @@ Original plan (retained):
   taint-analysis leg needs the Linux/WSL2 valgrind environment either way.
 - Remaining: per-build report archiving
   (CSV + build recipe per TimingProbeDesign.md §6); CI wiring decision.
+  Neither the registry nor its statistics selftest establishes absence of
+  leakage. Report the actual compiler, flags, ISA, hardware, sample count,
+  input classes and limitations with each measurement; inspect the final
+  compiled artifact separately. This section records tool availability,
+  not universal constant-time verification.
 
 ### 3.13 Test-vector validation — **SEEDED** (both halves live for the shipped primitives)
 
@@ -1557,13 +1595,18 @@ If only one engineer is available, total adds ~3.5-4 months to the schedule — 
 
 *Mitigation.* Each module compiles standalone first; then integrated; then CI runs cross-compile for all targets. Documented build recipes per platform.
 
-**Rollback plan.** If the C99 crypto vendoring introduces unfixable issues:
+**Historical hosted rollback plan; excluded from the freestanding target.** If
+the earlier hosted C99 crypto vendoring introduced unfixable issues, the fallback
+plan was:
+
 1. Re-enable libsodium dependency in CMakeLists (back-out)
 2. Refactor `determ::crypto::` calls back to libsodium (mechanical)
 3. Existing libsodium test suite verifies behavior
 4. Cost: ~1 week to roll back; loses C99 crypto investment but preserves Determ's safety
 
-Rollback is feasible at any point because libsodium remains a viable alternative until the migration is complete + validated.
+This describes the earlier hosted migration fallback, not an authorized dependency
+of the latest target. That target must fail qualification rather than restore
+libsodium or another external library to satisfy a missing implementation.
 
 ---
 
@@ -1571,10 +1614,10 @@ Rollback is feasible at any point because libsodium remains a viable alternative
 
 C99 cryptographic stack delivers:
 
-- **NH1 alignment from today.** When NH1 Stage 2 (C99 rewrite) ships, the cryptographic layer is inherited unchanged. Zero re-vendoring at NH1 trigger.
+- **NH1 reuse with qualification.** Existing C99 primitives provide source to review for the rewrite. Reuse is conditional on the latest target's bounded storage, dependency and side-channel requirements; the cryptographic layer cannot be inherited unchanged as a qualified whole.
 - **NH2 binary attestation.** Every cryptographic byte in the attested binary is from Determ's source tree with documented provenance + version pin. Attestation perimeter cleanly bounded.
 - **NH4 FIPS path enabled.** Per-primitive replacement to FIPS-validated reference modules straightforward at NH4 trigger (per-module structure makes this surgical).
-- **Embedded target portability.** All primitives compile cleanly on MINIX, RTOS, embedded ARM. NH1 secondary OS targets unblocked.
+- **Embedded target portability.** Compiler and platform support must be established per build profile. A hosted MINIX or RTOS build does not qualify the no-libc, no-heap unikernel target.
 - **Audit transparency.** Auditors review actual Determ source + per-primitive provenance vs. "trust libsodium." Audit perimeter precise.
 - **Cryptographic-stack control.** Determ team owns release cadence + security advisory tracking. Supply-chain isolation from libsodium upstream.
 - **Smaller binary.** No libsodium link (~500KB saved). libsecp256k1 + libsecp256k1-zkp add ~300KB. Net: ~200KB binary reduction.
@@ -1605,11 +1648,151 @@ Once these are confirmed, implementation can proceed against §3 work units.
 
 Post-Phase 0 with this crypto stack:
 
-**Determ becomes a "from-scratch-auditable" payment + identity + DSSO chain.** Every cryptographic byte traceable to a public-domain reference + version pin. No external cryptographic library dependency. Compiles on any C99-capable target. Modular structure permits per-primitive replacement for FIPS / military / embedded deployments without touching the broader codebase.
+**Auditability is the objective.** Keep per-module provenance, functional test
+vectors and explicit build dependencies. The inventory in §3 records what is
+implemented; it is not a certification that every module runs without libc or
+heap allocation, or compiles on every C99 target. Library independence does not
+by itself establish memory safety, portability or side-channel resistance.
 
-**Compared to peer chains:** unique combination of cryptographic-stack independence + production-tested primitives (Bitcoin's libsecp256k1 + Bernstein's ref10 + libsecp256k1-zkp + P-H-C Argon2id + NIST AES-GCM + RFC reference ChaCha20-Poly1305). No chain currently delivers this combination.
+**Evidence is per operation and deployment profile.** Publish the source contract,
+functional evidence, generated-code review and measured leakage evidence
+separately. The earlier claim that every primitive was verified constant-time is
+withdrawn. Argon2id (§3.6) and operations already marked non-constant-time are not
+admitted to the strict freestanding target for secret processing. A conforming,
+independently qualified solution is required before such functionality can enter
+that target; no blanket stack qualification or comparison with other chains is
+claimed.
 
-**The audit story:** "Here are 22-24K lines of cryptographic code, every line traceable to a canonical reference, every byte verified against published test vectors, every primitive verified constant-time." This is substantially stronger than "we use libsodium."
+---
+
+## 9. Freestanding compiler and side-channel assurance (2026-09-24)
+
+This section governs the assurance boundary for the examples in
+[`freestanding_core.c`](../examples/freestanding_core.c) and
+[`freestanding_core.h`](../examples/freestanding_core.h), together with
+[C99-MINIX-PORT §11](../C99-MINIX-PORT.md#11-freestanding-unikernel-foundation-owner-goal-2026-09-24).
+It does not change production crypto or certify the existing stack as
+freestanding. The latest target's no-libc, no-heap and secret-independent
+control/address requirements remain mandatory. Existing hosted modules that do
+not satisfy them are outside that target, not exceptions within it. Earlier
+descriptions of algorithms as constant-time in this roadmap describe intended
+source-level discipline, not blanket claims about all compiled binaries or
+physical side channels. Per-module qualification must precede target admission;
+the educational example's evidence cannot be transferred to production callers.
+
+### 9.1 What the two routines establish at source level
+
+`fg_equal32` reads exactly 32 bytes from each input, accumulates byte XORs with
+OR, and collapses the unsigned accumulator to 1 for equality or 0 otherwise.
+There is no mismatch-dependent early return or address in its source; the
+loop bound and addresses depend only on public constants and input addresses.
+The input addresses and their alignments are public in this leakage contract;
+the compared byte values may be secret. Both inputs must designate 32 readable
+bytes for the whole call. Equality is
+the intentionally released result. This is equality only, not lexicographic
+ordering; replacing it with ordinary `memcmp` would not preserve the intended
+leakage contract. The unsigned arithmetic and access preconditions are proved
+in the companion portability guidance; they do not constrain every optimizer's
+instruction selection.
+
+`fg_wipe` writes zero through a `volatile unsigned char *` for every byte of
+its public length. A null pointer is permitted only for length zero; otherwise
+the caller supplies that many writable bytes in a live object, with exclusive
+access. Plain stores or a final ordinary `memset` can be removed when the
+compiler proves their results unused. The volatile stores are observable
+accesses under the selected compiler's documented rules, which is the basis
+for this example's retention requirement. See the primary [WG14 zeroization
+rationale](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1381.pdf),
+[GCC volatile-access rules](https://gcc.gnu.org/onlinedocs/gcc/Volatiles.html)
+and [LLVM volatile semantics](https://llvm.org/docs/LangRef.html#volatile-memory-accesses).
+
+A retained wipe overwrites the designated object; it does not erase other
+copies, register spills elsewhere, registers, caches, swap, crash dumps or
+persistent media. Volatile is neither a CPU memory fence nor an atomic or
+cross-thread synchronization mechanism. It does not order arbitrary
+non-volatile operations or stop speculative execution. These limitations also
+apply when a volatile access is used around secret-handling code; no concurrency
+or hardware-erasure guarantee follows from the qualifier.
+
+### 9.2 Compiler options are an audit starting point
+
+For GCC and Clang, compile the example core in strict C99 mode with
+`-std=c99 -pedantic-errors -Wall -Wextra -Werror -ffreestanding -fno-builtin`,
+auditing `-O2` and `-O3` as separate profiles and using `-fno-lto` for the
+baseline. These are review inputs, not a constant-time switch or proof of
+no runtime dependencies. `-fno-strict-aliasing` is not a substitute for valid
+object access and is not required by the byte-access example. The gate profiles
+also use `-fno-stack-protector` to exclude a host runtime handler from this
+dependency demonstration. This is not a deployment recommendation: stack
+protection and its target support code need separate review.
+
+Freestanding compilation does not guarantee a self-contained object. GCC
+documents possible memory-library and compiler support calls; Clang explicitly requires freestanding environments to provide
+`memcpy`, `memmove` and `memset`. Aggregate copies, initialization and arithmetic
+can introduce target-dependent helpers even without explicit source calls.
+`-nostdlib` controls linking, not code generation. For this example's stronger
+no-libc/no-allocator/no-runtime-helper profile, reject such emitted references;
+do not silently link a support library to make the check pass. See [GCC
+freestanding requirements](https://gcc.gnu.org/onlinedocs/gcc/Standards.html),
+[GCC link options](https://gcc.gnu.org/onlinedocs/gcc/Link-Options.html#index-nostdlib)
+and [Clang freestanding builds](https://clang.llvm.org/docs/UsersManual.html#freestanding-builds).
+
+Optional compiler adapters must stay outside the ISO C99 example. For a target
+supporting GNU extended assembly, this GCC/Clang value-barrier idiom makes the
+returned value opaque to ordinary compiler value propagation:
+
+```c
+/* Optional compiler extension, not portable ISO C99. */
+static unsigned int fg_compiler_value_barrier(unsigned int x)
+{
+    __asm__ __volatile__("" : "+r" (x));
+    return x;
+}
+```
+
+The read/write register operand preserves the runtime value while telling the
+compiler that the assembly produces it. It is useful only where callers use
+the returned value and the selected compiler/target honors that contract. It
+is not a universal constant-time guarantee, a memory clobber or a CPU fence;
+it does not force the rest of the function to have any particular instruction
+sequence. Even an empty assembly `"memory"` clobber is a compiler ordering
+barrier, not a processor speculation fence. The extension needs its own build
+and artifact review if adopted; it is not enabled by this documentation. See
+[GCC extended assembly](https://gcc.gnu.org/onlinedocs/gcc/Extended-Asm.html#OutputOperands)
+and its [memory-clobber limits](https://gcc.gnu.org/onlinedocs/gcc/Extended-Asm.html#Clobbers-and-Scratch-Registers).
+
+### 9.3 Evidence required for a target profile
+
+Record the compiler and linker versions, complete compile/link flags, target
+triple, ISA/CPU features, source revision and artifact identity. Build success
+comes before functional and mutant results; run
+`bash tools/ci_local.sh --freestanding-examples` for the example gates. Inspect
+symbols, relocations and disassembly of the actual
+linked artifact as well as the core object: the example core must have no
+runtime-helper dependency, and every direct or indirect call must be accounted
+for. Review equality with the public input addresses and alignments held fixed
+across secret classes, checking for secret-dependent branches/addresses and
+variable-latency instructions, and confirm all intended
+wipe stores remain, including a caller where the wiped object is dead afterward.
+A functional test that reads the buffer afterward cannot alone establish that
+last property.
+
+Hosted test startup and services can use libc; they are outside the separately
+checked core's dependency claim. Passing a hosted test does not establish
+bare-metal linking: a deployment also needs its actual startup, linker script
+and final image reviewed. If LTO is enabled later, treat that as a separate
+profile and repeat the final-image review after LTO: an earlier object-file check is not
+sufficient. A different compiler release, target or optimization profile needs
+new evidence before it is supported for a side-channel claim.
+
+Keep three claims distinct: defined C behavior under stated caller
+preconditions; data-independent control-flow and address traces in a reviewed
+artifact; and leakage on a real machine under a stated attacker model. The
+second does not imply equal elapsed cycles amid interrupts, cache state or
+contention, nor protection against power, EM or speculative side channels.
+Statistical timing tests can reveal a failure under their measured conditions;
+passing them does not prove the third claim for every input or environment.
+No compiler/ISA profile is certified by this guidance alone.
 
 ---
 

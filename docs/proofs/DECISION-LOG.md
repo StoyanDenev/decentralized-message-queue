@@ -7521,3 +7521,229 @@ points, against vote withholding.
 review (ADR-004 §7.1).
 
 **Scope.** Documentation only: ADR-004 §6.1, §6.2 and §7.
+
+## 2026-09-24 — Comparison objective: combine the best mechanisms
+
+**Owner objective.** "How to compare them? The point is to merge the best of them in
+one design." The comparison therefore evaluates mechanisms and their composition,
+rather than requiring a wholesale choice between the two existing descriptions.
+ADR-004 §8 records an initial synthesis and evaluation method. That method is a
+proposal; this entry does not promote it to a separately approved consensus rule.
+The existing two-co-creator, joint-receipt, replacement, election and checkpoint
+decisions remain. No implementation or production deployment is authorized by this
+record, and H0 CLOSED / H1–H21 DECIDED is unchanged.
+
+**Comparison corrections, not owner policy changes.** Independent read-only review
+confirmed two limitations in the earlier comparison:
+
+- "One block for K-of-K" describes its local depth-1 reorganization limit
+  (`Node::maybe_reorg_to_locked`), not a proof of network-wide finality under arbitrary
+  cross-round histories. S-054 and the baseline's other safety assumptions still
+  apply. It cannot be used as an unconditional settlement-latency advantage.
+- The H1 consequence that a pool of five contains at most one faulty member does
+  not follow from less than one third faulty **stake**. The C++
+  `select_m_creators` samples identities, and `NodeRegistry::build_from_chain` applies an
+  admission stake floor, not stake-weighted selection. For example, three faulty
+  identities with stake s each and two proper identities with stake 4s each have
+  3/11 faulty stake but three faulty identities. This does not reject H0's selected
+  stake assumption; it corrects the claimed implication for K-of-K. A comparison
+  must state the stake distribution and identity-fault model rather than silently
+  equating them.
+
+**Scope.** Documentation only. No source, test, model, proof status or existing owner
+choice changes; staged restoration remains untouched and delivery is uncommitted.
+
+## 2026-09-24 — Freestanding C99 memory and side-channel foundation goal
+
+**Owner goal.** Produce foundational architecture guidelines and highly commented
+examples for a single-address-space unikernel/MicroVM: strict freestanding C99,
+no libc or external crypto/network library, no dynamic allocation; bounded untrusted
+frame parsing; fixed-length cryptographic equality; and secret erasure with explicit
+compiler and target validation. Explain the memory invariants and how optimization
+affects source-level constant-time and wiping patterns.
+
+**Evidence boundary.** The request's "bulletproof", "absolute memory safety" and
+universal compiler-proof timing guarantees are goals, not established properties of
+C99 or this protocol. C99 has no constant-time semantics. Neither volatile nor a
+compiler flag proves all-side-channel resistance or erasure of every secret copy.
+The current high-level protocol proof status is unchanged. A unikernel removes a
+guest monolithic OS but still trusts platform code, devices, the hypervisor and
+hardware. The no-libc target is stricter than the current hosted Minix/POSIX plan;
+it does not authorize deleting its reference or bypassing port-then-retire.
+
+**Delivery.** Extend C99-MINIX-PORT §11 and CRYPTO-C99-SPEC's compiler/side-channel
+guidance, with executable educational examples under `docs/examples/` and a
+scoped `tools/ci_local.sh --freestanding-examples` gate. The example frame is not a
+new protocol wire format. Functional, sanitizer, mutant, dependency and generated
+code evidence are separately scoped; unsupported build profiles remain unverified.
+Production cryptographic helpers and consensus behavior are not replaced by these
+examples. Delivery is uncommitted and preserves the staged restoration.
+
+**Foundation delivered and checked.** The example, its tests and the compiler gate
+passed independent review. `ci_local.sh --freestanding-examples` passed all 16 doc
+guards and four profiles: Apple Clang 21.0.0 and Homebrew GCC 16.2.0 on Darwin arm64,
+each at `-O2`/`-O3` without LTO. All profiles passed functional tests, ASan/UBSan,
+undefined-symbol checks and no-libc relocatable linking; all 24 freshly built mutant
+cases failed assertions as intended. Manual review of uninstrumented object code
+found byte-independent comparison control/address traces and retained wipe stores,
+including an optimized caller that never reads the wiped buffer again.
+C99-MINIX-PORT §11.6 records the artifact identities and limits. These results close
+the requested guidance/example deliverable, not production platform qualification
+or any outstanding protocol proof. No hardware leakage measurements or universal
+compiler timing guarantee are claimed. Changes remain uncommitted.
+
+## 2026-09-24 — Latest freestanding goal takes precedence over conflicting target plans
+
+**Owner instruction.** "Remove contradictions that contradict the latest added goal."
+The controlling implementation target is the freestanding, strict C99
+single-address-space unikernel/MicroVM described in the foundation goal above:
+no guest hosted OS dependency, libc, external crypto/network library or heap
+allocation. Static storage, fixed-capacity pools and bounded stack scratch are the
+target memory model. Older plans for POSIX/libc, growable heap containers, `fork()`
+or `/dev/urandom` as target dependencies are superseded. Minix/POSIX remains an
+optional hosted reference/test adapter, not the required deployment architecture.
+Build tools, test oracles and retained reference executables are outside the target
+image and do not relax its dependency or allocation requirements.
+
+**Crypto requirement.** The latest goal's secret-independent control-flow and
+memory-address requirement remains a requirement for admitted secret-processing
+operations; it is not replaced with an exception for an existing algorithm. The
+current Argon2id implementation has data-dependent addressing and is not qualified
+for that target contract. Its hosted keyfile callers and recorded formats remain
+as-built references. Admitting passphrase-based key derivation to the target needs
+a specified and independently qualified solution; no replacement algorithm or
+format change is selected by this documentation correction. Source and artifact
+review, target assumptions and measured evidence remain necessary; universal
+compiler-proof timing or absolute system safety is not asserted.
+
+**Porting and protocol scope.** Preserve the verified behavior and canonical bytes
+of each unchanged reference component until its replacement passes parity and the
+target's additional resource/security obligations. A separately authorized protocol
+change is checked against its decided specification, not forced to reproduce
+superseded reference behavior. Thus port-then-retire, no post-genesis migrations,
+and the K-of-K/K=2 synthesis decisions remain compatible with the new target.
+This instruction does not change transaction eligibility, fork choice or proof
+status; H0 CLOSED / H1–H21 DECIDED remains the record.
+
+**Convergence and delivery.** Update the existing C99 plan, crypto specification,
+README and roadmap entry points, and the agent-facing current-front status.
+Descriptions of current hosted code remain truthful; historical decisions above
+remain append-only. No production code is deleted or relabeled as freestanding,
+and no security finding is closed by changing prose. Delivery is uncommitted.
+
+**Review.** Independent review confirmed the target/hosted-reference distinction,
+unchanged protocol decisions and mandatory crypto admission requirements. It found
+one additional overstatement, "hashing is inherently CT"; that instruction now
+requires explicit input/length contracts and source/generated-code review per
+compiler/ISA. The example code, tests and compiler gate are unchanged from their
+recorded validation; only documentation and current-front status are updated.
+
+## 2026-09-24 — Compare K-of-K and K=2 against the controlling goals
+
+**Owner instruction.** "Now the two designs can be compared according to the goals."
+ADR-004 §8.3 records the comparison against the freestanding target, proof-backed
+safety, bounded resources, secret-independent crypto, recovery, transaction
+inclusion, total cost and minimalism. Security and target conformance are admission
+requirements, not scores that performance can offset. Comparisons use matched
+transaction scope, concrete stake/identity populations and adversarial schedules.
+
+**Assessment, not a new consensus decision.** Neither current executable qualifies
+as the target and neither complete design is established as the winner. K-of-K
+offers more reusable implemented evidence and avoids the new VDF arithmetic/proof
+engine. K=2 reduces normal producers when K > 2, but its decided design also needs
+shard-wide failure witnesses, checkpoint voting, VDF work and general recovery.
+Plain-signature certificate costs grow with their actual signer and attempt counts;
+no total O(1) cost, throughput multiplier or lower settlement latency is established.
+The §8.1 combination remains the candidate: two endorsements of one canonical
+receiver-validated body/context, fixed contributions and joint receipt, qualified
+election inputs, selected witness recovery/checkpoints, and reused validation/apply
+and durable-publication principles. The incompatible union inclusion guarantee is
+not inherited and no producer-count, KDF, VDF or finality choice is changed.
+
+**Comparison corrections.** The §6.2 shorthand contrasting approximately E heights
+with one block is removed: E is checkpoint spacing, not a proved finality-latency
+bound, and the baseline rollback limit is local. The §8.3 sampling calculation
+conditions on the first stake-weighted draw and removes that identity before the
+second; `(1−f)^2` is not the exact proper-pair probability for arbitrary stakes
+without replacement. Earlier H14 waiting-time illustrations are not demonstrated
+performance or general inclusion bounds. No new stake limit is selected.
+
+**Most discriminating missing evidence.** Specify receiver resource and persistence
+contracts for normal blocks, all prior failure certificates, delayed checkpoints,
+candidate histories, VDF workspaces and crash/replay. A fixed pair or arena does not
+bound those paths; local exhaustion cannot silently redefine consensus validity.
+Compose those contracts with the existing H proof obligations before a matched
+production benchmark. This assessment does not change CURRENT FRONT's work order,
+H0 CLOSED / H1–H21 DECIDED, or the deployment gate. Documentation only, uncommitted;
+the staged restoration and all source/test/gate code are preserved.
+
+## 2026-09-24 — Adopt the combined design development plan and authorize the Claude handoff
+
+**Owner instruction.** "Update the plan with that recommendation make everything
+coherent with that plan and produce a prompt for Claude to commit the changes and
+start the development." The recommendation in ADR-004 §8.1/§8.3 is now the adopted
+development direction, executed by §8.4. This selects a candidate and work sequence;
+it does not assert that the complete design is proved, implemented or deployable.
+
+**Selected composition.** Two co-creators unanimously endorse the same canonical,
+receiver-validated body and context. Reuse sound K-of-K validation, canonical
+encoding and durable-publication principles. Retain the already selected K=2 joint
+receipt, election/VDF pipeline, external failure witnesses, local 3B deadline and
+checkpoint settlement. The joint-receipt rule does not inherit the union's
+one-proper-member inclusion guarantee. No new K, quorum, KDF, VDF, transaction scope
+or checkpoint encoding is selected here. The strict freestanding C99 target,
+no-libc/no-external-target-runtime/no-heap constraints, bounded memory/ownership and
+qualified secret-independent crypto remain admission requirements. Performance is
+compared only after those requirements and the protocol's security scope are met.
+
+**Next work and gates.** First preserve, review and commit the relevant current
+baseline/restoration, foundation and plan work. Then develop the one-shard
+receiver/state/resource contract and composition arguments specified in ADR-004
+§8.4. Account explicitly for all prior-attempt certificates, stalled checkpoints,
+candidate histories, VDF workspaces and crash/replay. Bounded RAM does not bound
+total verification work or durable storage; local exhaustion cannot silently change
+validity or establish progress. Prove a compatible strategy or record a precise
+incompatibility and alternatives for decision. Do not invent attempt caps or prune
+required evidence to force a green implementation.
+
+This specification/proof track is the next development task and supersedes the
+older CURRENT FRONT order for that track. The reference safety backlog is neither
+canceled nor closed. Follow with the smallest independently reviewed and proved
+surviving component, falsify-on-mutant gates at the receiver/apply rule, successful
+fresh builds and `ci_local.sh`, then composed single-shard behavior, gated sharding
+and actual target qualification. Independent platform/primitive evidence can
+proceed when useful. Do not require a port of obsolete consensus merely to replace
+it. Port-then-retire remains: unchanged survivors need reference parity and target
+qualification; approved changed rules need their own specification/proofs/vectors;
+retirement is a separate reviewed commit. H0 CLOSED / H1–H21 DECIDED, all unrelated
+security-ledger statuses and H21's deployment decision are unchanged.
+
+**Commit scope and handoff.** Claude is authorized to make reviewed, explicitly
+scoped local commits of the relevant current work and subsequent qualified
+development increments. This supersedes the earlier uncommitted-delivery restriction
+for the Claude handoff. Inspect the preexisting index, unstaged changes and untracked
+files separately; preserve unrelated work and do not sweep it into a commit. Each
+commit's actual snapshot must pass the applicable checks and independent review;
+do not rely on unstaged fixes to validate a different committed snapshot. No push,
+merge or deployment is authorized by this instruction. This planning turn leaves
+the index and source/test/gate code unchanged and the new documentation uncommitted.
+The reusable Claude prompt is saved in C99-MINIX-PORT §12.
+
+**Convergence scope.** ADR-004 §8.4 is the combined-design execution plan; CURRENT
+FRONT points to it. The C99 plan's phases describe reusable component dependencies,
+not a competing schedule. README, ROADMAP and the canonical reference-document
+scope notices distinguish the adopted development direction from shipped behavior.
+ADR-005 follows the latest ADR-004 choices and remains a proposed sharding gate;
+no beacon/EXTENDED deletion or production sharding acceptance follows from this
+plan adoption. Historical entries above remain append-only.
+
+**Review and verification.** Two independent documentation/handoff reviews checked
+the selected mechanisms, proof-status boundary, work order, staged-work preservation
+and verification commands. Review found one residual cross-reference that called
+the reference codec the future C99 format and implied automatic proof inheritance;
+it now distinguishes unchanged parity inputs from approved changes requiring
+re-derived proofs and vectors. All 16 `ci_local.sh --docs-only` guards passed.
+CRLF-aware whitespace checking passed. The five recorded foundation/example gate
+source hashes still match the prior validation report. This turn changes only
+documentation; it neither re-runs binary/model tests nor claims the large staged
+restoration has been validated as a commit. The preexisting index is unchanged.

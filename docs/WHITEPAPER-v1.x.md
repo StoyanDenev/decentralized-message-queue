@@ -11,6 +11,10 @@
 > completed consensus-security proof. The [C99 contract and refutations](proofs/K2_VDF_Soundness.md)
 > supersede the previous K=2 finality, zero-bias and unconditional-liveness claims.
 > Temporal sharding remains [proposed](decisions/ADR-005-Temporal-Sharding.md).
+> **Development plan (2026-09-24):** the owner adopts the [combined design and gated
+> sequence](decisions/ADR-004-Fault-Model.md#84-adopted-development-plan-2026-09-24).
+> Its receiver/resource contract and composition proofs precede dependent production
+> code; adoption does not change the implementation scope or proof claims here.
 
 The C99 foundation includes a read-only modulus-routing query, an opt-in bounded
 inbox for signed intra-shard transfers, and a bounded

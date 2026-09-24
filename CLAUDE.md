@@ -90,7 +90,40 @@ Read this before writing code or docs. On any decision conflict, docs/proofs/DEC
   per-view-key act in the designed v2.22/v2.24 mechanism. Any doc asserting
   unqualified PFS alongside view-key disclosure is wrong (same entry).
 
-## CURRENT FRONT — read before selecting any work (owner directives 2026-07-28, 2026-09-16 and 2026-09-23)
+## CURRENT FRONT — read before selecting any work (latest owner directive 2026-09-24)
+STATE 2026-09-24 — COMBINED DESIGN PLAN (DECISION-LOG: "Adopt the combined design
+development plan and authorize the Claude handoff"). The owner adopts ADR-004 §8.4:
+two unanimous co-creators over one receiver-validated canonical body/context;
+joint receipt; the selected election/VDF, external witnesses, local 3B timeout and
+checkpoint settlement; reuse of sound K-of-K validation/encoding/persistence
+principles. The target remains strict freestanding C99, no libc/external target
+runtime libraries/heap. H0 CLOSED / H1–H21 DECIDED is unchanged, not a proof of
+the composition. NEXT: Claude reviews and commits the relevant existing work,
+then develops the one-shard receiver/state/resource contract and its proofs or
+counterexamples before dependent production code. Accumulating prior-attempt
+certificates and stalled finality must be accounted for; local exhaustion is not
+a consensus rule or a progress proof. This track takes precedence over the older
+work order below; the reference safety backlog is preserved. Follow ADR-004 §8.4
+and the handoff in docs/C99-MINIX-PORT.md §12. Claude is authorized to make reviewed,
+scoped local commits of this work and subsequent qualified increments; the older
+uncommitted-delivery restriction is superseded for that handoff. No push, merge or
+deployment is authorized. Preserve unrelated staged work; retain the C++ reference
+under port-then-retire, with specification-based checks for approved changed rules.
+The earlier status entries below are historical where this entry supersedes them.
+
+STATE 2026-09-24 (DECISION-LOG: "Latest freestanding goal takes precedence over
+conflicting target plans"). The owner
+requires a strict freestanding C99 unikernel/MicroVM target with no libc, external
+crypto/network libraries or heap allocation. This supersedes older deployment
+instructions allowing POSIX/libc or growable heap containers; Minix/POSIX remains
+optional hosted reference/test support. Use bounded storage and reviewed platform
+contracts. Existing Argon2id secret-dependent addressing and libc-backed crypto
+helpers are not qualified for the target; a conforming solution needs independent
+review before admission. No blanket constant-time or whole-system proof follows
+from the completed foundation examples (C99-MINIX-PORT §11). Port-then-retire,
+uncommitted delivery, existing consensus choices and outstanding proof obligations
+remain. This status updates the target, not the earlier safety-first work order.
+
 STATE 2026-09-23 (owner decisions, DECISION-LOG 2026-09-23 — read that entry first). Between
 2026-09-20 and 2026-09-22 two other AI agents worked on the tree (Google Antigravity; ChatGPT
 Codex through PR #1). The post-merge commits that deleted the C++ tree, added "formal proofs"

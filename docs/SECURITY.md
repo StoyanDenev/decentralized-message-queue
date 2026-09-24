@@ -6,6 +6,12 @@ The ledger rows below concern the C++ `determ` implementation unless explicitly
 marked otherwise. C99 `determ-node` is a separate local pair experiment. C++ proof
 closures, including S-044, do not establish C99 consensus safety or liveness.
 
+**Development plan (2026-09-24):** [ADR-004 §8.4](decisions/ADR-004-Fault-Model.md#84-adopted-development-plan-2026-09-24)
+adopts the combined two-co-creator direction and starts with receiver/resource and
+recovery proofs. Adoption closes no security-ledger item or H proof obligation.
+The freestanding target and its compiler/platform/crypto qualification remain
+separate from the current hosted reference and local experiment described below.
+
 | C99 item | Current disposition |
 |---|---|
 | Payload admission | Both commitments and both matching SHA-256 openings are required. Missing/invalid input terminates the local attempt; explicit retry is caller-controlled. No 1-of-2 completion or authenticated membership is claimed. |

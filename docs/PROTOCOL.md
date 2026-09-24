@@ -6,6 +6,10 @@
 > obligations are in [K2_VDF_Soundness.md](proofs/K2_VDF_Soundness.md).
 > [ADR-004](decisions/ADR-004-Fault-Model.md) does not replace the C++ accept rules;
 > [ADR-005](decisions/ADR-005-Temporal-Sharding.md) is an unaccepted design gate.
+> **Development plan (2026-09-24):** [ADR-004 §8.4](decisions/ADR-004-Fault-Model.md#84-adopted-development-plan-2026-09-24)
+> selects the combined two-co-creator design and its receiver/resource proof gate.
+> This reference remains the parity source for unchanged behavior; approved new
+> rules require their own reviewed specification and evidence before implementation.
 
 The separate C99 node now exposes a local `get_shard_for_pubkey` routing query
 matching §7.2 for canonical anonymous addresses. Its startup count/salt are not

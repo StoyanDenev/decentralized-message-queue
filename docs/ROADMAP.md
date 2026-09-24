@@ -1,6 +1,7 @@
 # Determ — Roadmap & Future Directions (NON-AUTHORITATIVE)
 
-- [ADR-005: Temporal Sharding design gate](decisions/ADR-005-Temporal-Sharding.md) — proposed; producer fault model, validated PoSW and reorganization-safe settlement unresolved.
+- [Combined design development plan](decisions/ADR-004-Fault-Model.md#84-adopted-development-plan-2026-09-24) — adopted direction; next is the one-shard receiver/state/resource contract and proof review, not production consensus. [Claude handoff](C99-MINIX-PORT.md#12-claude-commit-and-development-handoff-2026-09-24).
+- [ADR-005: Temporal Sharding design gate](decisions/ADR-005-Temporal-Sharding.md) — proposed; selected membership/recovery/finality rules still require their composed proofs, qualified implementation and cross-shard settlement gates.
 
 > **This file is the single entry point for everything NOT in the Determ 1.0-authoritative
 > doc set.** Specs linked here are design-stage: they do **not** describe shipped code and
@@ -45,8 +46,8 @@
 | **Threshold crypto** — DKG ceremony | **block-beacon DE-SCOPED**; FROST module **FROZEN 2026-07-03**, then **REMOVED from the tree 2026-07-09** (pre-launch register B2; FROST_DEVIATION_NOTICE §8). The v2.10 doc set (`v2.10-DKG-SPEC.md` et al.) was deleted 2026-07-09, doc-consolidation inc.1 — `proofs/FROST_DEVIATION_NOTICE.md` §9 + git history are the design record |
 | **Post-quantum** — Dilithium/Falcon migration | v2.8 (in `V2-DESIGN.md`) |
 | **Tooling** — deterministic-simulation framework | `proofs/DSF-SPEC.md` |
-| **Portability** — C99 / MINIX reimplementation (the owner's C99 migration; §0 has the 2026-09-23 status and the port-then-retire rule) | `C99-MINIX-PORT.md`, `proofs/K2_VDF_Soundness.md`, `proofs/tla/K2LocalAttempt.tla` |
-| **Consensus** — K=2 Proof of Sequential Work (ADR-004, accepted direction, not implemented) | `decisions/ADR-004-Fault-Model.md`; design notes (not proofs): `proofs/PoSW_Nakamoto_Safety.md`, `proofs/PoSW_Economic_Soundness.md`, `proofs/VRF_Sharding_Safety.md`, `proofs/tla/PoSWForkChoiceDesign.tla` |
+| **Implementation target** — strict freestanding C99 unikernel/MicroVM, no libc/external target libraries/heap (owner, 2026-09-24); hosted Minix/POSIX is reference/test support. §0 retains port-then-retire; §11 records foundation examples, not a qualified target image. | [C99 plan and foundation](C99-MINIX-PORT.md#11-freestanding-unikernel-foundation-owner-goal-2026-09-24), `proofs/CRYPTO-C99-SPEC.md`, `proofs/K2_VDF_Soundness.md`, `proofs/tla/K2LocalAttempt.tla` |
+| **Consensus** — adopted combined design: two unanimous co-creators, joint receipt, selected election/VDF, external witness recovery and checkpoints; reviewed K-of-K validation/encoding/persistence principles. Proof and implementation gates remain open. | [Execution plan, ADR-004 §8.4](decisions/ADR-004-Fault-Model.md#84-adopted-development-plan-2026-09-24); design notes (not proofs): `proofs/PoSW_Nakamoto_Safety.md`, `proofs/PoSW_Economic_Soundness.md`, `proofs/VRF_Sharding_Safety.md`, `proofs/tla/PoSWForkChoiceDesign.tla` |
 | **Launch** — v1.1 mainnet (address-derivation decision **DECIDED 2026-07-03**: formula frozen as-is — DECISION-LOG) | `proofs/V1.1-PLAN.md`, `proofs/AnonAddressDerivationMigration.md` |
 | **Full design space** | `V2-DESIGN.md` (v2 themes; 10 of 25 shipped), `V2-DAPP-DESIGN.md` (DApp themes; v2.18/v2.19 substrate shipped) |
 

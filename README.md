@@ -49,12 +49,34 @@ It separates owner decisions, local-model evidence and unresolved production pro
 The [open K=2 design holes](docs/decisions/ADR-004-Fault-Model.md#7-open-design-holes-2026-09-24)
 list the outstanding proofs and specification details needed to qualify the design.
 
+The owner has adopted the [combined development plan](docs/decisions/ADR-004-Fault-Model.md#84-adopted-development-plan-2026-09-24):
+two unanimous co-creators over one canonical receiver-validated body/context,
+joint receipt, the selected election/VDF, external recovery witnesses and checkpoint
+settlement, with reviewed K-of-K validation/encoding/persistence principles. First
+specify and prove the one-shard receiver/resource and recovery contract; then build
+the smallest qualified component. This is a development direction, not a complete
+security proof or production release. The [Claude handoff](docs/C99-MINIX-PORT.md#12-claude-commit-and-development-handoff-2026-09-24)
+records the review, local-commit and first-development instructions.
+
+The **current implementation target** is a strict freestanding C99 unikernel/MicroVM
+with no libc, external crypto/network library or heap allocation. Bounded storage,
+explicit platform contracts and compiler/target-specific security evidence are
+required. This supersedes the earlier hosted Minix/POSIX deployment plan; existing
+hosted executables remain reference and test implementations under the
+[port-then-retire rule](docs/C99-MINIX-PORT.md#0-status-on-2026-09-23--what-exists-and-the-retirement-rule).
+The [foundation examples and validation](docs/C99-MINIX-PORT.md#11-freestanding-unikernel-foundation-owner-goal-2026-09-24)
+are complete within their stated scope; the complete target image is not built or
+qualified. Existing Argon2id and libc-backed crypto helpers require a conforming,
+independently qualified solution before admission to that target; the goal does not
+waive its secret-independent memory-access requirement for them.
+
 Run the C99 checks through the project CI entry point:
 
 ```sh
 bash tools/ci_local.sh --c99 --jobs 4
 bash tools/ci_local.sh --c99-sanitize --jobs 4   # the same targets under ASan + UBSan
 bash tools/ci_local.sh --c99-mutants --jobs 4
+bash tools/ci_local.sh --freestanding-examples # isolated foundation evidence
 ```
 
 The arithmetic and local state-machine tests are portable C99. The network driver

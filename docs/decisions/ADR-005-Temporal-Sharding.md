@@ -11,6 +11,11 @@ pairs are selected only from that shard's eligible participants.
 
 **Decision authority:** [Decision Log](../proofs/DECISION-LOG.md).
 
+**Current development plan (2026-09-24):** [ADR-004 §8.4](ADR-004-Fault-Model.md#84-adopted-development-plan-2026-09-24)
+controls the combined-design sequence. Its single-shard receiver/resource and
+composition gates precede dependent sharding work. Plan adoption does not accept
+production sharding, deprecate the reference topology or close any proof obligation.
+
 ## 1. Result of the corrected prompt
 
 The original prompt's premise is refuted: sequential work within one computation
@@ -51,6 +56,14 @@ arithmetic or a successful socket exchange cannot close these architectural gaps
 The open questions in this section are tracked one by one, each with its K-of-K
 counterpart, as the holes in [ADR-004 §7](ADR-004-Fault-Model.md#7-open-design-holes-2026-09-24).
 
+**Supersession (2026-09-24).** §§3.1–3.4 retain the earlier design discussion. Where
+subsequently revised, ADR-004 §6.1's latest decisions and §7's H record control:
+stake-weighted deterministic pair sampling, publicly checked DH contributions,
+the selected class-group VDF, external stake-quorum failure certificates after a
+local 3B deadline, and checkpoint-based settlement are now selected, with proofs
+owed. The old statements that these choices are unspecified or unauthorized do
+not override that record. No additional mechanism is selected by this notice.
+
 ### 3.1 Producer and fault model
 
 Specify authenticated membership and admission cost; eligible stake/identity snapshot;
@@ -70,8 +83,9 @@ does not specify how both receivers validate late results, determine the relevan
 prior state or reconcile their histories. Trusting an arbitrary submitted attempt
 number also fails to establish that the named pair may act; requiring equality to
 a receiver's local counter makes admission depend on its delivery schedule. This is
-a missing state-transition and recovery specification, not a requirement to invent
-a timeout certificate or give a VDF output production authority.
+a state-transition and recovery problem. The later H3 decision selects external
+failure certificates; their receiver checks and composition still need proof.
+The VDF output does not itself grant production authority.
 
 Temporary forks are permitted by §3.4. The task is to define which candidates remain
 valid on their actual prior states and how local histories recover, under explicit
@@ -91,10 +105,10 @@ what timestamp rules every verifier enforces and what difficulty adjustment prov
 
 ### 3.2 Election and finite resource limits
 
-Specify a verified VRF construction if private-key verifiable sortition is required;
-otherwise name the mechanism deterministic sampling. Define seed provenance and
-withholding/grinding behavior, domain separation, canonical input encoding, distinct
-roles, tie handling, eligibility, retries and verification at the receiving node.
+H2 now selects stake-weighted deterministic sampling without replacement, not a
+VRF. Specify and prove seed provenance and withholding/grinding behavior, domain
+separation, canonical input encoding, distinct roles, tie handling, eligibility,
+retries and verification at the receiving node under those selected rules.
 
 **Owner decision: large populations and shard-local eligibility.** Each shard is
 provisioned with a large population of eligible participants. Exactly two distinct
@@ -160,11 +174,12 @@ approval or sender-voting mechanism is adopted here. A Merkle inclusion path alo
 does not establish the validity or selected-history status of its containing block.
 
 Prove conservation and replay protection across retries, crashes and local history
-correction. If a transaction on shard B is valid only because of an earlier transaction
-on shard A, learning and applying a correction of A's history must cause B to
-revalidate the dependent transaction and any further dependencies. Specify how these
-corrections are applied consistently and recovered after crashes; local acceptance
-is recoverable under §3.4.
+correction. H12/H18 now require source-checkpoint finality before applying a dependent
+cross-shard transaction, with ordered exactly-once application. Specify and prove
+that verification, availability and durable publication path. Earlier proposals for
+propagating provisional source rollbacks through other shards are not the selected
+settlement rule. Local tentative histories still need the recovery rules of H17;
+local acceptance alone is not finality.
 
 Specify how receiving validators obtain enough data to validate transitions and
 reject unavailable histories. Header work alone is insufficient. Dynamic resharding,
@@ -302,9 +317,10 @@ production confirmation depth or unavailable data. Gates and mutants exercise th
 model receiver/apply rules; their execution is recorded separately after a successful
 fresh build through `tools/ci_local.sh` and independent review.
 
-**Next increment: cross-shard dependencies.** Apply the reviewed one-chain recovery
-model to a transaction dependency crossing two shards, then to a dependent onward
-transaction. Check the same conservation, revalidation, replay and crash properties
+**Later increment: cross-shard dependencies.** After the single-shard gates in
+ADR-004 §8.4, extend the model for the selected H12/H18 source-finality rule and a
+transaction dependency crossing two shards, then a dependent onward transaction.
+Check conservation, authentication, ordering, exactly-once application and crash properties
 against each node's coherent selected dependency history at its local publication
 boundaries; compare proper nodes after the relevant histories and corrections have
 been delivered and processed under the stated recovery assumptions. Incompatible
@@ -322,14 +338,18 @@ above is implemented; production recovery and cross-shard behavior remain open.
 
 ## 4. Corrected execution instructions
 
-1. Inspect the current source, decision log and test entry points. Refute inconsistent
-   premises before changing consensus. Record missing rules as design blockers.
-2. Complete and independently review the production single-shard accept/reorganization
-   model before using it as the security premise of parallel execution.
-3. Resolve the exclusive-pair replacement and settlement rules in §3 and write a model with
-   explicit safety, liveness and resource claims, assumptions and counterexample traces.
-   Review that model independently before implementation. If refuted, stop dependent
-   code and preserve the result; do not mark the ADR accepted.
+1. Follow the adopted ADR-004 §8.4 plan and C99-MINIX-PORT §12 handoff. Inspect the
+   current source, decision log and test entry points; preserve and review existing
+   work before committing. Refute inconsistent premises before changing consensus.
+2. Specify and independently review the one-shard receiver/state/resource contract,
+   including accumulating failure certificates and stalled finality. Complete the
+   applicable single-shard accept/reorganization proofs before using them as the
+   security premise of parallel execution. Do not silently impose resource caps.
+3. Specify and prove the already selected exclusive-pair recovery and checkpoint
+   settlement rules under ADR-004's latest decisions. Add explicit safety, liveness
+   and resource claims, assumptions and counterexample traces; independently review
+   the composition before implementation. If refuted, stop dependent code and
+   preserve the result; do not mark this ADR accepted.
 4. Once the gate passes, implement the smallest behavior-changing fixed-topology
    increment using actual source paths and explicit canonical codecs. No placeholder
    VRF, cosmetic shard field, blanket beacon deletion or automatic reserved-tag DROP.
@@ -345,7 +365,8 @@ above is implemented; production recovery and cross-shard behavior remain open.
 ## 5. Acceptance boundary
 
 For this design gate, success is a source-grounded proposal or precise refutation,
-not a fabricated implementation. The counterexamples in §1 and §3 block the original
-acceptance criteria. Production sharding is accepted only after the dependencies and
+not a fabricated implementation. The original acceptance criteria remain unsupported;
+later design choices in ADR-004 require their own proofs. Production sharding is
+accepted only after the dependencies and
 receiver-side gates above are satisfied. A green C99 prototype gate cannot change
 that disposition.

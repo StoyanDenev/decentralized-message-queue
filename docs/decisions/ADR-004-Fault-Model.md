@@ -104,7 +104,7 @@ unanimity, 1-of-2 fallback, irreversible finality or transaction-hash block rank
 |---|---|---|
 | Production participation | K selected committee members contribute; all K signatures are required in MD mode. Optional BFT escalation has separate rules and assumptions. | One elected two-member pair must cooperate. Sender participation does not expand the pair. Decided 2026-09-24 (§7): pairs are drawn publicly by stake from a class-group VDF output d > 3α heights back, and a two-thirds witness quorum certifies a stall and admits the next pair (H2, H3, H6); proofs pending. |
 | Transaction-set construction | Phase-1 creator transaction lists feed the union-based body reconciliation described in PROTOCOL §5. | Only jointly received transactions are eligible. Decided 2026-09-24: the body is a canonical function of the two committed received-lists and the parent state (H5, H14); proofs pending. This is a design difference, not a C99 parity port. |
-| Safety/history objective | For the same committee and round, two different unanimous digest certificates require every member to sign both; one rule-following member that does not double-sign prevents that. Cross-round committee changes and the reorg-able head require separate analysis; committee intersection remains open (S-054 / D5a). | Permit temporary divergent histories and prove correct recovery/convergence under stated assumptions. Decided 2026-09-24: above the highest justified checkpoint the longer history wins, with certificate, count and header at equal length (H3, H8–H10); Casper-FFG checkpoints every E heights are final and settle payments, in about E heights plus voting against one block for K-of-K (H12); proofs pending. |
+| Safety/history objective | For the same committee and round, two different unanimous digest certificates require every member to sign both; one rule-following member that does not double-sign prevents that. Cross-round committee changes and the reorg-able head require separate analysis; committee intersection remains open (S-054 / D5a). | Permit temporary divergent histories and prove correct recovery/convergence under stated assumptions. Decided 2026-09-24: above the highest justified checkpoint the longer history wins, with certificate, count and header at equal length (H3, H8–H10); Casper-FFG checkpoints every E heights are intended to settle covered payments (H12), with proofs pending. E alone is not a settlement-latency bound, and K-of-K's local depth-1 reorg limit is not unconditional network finality. |
 | Stalled cooperation | Existing abort-claim, suspension/reselection and optional escalation paths apply, with open liveness findings. | Missing cooperation fails an attempt. Decided 2026-09-24: a stall is certified by a two-thirds witness quorum after a 3B deadline counted from local receipt of the parent; a late original wins only if extended before the replacement arrives; silence costs only the reward (H3, H4, H7); proofs pending. |
 | Randomness and work | Shipped commit/reveal randomness and deterministic committee selection; no PoSW security premise. Their recorded withholding/bias limits remain. | Publicly verified co-creator derivation plus an explicitly justified delay construction is required. Decided 2026-09-24: committed, then revealed, ephemeral DH scalars and a class-group VDF with short proofs that keeps grinding blind (H5, H6, H8). No sequential-hardness, no-grinding or chain-growth proof is established yet. |
 | Evidence | C++ verifier/apply paths, analytic FA proofs and FB1 model, each with its own scope and the SECURITY ledger's residuals. | FB74/FB75 local-attempt evidence and a bounded recovery model. No production consensus or cross-shard settlement theorem; the proofs owed by the decided design are listed per hole in §7. |
@@ -932,3 +932,237 @@ count, B the block time and a the attempt index.
   non-default.
 - *K-of-K:* the implemented protocol; the 2026-09-16 launch configuration (GLOBAL
   beacon 7/5, WEB shards 4/3, D2c) assumes it.
+
+## 8. Compare mechanisms to produce one design (2026-09-24)
+
+**Owner objective:** compare K-of-K and K=2 to combine their best mechanisms in one
+design. The owner adopted the §8.1 recommendation as the development direction on
+2026-09-24; §8.4 is its execution plan. Adoption selects the work to do, not a claim
+that the composition is proved or implemented. The latest decisions in §6.1 remain
+controlling; §7's proof obligations and H21's deployment gate remain. In particular,
+two co-creators and joint-receipt eligibility are retained unless explicitly revised.
+
+### 8.1 Initial synthesis
+
+| Mechanism | Candidate contribution to the combined design | Integration condition |
+|---|---|---|
+| Producer endorsement | Retain K-of-K's requirement that every selected producer endorses the same content, with the currently selected two producers. This is already 2-of-2. | Bind the actual canonical body and context in receiver validation; one non-double-signing producer gives a guarantee only for the same parent, attempt and producer set in one chain/shard/height context, not checkpoint finality. |
+| Commit/reveal and assembly | Retain authenticated, fixed contributions and received lists before revelation; derive a deterministic body from the decided intersection. | The precise commitment, ordering, capacity, validation and availability rules must compose (H5, H9, H14). Do not inherit the C++ post-signature body-omission defect. |
+| Election and delayed randomness | Use the decided stake-weighted pair draw, fixed eligibility snapshot and VDF pipeline; retain the rule against deriving security randomness from signature-malleable block identities. | Establish the full input dependency and release-time argument under H0, including withholding, parallel trials and flooding (H2, H6–H8). A primitive's sequentiality does not prove the whole election unbiased. |
+| Recovery from silence | Use K=2's selected witnesses outside the producer pair, parent-bound failure certificates and local 3B deadlines. | Prove receiver agreement on attempt authority and progress; importing K-of-K's producer-only abort quorum would halt with one silent member at K=2 (two at larger K; H3, H4). |
+| History and finality | Use the latest decided longest-history/tie rules above the justified root and stake-quorum checkpoints for settlement. | Prove fork choice, voting, membership changes and replacement together (H10, H12). Neither unanimous production nor a local rollback limit substitutes for that proof. |
+| Execution and persistence | Reuse the existing discipline of one receiver/apply rule set, with producers checking that same rule set; replay validated transactions and switch persisted state atomically. | Reuse reviewed semantics and primitives, not every existing implementation detail. The general recovery and crash obligations remain H17; C99 port-then-retire is unchanged. |
+| Shard boundaries | Use source-checkpoint verification and ordered, exactly-once application of cross-shard transactions as decided. | Prove authentication, conservation and retry/crash behavior; local correctness alone does not establish cross-shard correctness (H18). |
+
+This is a candidate integration of already selected rules and useful existing
+principles. It does not select a configurable-K product, extra protocol modes, a new
+transaction scope, a different finality system or a replacement for the chosen VDF.
+
+### 8.2 Fair comparison and selection
+
+1. **Fix the required properties.** No conflicting finalized histories; valid
+   transactions and conserved state across shards; authorized replacement and progress
+   under the stated delivery/fault assumptions; recoverable pre-finality histories;
+   bounded resource use. Specify the inclusion guarantee separately from consensus
+   safety, including delivery, capacity and ordering conditions.
+2. **Use the same concrete environment.** Compare identical transaction scope and
+   load, network and hardware, with explicit identity counts, stakes and faulty
+   members. Keep faulty stake and faulty identity fractions separate: the C++ sampler
+   selects identities, while H1/H2 use stake. H0 is the starting model; the mapping
+   to each mechanism must be derived, not assumed.
+3. **Compare one mechanism at a time, then its dependencies.** Record what property
+   it supplies, its assumptions, a failure trace, its costs, and what other rules it
+   depends on. First reject variants that fail a required property. Among survivors,
+   compare safety assumptions, settled-transaction throughput, tail settlement and
+   recovery latency, CPU, bytes, storage and worst-case certificate/replay costs.
+   Count quorum and VDF work, not just the number of normal block producers.
+4. **Review the composition.** Use the same withholding, partition/heal, conflicting
+   candidate, unavailable-body, unequal-stake and crash/restart cases. Prove the
+   unbounded claims and independently review them; finite DSF/model counterexamples
+   can refute a proposal but passing runs do not prove it. Only then implement the
+   smallest increment and gate it at receiver/apply through `tools/ci_local.sh`.
+
+The clearest incompatible choice is transaction eligibility. K-of-K's union aims to
+let one proper producer force a transaction's consideration; the decided K=2
+intersection allows either producer to omit it from eligibility. They cannot both be
+the body rule for the same attempt. Evaluate any change together with availability,
+commitment timing and capacity, and record it as a proposed revision of H14 rather
+than silently merging the rules. Similarly, changing producer count is an analytical
+variant until authorized; changing the count alone proves no election, recovery or
+finality property. New votes or thresholds are not inferred from the synthesis goal.
+
+Two corrections apply to the earlier comparison shorthand: C++'s depth-1 reorg limit
+is a local acceptance rule, not an unconditional one-block network-finality theorem;
+and a bound on faulty stake does not establish a bound on faulty identity count.
+See the Decision Log entry "Comparison objective: combine the best mechanisms".
+
+### 8.3 Comparison against the controlling goals (2026-09-24)
+
+**Scope.** The owner's latest instruction is to compare the two designs against
+the goals. The implementation target is now the [freestanding C99
+plan](../C99-MINIX-PORT.md): no libc, external target libraries or heap allocation;
+bounded memory with explicit ownership; secret-independent cryptographic processing
+under reviewed compiler/target profiles; and proof-backed protocol claims. Existing
+hosted code is evidence and a reference, not a deployment candidate that already
+meets that target. This assessment extends §8.1; it changes no selected protocol
+rule and closes no H item.
+
+Safety, memory/dependency conformance and the required side-channel contract are
+**admission requirements**, not scores that faster performance can offset. Compare
+performance and implementation complexity only within the stated security and
+functional scope. In particular, use the same transfer/membership workload for both
+designs; the larger C++ transaction feature set is not a fair throughput handicap
+to attribute to K-of-K consensus itself.
+
+| Goal | K-of-K reference design | Decided K=2 design | Assessment for the combined design |
+|---|---|---|---|
+| Proof-backed safety | Existing receiver/apply code, FA proofs and FB1 provide more implementation evidence. Same-context unanimous digest endorsement has a narrow argument; cross-round committee intersection and actual body binding remain open (S-054, Censorship §0). | Two endorsements alone do not establish network finality. H12 adds stake-quorum checkpoints; membership, voting, fork choice, replacement and VDF composition still require proofs. | Neither is qualified as a complete secure target. Reuse the scoped unanimous-endorsement argument, bind the actual canonical body/context at the receiver, and prove the complete history rules separately. |
+| Strict C99, no libc or external target libraries | Current C++/hosted implementation fails this deployment requirement; the consensus rules do not inherently require C++ or POSIX. A verified port remains possible. | The C99 local experiment is already strict C99 in its configured targets, but uses hosted transport/runtime and implements a different evaluator from the selected class-group VDF. It is not the production design. | Neither current executable qualifies. Reuse independently qualified C99 primitives and canonical codec semantics; the target needs its own complete link, platform and dependency evidence. |
+| No heap; bounded memory and work | K fixes the normal committee size, but current containers, mempools, registry, evidence, chain state and I/O still need bounded replacements and a persistent-state design. | Two normal producers reduce that part of the state. Witness/vote sets, previous-attempt certificates, received lists, VDF scratch, concurrent candidates and recovery history remain additional resource obligations. | Fixed pair size is not a whole-node memory bound. Both need a receiver resource contract; K=2 has more new classes of cryptographic and recovery state to bound. |
+| Secret-independent crypto and small cryptographic implementation | Commit/reveal, signatures and existing primitives avoid a VDF-specific arithmetic/proof engine. This is a relative implementation-scope advantage, not whole-stack side-channel qualification. | Adds ephemeral-DH derivation and class-group VDF/proof machinery to qualify; signing and pre-reveal secret handling still need their own contracts. Public proof verification also needs bounded malformed-input cost. | K-of-K has less new cryptographic machinery. Keep the selected VDF only with its explicit H6/H8 security argument and target evidence; this comparison does not remove or replace it. Current Argon2id/libc-backed helpers qualify neither target (§9 of the crypto specification). |
+| Recovery from incomplete cooperation | Producer-only abort quorum `max(2, K−1)` cannot recover at K=2 with one silent member, and has the recorded two-silent-member problem at larger K (H3, S-076). | Failure witnesses outside the pair can authorize a new pair under the selected two-thirds-stake rule and 3B local deadline; completion of its safety/liveness argument is pending. | Retain the decided external witness recovery mechanism for the pair. Importing the old abort threshold unchanged would defeat the selected recovery goal. |
+| Transaction eligibility and inclusion | The union aims to preserve consideration of a transaction contributed by one proper member. The shipped post-signature body-omission gap prevents claiming that inclusion guarantee today. | The decided intersection admits only jointly received transactions; either member can omit one. Delay/censorship bounds need actual sampling, delivery, validity, capacity and stall assumptions (H14). | Preserve the selected joint-receipt rule. The union's one-member inclusion property is not inherited; it remains the explicit tradeoff identified in §8.2. |
+| Normal production cost and settlement cost | Normal producer exchanges and signatures scale with K; no selected VDF or separate checkpoint voting layer. The local depth-1 reorg limit is not unconditional network finality. | Two normal producers, plus DH/VDF verification, certificates on stalls and shard-wide checkpoint votes. Settlement waits for covering finality, whose latency remains to be derived under H12. | K=2 reduces normal producer participation when K > 2. No measured advantage in settled throughput, tail latency, total bytes, energy or verifier cost follows. Include all auxiliary work and recovery. |
+| Sharding and crash recovery | Existing beacon/EXTENDED and atomic local reorg work offer reference code, with S-064/S-096 and snapshot/recovery residuals. | Source-finalized cross-shard transactions, sequence ordering, snapshot/replay and durable head switching are selected directions (H16–H18), not implemented end-to-end guarantees. | Reuse validated receiver/apply semantics and atomic publication discipline; prove the new cross-shard and persistence composition. Two producers and a VDF do not justify deleting topology or availability checks. |
+| Minimalism and reusable evidence | More existing functionality and evidence; fewer new cryptographic constructions, but substantial hosted code and protocol defects remain. | Smaller normal producer set and narrower transaction scope, with more newly specified election, timing, quorum, finality and recovery mechanisms. | Reuse sound mechanisms at their actual scope. Fewer producers is not sufficient evidence of a simpler whole protocol; fewer implemented prototype features is not a security advantage. |
+
+**Resource accounting before benchmarks.** Let K be the baseline's selected
+producer count; N the K=2 shard's eligible identity count; A the number of earlier
+attempts certified by an accepted block; q_a the distinct signers in the certificate
+for earlier attempt a; q_F the signers in a checkpoint link; and E the checkpoint
+interval. These are accounting variables, not newly selected protocol limits.
+
+- The baseline's normal block includes K producer endorsements plus its Phase-1
+  authentication, transaction verification and apply work. The pair design includes
+  two producer endorsements plus contribution authentication, DH derivation, VDF
+  proof verification, transaction verification and apply work. Counting only K
+  versus 2 omits required work in both cases.
+- H3/H19 carry plain Ed25519 failure-certificate lists for all earlier attempts.
+  Their signature count is `sum(q_a, a = 0 .. A−1)`; if a certificate needs up to N
+  distinct signers, this contribution can grow as A·N. Two-thirds **stake** does not
+  imply a certificate of two-thirds the number of identities. Canonical membership,
+  duplicate rejection, encoded-size limits and verifier work must be specified.
+- With a plain-signature representation, checkpoint voting contributes q_F
+  signatures per successful link; its concrete proof encoding remains H12/H19 work.
+  Roughly q_F/E per height is an amortized
+  accounting term only with the assumed successful link cadence; it omits extra
+  links, retries, dissemination and stalled-finality behavior. It is not a peak
+  memory/CPU bound or a finality-latency theorem.
+- H16/H17 require bodies and durable signing/recovery records relative to the last
+  finalized checkpoint. E alone does not bound the unfinalized suffix when finality
+  stalls. Define bounded-RAM access to persistent state, snapshots and replay,
+  candidate retention, resource exhaustion and crash points. Silently rejecting an
+  otherwise valid history to fit a local arena is not a proof of protocol liveness.
+- The selected class-group construction needs concrete parameter sizes, evaluation
+  and proof-generation scratch, verification work and pipeline/concurrency budgets.
+  The existing AES/SHA repeated-work timing is not a benchmark of that construction.
+  No network-wide O(1) or throughput multiplier is inferred from these counts.
+
+**Sampling and fault-model fairness.** Hold the actual identities, stake vector,
+faulty identities and network schedule fixed when comparing selection. C++ selects
+identities; H2 selects two distinct identities by stake. A stake fraction alone does
+not give the former's faulty-committee probability. Nor is `(1−f)^2` an exact
+proper-pair probability for unequal stakes sampled without replacement. For the
+idealized sequential proportional draw with at least two positive-weight eligible
+members, if W is total stake, P is the proper set,
+W_P its total stake and w_i one member's stake, the probability is
+`sum((w_i/W) * ((W_P−w_i)/(W−w_i)), i in P)`: condition on the first draw and then
+remove that identity's stake for the second. This is a one-draw accounting identity,
+not a proof of H2's real sampler or an independent-retry/inclusion guarantee.
+The earlier H14 `1/(1−f)^2` illustration must not be used as a demonstrated latency
+or as an exact general bound. Capacity, resubmission, adversarial bias, flooding and
+correlated retries require their own argument. No stake cap or different sampler
+is selected by this clarification.
+
+**Result for synthesis.** The currently justified direction is the §8.1 composition:
+two co-creators endorsing the same receiver-validated canonical body/context;
+commit-before-reveal and the selected joint receipt; signature-independent election
+inputs; the decided external recovery witnesses and checkpoint settlement; and
+reused validation/apply, canonical serialization and durable-publication principles.
+Qualified primitives and bounded C99 ingestion/storage facilities are common to
+either consensus design. Existing implementation defects, producer-only K=2 aborts,
+the union's incompatible inclusion claim and unqualified runtime/crypto code are
+not inherited into that target.
+
+There is no proved or benchmarked whole-design winner. K-of-K currently offers
+more reusable implementation evidence and a smaller cryptographic scope; K=2
+offers fewer normal producers and explicitly selected recovery/finality mechanisms,
+at the cost of additional protocol, arithmetic and state-management obligations.
+The next discriminating design artifact is a receiver/resource specification
+covering normal blocks, stalls, checkpoint delays and crash recovery, paired with
+the H2/H6/H8/H12 proofs. Only after that gate is meaningful should equivalent
+implementations be benchmarked for settled throughput, p95/p99 settlement and
+recovery latency, peak RAM/stack, persistent I/O, CPU/energy and bytes under matched
+loads and adversarial schedules. This assessment initially changed no work order;
+the subsequent owner instruction adopts the development sequence in §8.4. Neither
+the comparison nor that adoption authorizes deployment.
+
+### 8.4 Adopted development plan (2026-09-24)
+
+**Selected direction:** two co-creators unanimously endorse one canonical,
+receiver-validated body and context. Reuse sound K-of-K validation, canonical
+encoding and persistence principles; use the already decided K=2 joint receipt,
+stake-weighted election/VDF pipeline, external failure witnesses, local 3B timeout
+and checkpoint settlement. The joint-receipt rule does not acquire the union's
+one-proper-producer inclusion guarantee. Every reused mechanism still needs review
+against its known defects, the composed protocol and the freestanding target.
+
+The implementation target is strict freestanding C99 with no libc, external target
+runtime libraries or heap; bounded storage, explicit ownership and qualified
+secret-independent cryptographic processing are mandatory. Existing hosted C++ and
+C99 executables remain references or experiments. Neither is a qualified target.
+No new producer count, quorum, VDF, KDF, transaction scope or checkpoint encoding is
+selected by this plan. H0 remains CLOSED as a stated model; H1–H21 remain DECIDED
+with their proofs owed. Performance does not compensate for a failed security or
+resource requirement.
+
+| Order | Deliverable | Required evidence before advancing |
+|---|---|---|
+| 0. Preserve and commit the reviewed starting point | Inventory the existing staged restoration, unstaged documentation/foundation work and untracked files; make coherent, explicitly scoped local commits. | Review the exact contents of each commit, independently review consensus/apply/wire/model changes, and pass the applicable `ci_local.sh` checks for that snapshot. Preserve unrelated work. The Claude instructions are in C99-MINIX-PORT §12. |
+| 1. Specify one-shard receiver and resource contracts | Extend this ADR and the existing C99 plan with the first deliverable below. | Explicit predicates, ownership and failure transitions; byte/work/storage accounting; proofs or precise counterexamples; independent adversarial review and a dependency map to §7. No production acceptance rule depending on an unresolved contract is implemented. |
+| 2. Build the smallest proved surviving component | Choose a real receiver/apply/codec or qualified primitive boundary from the reviewed contract, with a concrete caller and a falsifiable property. | Design proof and independent review, then implementation and receiver/apply-level positive, negative and mutant gates through `ci_local.sh`; fresh successful builds precede mutant results. Parity covers unchanged reference behavior; an authorized changed rule uses its reviewed specification and vectors. Do not port obsolete consensus solely to delete it. Repeat this step in separate increments. |
+| 3. Establish composed single-shard behavior | Integrate election, signed body/context, replacement, fork choice, checkpoint voting/membership and durable recovery. | Close each applicable H obligation with reviewed arguments and implementation evidence. Exercise withholding, selective release, partitions/healing, competing candidates, unequal stakes, unavailable bodies, exhaustion and crashes. Finite DSF/TLC checks supplement, not replace, the unbounded arguments. |
+| 4. Add sharding after its premises hold | Follow ADR-005 for fixed topology, shard-local eligibility, source-checkpoint authentication and ordered exactly-once cross-shard application. | H18 and the applicable membership/availability/resource obligations, plus receiver/apply/crash evidence. Single-shard safety alone does not establish cross-shard conservation or settlement. Production sharding and beacon retirement are not approved by this plan. |
+| 5. Qualify the target and compare measured costs | Assemble the real MicroVM image; qualify each compiler/ISA/platform profile and benchmark equivalent workloads with complete protocol costs. | Final link/dependency and memory/ownership evidence, crypto artifact and leakage evidence within explicit assumptions, persistence/boot tests, settled throughput and tail settlement/recovery costs. H21 remains a separate deployment decision. Platform and primitive evidence may be developed earlier where independently useful. |
+
+**First development deliverable — receiver/state/resource contract.** Keep it in
+this ADR and C99-MINIX-PORT, with formal arguments linked from the existing proof
+record as needed. Describe the following before choosing a production wire layout:
+
+1. The canonical body and full chain/shard/height/parent/attempt/producer context
+   that both endorsements bind; commitment/reveal dependencies, joint receipt,
+   ordering and availability; and the exact receiver predicates. Document which
+   acceptance and inclusion properties each predicate supplies (H5, H9, H14, H19).
+2. Verification and state transitions for eligibility, public DH/VDF evidence,
+   prior-attempt failure certificates, checkpoint votes and membership snapshots.
+   Map every input to its authentication, replay scope and persistence lifetime;
+   distinguish tentative validation from authoritative state publication
+   (H1–H8, H10–H13, H15–H17, H19–H20).
+3. For each received/retained object, account for encoded bytes, counts, worst-case
+   verification work, RAM/stack scratch, durable storage, ownership and lifetime.
+   Include concurrent candidates, retransmissions, invalid input and crash replay.
+   Distinguish consensus validity limits from local queue/storage exhaustion;
+   dropping work safely does not establish eventual progress.
+4. Resolve the resource composition first: H3/H19 require certificates for every
+   earlier attempt, so the signature count grows as `sum(q_a)` over those attempts.
+   Checkpoint spacing E does not bound the unfinalized suffix when finality stalls.
+   Demonstrate how bounded RAM and persistent/streaming processing compose with
+   canonical framing, verification work, storage exhaustion and the required
+   safety/liveness properties. Streaming alone does not bound total bytes, work
+   or disk use. If the selected rules cannot satisfy the required budgets, record
+   the precise incompatibility and alternatives requiring an owner decision. Do
+   not silently cap attempts, discard required certificates or claim progress
+   after local exhaustion.
+5. State assumptions and required proofs for each transition, an adversarial trace
+   that would falsify it, and the receiver/apply/model gate that exercises it.
+   Record proved, refuted and pending items separately. A counterexample is a valid
+   design result; a green finite model is not completion of a general proof.
+
+**Work selection and retirement.** This combined-design specification/proof track
+is the next development task, superseding the older work order only for this track.
+The reference safety backlog remains valid and open; its unfixed behavior is not
+inherited as a proved property. Retain the hosted K-of-K reference while replacements
+are qualified under C99-MINIX-PORT §0. Retirement remains a separate reviewed commit.
+Do not promote the teaching QF frame, bounded recovery model or repeated-work
+evaluator into production consensus by renaming it. Sharding, integration and
+deployment remain conditional on their own proofs and acceptance decisions.
