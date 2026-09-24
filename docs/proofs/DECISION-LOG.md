@@ -7831,3 +7831,79 @@ commit:
 The earlier entries' statements that delivery is uncommitted are superseded by these
 commits. **Scope.** Documentation and one test wrapper; no consensus, wire, model or
 proof-status change.
+
+## 2026-09-24 — One-shard receiver contract: the recorded rules do not compose with fixed budgets
+
+**Scope.** This is ADR-004 §8.4's first deliverable for one shard. It takes item 4
+(resource composition) first, and covers the receiver objects and resources of items 1–3
+as far as the record allows. ADR-004 §9 is the contract;
+[OneShardReceiverContract.md](OneShardReceiverContract.md) (FB76, future tier) holds the
+arguments. Documentation only: no recorded decision changes and no limit is selected.
+Items marked proposed await owner review.
+
+**Results.** These are hand proofs about the proposed design. They close no H
+obligation.
+
+- Working memory for certificate verification is O(1) whatever the number of attempts or
+  members (Lemma Q). For block ingestion and replay it is plausible with streamable
+  encodings, but not proved.
+- Under the recorded H3 a block of attempt A carries certificates for every earlier
+  attempt, and A is unbounded. H0 bounds no asynchronous period (U1). During synchrony
+  the recorded assumptions give no stall bound either, because for unequal stakes the
+  proper-pair probability can approach zero (U3).
+- While finality stalls, the unfinalized suffix grows without bound, and so do the
+  bodies and signing records a node must keep and H17's replay (U2).
+- So no node with fixed budgets can accept every valid history of the recorded design
+  (U4). Local capacity refusal is proposed. Its effect depends on the refusing stake and
+  on whether refusers sign failure statements, and that choice is left to the owner.
+- A predecessor certificate implies all earlier certificates when the faulty stake is
+  below two thirds (Lemma P). This needs three premises: honest attempt state survives
+  restarts, there is one weighting snapshot per (h, P), and the fault bound is relative
+  to that snapshot. The last follows from H0(1) only if H0(1) is read against the
+  snapshot in use. Otherwise it is an added premise for every snapshot-weighted quorum,
+  checkpoint links included.
+- Without an exact-carriage rule (X1) the recorded certificate criterion is ambiguous. A
+  colluding pair can withhold its block until a later attempt's certificate forms and
+  then carry it, so two fork-point blocks cover each other.
+
+**Decisions required** (ADR-004 §9.6). Until these are decided, no production acceptance
+rule that depends on them is implemented, attempts are not capped, and required
+certificates are not pruned.
+
+- X1: exact carriage.
+- D1: carry only the predecessor certificate, with the criterion restated as "the higher
+  attempt index wins".
+- D2: a stake-distribution assumption or a sampler change, for liveness.
+- D3: finality lag. The options are a provisioning assumption, finality-gated production
+  (which has a recorded deadlock), or accepted growth.
+- D4: the K=2 block cap and the received lists.
+- D5: statement bytes, certificate order and index width.
+- D6: the certificate's weighting snapshot and the reading of H0(1).
+- D7: a population bound.
+- D8: branching, retention and parent tracking.
+- The two refusal choices.
+
+**Next.** §9.7's streaming stake-quorum verifier is qualified next, as a primitive built
+ahead of its callers (C99-MINIX-PORT §7). It serves failure certificates under either
+carriage rule, and checkpoint links if H12 adopts plain signatures. It applies only if
+D5 keeps snapshot-index order; the owner is asked to confirm that.
+
+**Review.** One independent adversarial reviewer checked the design in four rounds.
+
+- Round one found seven blocking errors in the first draft: - the component was claimed
+  to survive every alternative, though it assumes D5's order; - D1 silently changed the
+  fork-choice criterion; - the criterion needed an unstated exact-carriage predicate; -
+  Lemma P lacked the one-snapshot premise and overstated what H0 gives for exited
+  members; - the decision list omitted the population, retention and branching; - a
+  snapshot-overflow refusal was an invented limit; - D9 was misattributed.
+- Round one also found ten should-fix items: missing resource rows, a circular liveness
+  sketch, a finality-gating deadlock, pruning scope, refusal semantics, gating, and a
+  missing TIER banner.
+- Round two found two blocking errors: an overstated necessity claim, and a fault-bound
+  reading that a stake change after the snapshot is fixed breaks.
+- Round three found the refusal regimes wrong, because withholding and signing faulty
+  stake act independently.
+- Round four found nothing blocking. Every finding is addressed in the committed text.
+
+**Verification.** `ci_local.sh --docs-only` passes all 16 guards, and `git diff --check`
+is clean. No code, model or test changes.

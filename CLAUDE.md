@@ -111,6 +111,16 @@ deployment is authorized. Preserve unrelated staged work; retain the C++ referen
 under port-then-retire, with specification-based checks for approved changed rules.
 The earlier status entries below are historical where this entry supersedes them.
 
+STATE 2026-09-24 — ONE-SHARD CONTRACT (DECISION-LOG: "One-shard receiver contract: the
+recorded rules do not compose with fixed budgets"). ADR-004 §9 and FB76
+(docs/proofs/OneShardReceiverContract.md): certificate verification needs O(1) working
+memory, but under the recorded rules per-block certificate evidence and the unfinalized
+suffix are unbounded, so no fixed-budget node accepts every valid history. The owner
+decisions X1, D1–D8 and the refusal choices (ADR-004 §9.6) come first; meanwhile do not cap
+attempts, prune required certificates or treat refusal as progress. NEXT: qualify §9.7's
+streaming stake-quorum verifier as a primitive (no production caller until D5 and D6),
+then §9.8's increments as decisions land.
+
 STATE 2026-09-24 — STARTING WORK COMMITTED (DECISION-LOG: "Starting work committed
 after independent review"). The staged restoration, the K=2 hole register, the
 freestanding foundation and the plan documentation are local commits on `main`;

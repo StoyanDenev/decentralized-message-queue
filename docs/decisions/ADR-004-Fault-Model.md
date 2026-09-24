@@ -1169,3 +1169,190 @@ are qualified under C99-MINIX-PORT §0. Retirement remains a separate reviewed c
 Do not promote the teaching QF frame, bounded recovery model or repeated-work
 evaluator into production consensus by renaming it. Sharding, integration and
 deployment remain conditional on their own proofs and acceptance decisions.
+
+## 9. One-shard receiver, state and resource contract (2026-09-24)
+
+**Status and scope.** This section starts the first deliverable of §8.4 for one shard. It
+answers item 4 first (resource composition). For items 1–3 it records what a receiver
+must verify, hold and replay, and the cost of each, as far as the record allows. Still
+missing: failure transitions, ownership and stack scratch, and item 5's per-transition
+assumptions, falsifying traces and gates. The arguments are in
+[OneShardReceiverContract.md](../proofs/OneShardReceiverContract.md) (FB76): proofs about
+the proposed design, not about shipped behavior, pending independent review.
+Nothing here changes a recorded H decision or selects a limit. Text marked *proposed* is
+a specification proposal for owner review. Two rounds of independent design review on
+2026-09-24 found blocking errors in the earlier drafts (an overstated component claim, an
+unstated fork-choice change and receiver predicate, missing proof premises, missing
+decisions, an invented snapshot rule, a misattributed D9 and an overstated
+necessity claim); this text addresses them.
+
+### 9.1 Validity versus local capacity
+
+- **Consensus validity** is a deterministic predicate on a block and the branch below
+  it. It does not depend on a node's memory, disk, queue or clock (H4: a clock decides
+  only when a member signs a failure statement).
+- **Local capacity refusal** (*proposed*) is a node's decision not to hold an object it
+  cannot store or verify within its budget.
+  - The node does not count the block toward its history (H16). It does not extend,
+    endorse or vote above it, and it never records it as invalid.
+  - The outcome depends on two conditions (FB76 §4), which the adversary influences
+    independently through the faulty stake that withholds above the refused block and the
+    faulty stake that signs; R is the refusing stake, read in each quorum's snapshot:
+    - (i) if R plus the faulty stake withholding above the refused block X exceeds
+      W − τ(W), X's branch halts at its first stall;
+    - (ii) if the refusers sign failure statements and they, with the faulty stake that
+      signs, reach τ(W), X can be replaced. A branch split then persists unless the
+      replacement branch catches up in length, or one side finalizes.
+  - Whether a refusing node signs H3's failure statement, and whether H0's f counts it as
+    offline (a clarification of the closed H0), need an owner decision.
+  - Refusal does not weaken H12's pending safety argument, but no progress is claimed.
+- **Tentative versus authoritative state.** A block is applied to a tentative state
+  above the latest finalized checkpoint and may be replaced there (H10, H12, H17). Only a
+  durable head switch (FB76 K3) publishes a new head, and only finality settles.
+
+### 9.2 Received objects
+
+*Proposed* marks items the record leaves open. The last three columns are
+authentication; replay or deduplication key; and how long the object is kept.
+
+| Object | Receiver predicate | Authentication | Replay key | Kept |
+|---|---|---|---|---|
+| Signed header content (H9) | Recorded: fixed-width big-endian content that the pair signs, with chain, shard, height (parent height + 1), attempt a and parent; a timestamp above the parent's, which nothing reads (H4). Field list open (H9). *Proposed:* the body commitment and the H5 commitments inside it. | Two Ed25519 endorsements by the pair drawn for (h, a) from the snapshot (H2) | (chain, shard, h, a, P, header) | Full body back to d heights below the latest finalized checkpoint; older only at archives (H16) |
+| Commitments and reveals (H5) | Receivers recompute both ephemeral public shares and the DH result from the revealed scalars and check both commitments. Group, point and scalar checks open. | The commitments' binding into signed content (*proposed* above) | With the block | With the block |
+| VDF evidence (H2, H6) | The block H2 names carries the VDF output and its proof, and is invalid without them. Parameters and verification cost open (H6). | Public verification | With the block | With the block |
+| Body and received lists (H14, H15) | Body = the H14 function of the two committed lists and the parent state. Checking it needs both lists or a proof structure; their order, cap and retention are open (D4). | Sender signatures (H15); list hashes committed (H5) | Sender nonces (H15) | With the block |
+| Failure statement (H3) | Signer is in the weighting snapshot (D6); bytes M(h, a, P) (D5, *proposed*) | Ed25519 by the member's key | (h, a, P, signer) | Keep policy open (§9.3) |
+| Failure certificates carried by a block (H3, H19) | Each is canonical under the weighting snapshot (FB76 §2: indices in snapshot order, *proposed*; valid signatures; at least two thirds of the stake). *Proposed* (X1): a block of attempt a carries exactly the certificates for attempts 0, …, a − 1, bound to its parent (under D1: exactly the one for a − 1). | Member signatures | (h, a, P) | With the block |
+| Equivocation evidence (H13) | Two valid signatures by one member over different header contents for the same (chain, shard, h, a, P) | Both signatures | (member, h, a, P); capped per block (cap open) | On chain; suspension window open |
+| Checkpoint vote and link (H12) | Recorded: a link from a justified source to a target; a link with two thirds of the stake justifies; each link's voter set is a named eligibility snapshot; double and surround votes are evidence. Encoding open. Fixing the voter set from finalized state is a proof obligation (DECISION-LOG, third review). | Ed25519 | (voter, source, target) | Until finalized; voters keep K1 records |
+| Membership transaction (H1, H15) | Admission with stake above the floor, unstake, exit after unbonding. Floor and snapshot rule open; small-order keys must be refused at admission (FB76 §1, open). | Sender signature | Nonce | State |
+| State snapshot (H16, H17) | State at a height; format, commitment and interval open | Via the chain's committed state, or finality for synchronization (open) | Height | Periodic |
+
+### 9.3 Resources per object
+
+Symbols: N snapshot members; A earlier attempts at a height; q_a entries in attempt a's
+certificate (q_a ≤ N); q_F signers of a link; E checkpoint interval; L heights between
+the tip and the latest finalized checkpoint; ℓ a committed list's length. *Open* means
+the record gives no bound.
+
+| Object | Bytes | Verification work | Working memory | Durable storage |
+|---|---|---|---|---|
+| Header and endorsements | Fixed once H9's fields are fixed, plus 2 × 64 | 2 Ed25519 | O(1) | Per held block |
+| Commitments, reveals, DH | 2 commitments and 2 scalars | 3 scalar multiplications (both public shares, the DH value; the H5 entry's "two" omits one) and hash checks | O(1) | With the block |
+| VDF output and proof | Open (H6 parameters) | Open; does not grow with the delay (H6) | Open (class-group scratch) | With the block |
+| VDF evaluation and proof generation | None received | About T_vdf/B evaluations in flight; who computes is open (H6) | Open | Outputs until no block above the checkpoint needs them |
+| Body | The K=2 block cap, which has no value (D4) | Per transaction: signature, nonce and apply | One transaction plus state access | With the block |
+| Received lists | 2ℓ entries; ℓ open | Linear merge if both lists are ordered (*proposed*) | O(1) with ordered lists | Open (D4) |
+| Certificates carried by one block | Σ_{a<A} q_a entries as recorded (a 64-byte signature plus an index each); at most N under D1 | One Verify per entry | O(1) per certificate (Lemma Q) | With the block |
+| Certificates in flight at (h, P) | One per failed attempt | One Verify per entry; at most one certificate per 3B | O(1) | The latest per (h, P) under D1 |
+| Individual failure statements and votes | 64 bytes plus an index each; up to N per open (h, a, P) and per candidate link | One Verify each | Aggregation state per open key: open | Keep policy open; faulty members can sign statements for arbitrary (a, P) |
+| Junk certificates | Up to N entries; valid entries copied from gossip, then one bad entry | Up to q Verifies each; free for the sender | O(1) | None |
+| Retransmissions | As the object | Duplicate detection by replay key; dedup state local and bounded or dropped | Dedup cache | None |
+| Checkpoint links | q_F entries per link; about L/E unfinalized checkpoints | One Verify per entry | O(1) per link | Until finalized |
+| Vote history for surround detection | Per voter, per unfinalized link | Comparison per new vote | Open | Grows with L/E |
+| Eligibility snapshots | O(N) each, per branch in use | Draw verification cost open (H2, H19) | Index lookup | Until no block above the checkpoint needs them |
+| Equivocation evidence | Two headers and two signatures per item | 2 Ed25519 | O(1) | On chain; per-block cap open |
+| Signing records (K1) | O(1) per signed key | None | O(1) | Above the latest finalized checkpoint; grows with L |
+| Held candidates | Relay is capped at 2 per (h, a, P) (H16); what a node holds is open (D8) | As for each block | Streaming | Grows with L and branching (D8) |
+| Replay (H17) | Snapshot plus bodies above the fork point | Apply from the snapshot to the new tip: up to L plus the snapshot interval | State on disk plus one block (FB76 R3) | Snapshot and retained bodies |
+
+### 9.4 Composition result
+
+1. **Working memory.** For certificate verification it is bounded in O(1) state
+   whatever A and N are (Lemma Q, proved). For block ingestion and replay the same
+   holds given streamable encodings, but that is a design claim, not proved (FB76 R2,
+   R3). Fork choice, aggregation of statements and votes, and surround detection are open.
+2. **Per-block bytes and work are unbounded** under the recorded rules. A block of attempt
+   A carries certificates for every earlier attempt, and A is unbounded under H0's
+   asynchrony (U1). The recorded assumptions give no stall bound even during synchrony
+   (U3). The K=2 block cap and the received lists have no bound (D4), and neither does N
+   (D7).
+3. **Durable storage and replay are unbounded** while finality stalls (U2). E spaces
+   checkpoints but does not bound L.
+4. **No node with fixed budgets can accept every valid history** (U4). The refusal choices
+   in §9.1 need an owner decision.
+5. **Predecessor-only carriage is equivalent under stated premises** (Lemma P, P1, P2).
+   The premises are (P-a)–(P-d), K4 and (X1). (P-b) holds only if H0(1) bounds the faulty
+   stake of the snapshot in use. If stake or membership has changed since the snapshot was
+   fixed, it must be discharged separately, under either carriage rule and for H12's
+   links too.
+
+The selected rules therefore cannot meet a fixed per-node budget.
+
+- A budget needs decisions on the carriage rule (D1 or another), finality lag (D3), the
+  block and list caps (D4), the population (D7) and retention (D8).
+- D5 and D6 are needed for deterministic validity, and D2 for liveness.
+- Whether these suffice depends on the rows still marked open in §9.3.
+
+Silently capping attempts, discarding required certificates or calling refusal progress
+would each change the recorded design without a decision.
+
+### 9.5 Open questions this contract depends on
+
+- **Parent tracking and retention (D8).** Which parents an honest member runs attempts
+  for, and how many candidates a node holds above the latest finalized checkpoint. Any
+  policy must never drop the fork-choice winner.
+- **Received lists (D4).** H14's check needs both committed lists. Their order, cap,
+  retention with the block and a streaming check are open.
+- **Ed25519 variant and key admission.** Every receiver must use one verification
+  predicate, and snapshots must exclude small-order keys (FB76 §1).
+- **Snapshot for certificates (D6), statement encoding (D5) and (X1).**
+- **The snapshot-relative fault bound (P-b).** Either H0(1) is read against the snapshot
+  in use, or D6 names a snapshot that H0(1) covers. This affects every snapshot-weighted
+  quorum, including H12's links, under either carriage rule.
+- **Crash obligations K1–K6** (FB76 §7). None has a combined-design implementation.
+
+### 9.6 Decisions required
+
+| Decision | Resolves | Changes | Status |
+|---|---|---|---|
+| X1 Exact carriage (*proposed*) | The mutual-cover ambiguity in the recorded certificate criterion (FB76 P2) | H3's carriage rule; the criterion's wording is unchanged and becomes well defined | Needed with or without D1 |
+| D1 Carry only the predecessor certificate | Per-block certificate bytes and work (U1) | H3's carriage rule; §6.1's certificate criterion becomes "the higher attempt index wins"; H19's light-client check | Equivalence proved under (P-a)–(P-d), K4 and (X1), pending review |
+| D2 Stake-distribution assumption or sampler change | Stall count and liveness during synchrony (U3) | H0, H1 or H2 | Sketch; flooding, H0(3), draw bias and honest completion within 3B remain |
+| D3 Finality lag: provisioning assumption, finality-gated production, or accepted growth | Unfinalized suffix (U2) | H0, or H12 plus on-chain votes | Option (b) has a deadlock to resolve (FB76 §6) |
+| D4 K=2 block cap; received-list cap or proof structure | Per-block bytes (H0(5), H14) | H14 and H5 (D9 is separate) | Open |
+| D5 Statement bytes and certificate order (*proposed*) | Canonical certificate encoding | Specifies the open part of H3 and H19 | Lemma Q needs snapshot-index order |
+| D6 Weighting snapshot for failure certificates (*proposed*) | Receiver agreement on quorums, (P-d) | Specifies the open part of H1 and H3 | Needs a snapshot that H0(1) covers, or a clarification of H0(1) (P-b) |
+| D7 Population bound, or budgets as functions of N | Every O(N) term | H1 (floor), H20 (supply) | Open |
+| D8 Branching, retention and parent tracking | Candidate storage, statement volume | H3, H16 | Open; needs a never-drop-the-winner proof |
+
+§8.4's gate for step 1 stays open until these decisions are made and FB76 passes
+independent review. No production acceptance rule that depends on them is implemented.
+
+### 9.7 First component: streaming stake-quorum verification
+
+FB76's Lemma Q is a pure verification primitive. It serves H3's failure certificates
+under either carriage rule (D1 or not), and checkpoint links if H12 adopts a
+plain-signature encoding. It survives D1–D4 and D6–D8. It also survives D5 provided the
+certificate encoding presents its entries in snapshot-index order; an encoding in
+arbitrary order would need a different verifier.
+
+- **Why now.** C99-MINIX-PORT §7 allows a primitive to be qualified before its protocol
+  callers exist, while production integration waits (§8.4 row 5: primitive evidence
+  "where independently useful"). This component has no production caller until D5, D6 and
+  H12's encoding are decided. It is useful only if D5 adopts snapshot-index order; the
+  owner is asked to confirm that direction.
+- **Implementation.** `stake_quorum` in freestanding C99: no libc, heap or global state,
+  and the caller injects the snapshot arrays and the Ed25519 predicate.
+- **Tests.** They cover the certificate-acceptance predicate itself, with positive and
+  negative cases and falsify-on-mutant gates run through `ci_local.sh`. The receiver-layer
+  gate comes with its first production caller (§9.8 item 1).
+- **Caller obligations.**
+  - The snapshot total is the sum of its stakes, with 1 ≤ W ≤ 2^64 − 1 and
+    N ≤ 2^32 − 1.
+  - The statement bytes follow D5.
+  - The snapshot follows D6.
+  - One Ed25519 variant is used everywhere.
+  - finish is called only after the last entry of the certificate's framing (FB76 §2).
+
+### 9.8 Next increments
+
+Each increment needs its own proof and review, and the ones that depend on a decision
+wait for it.
+
+1. After D5 and D6: the canonical failure-statement and certificate codec, and a receiver
+   predicate for (h, a, P), which is `stake_quorum`'s first production caller.
+2. After D1: the attempt state machine with K4 and K6, and a model of attempts and
+   certificates that checks Lemma P's premises on finite instances.
+3. After H12's vote encoding: the checkpoint-link predicate.
+4. A staging and publication store for K2 and K3 on the freestanding storage contract.

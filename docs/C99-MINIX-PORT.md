@@ -229,6 +229,11 @@ qualified earlier; production integration waits for its protocol dependencies.
   reviewed changed-specification tests and receiver/apply mutants for replacements,
   plus the composition arguments. There is no requirement to first port the old
   sampler, producer-only abort rule or fork choice solely to discard it.
+  [ADR-004 §9](decisions/ADR-004-Fault-Model.md#9-one-shard-receiver-state-and-resource-contract-2026-09-24)
+  specifies the one-shard receiver contract (proofs in FB76). Its first component,
+  the streaming stake-quorum verifier of §9.7, is a verification primitive to be
+  qualified ahead of its callers under the rule above; components that depend on the
+  open decisions D1–D8 wait for them.
 - **Phase 5 — platform integration.** Bounded gossip/RPC reactor and device backend,
   then target wallet/light interfaces. *Gate:* unchanged protocol surfaces
   interoperate through a hosted adapter and changed surfaces satisfy their reviewed
