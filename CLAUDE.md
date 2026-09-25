@@ -91,6 +91,14 @@ Read this before writing code or docs. On any decision conflict, docs/proofs/DEC
   unqualified PFS alongside view-key disclosure is wrong (same entry).
 
 ## CURRENT FRONT — read before selecting any work (latest owner directive 2026-09-25)
+STATE 2026-09-25 — AUDIT AND PLAN WORK COMMITTED (DECISION-LOG: "Audit and plan work
+committed after independent review"). The ADR-006 audit implementation with its
+pre-commit review resolutions (`aee4e535`) and the ADR-008/§12/§14 plan update
+(`cf5ae7ee`) are local commits on `main`; `cats.json` and `top100.json` stay staged and
+uncommitted; nothing is pushed. NEXT: §14.1's coverage/hypothesis record, then §14.2's
+increments; ADR-006 §6 lists recorded-not-fixed candidates. Any change under
+src/crypto/ or include/determ/crypto/ also runs the default ci_local mode (FAST).
+
 STATE 2026-09-25 — LOCAL AUDIT AND REGULATORY GOALS ADDED TO THE PLAN (DECISION-LOG:
 "Add the corrected audit/compliance work to the Claude development plan"). This
 owner request is a documentation-only plan update, not execution of the supplied

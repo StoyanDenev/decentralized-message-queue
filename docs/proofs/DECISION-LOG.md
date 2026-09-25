@@ -8148,3 +8148,46 @@ All 16 `ci_local.sh --docs-only` guards pass. Source/test/build files and the Gi
 index remain byte-identical to the start of this planning increment; the Decision
 Log's prior bytes and CRYPTO-C99-SPEC's CRLF are preserved. These checks validate
 the documentation update, not the future implementation or regulatory conformity.
+
+## 2026-09-25 — Audit and plan work committed after independent review
+
+**Commits.** Following C99-MINIX-PORT §12, the uncommitted ADR-006 audit work and the
+ADR-008 plan update were reviewed and committed as two scoped local commits on `main`:
+`aee4e535` (the audit implementation, its tests, mutation cases, CI wiring and records,
+with the review resolutions) and `cf5ae7ee` (ADR-008 and the plan/handoff documentation,
+with review corrections). `cats.json` and `top100.json` stay staged and uncommitted.
+Nothing is pushed or merged.
+
+**Review.** Four independent reviewers examined the working tree before commit: the wire
+codec, JSON and RPC/HTTP changes; the network lifetime changes; the crypto error paths;
+and the documentation with its external sources.
+
+- Blocking, fixed in `aee4e535`: the OPAQUE client had started to write `server_mac_ok`
+  before its NULL-argument check, reversing the C2-h contract of 2026-09-17. The audit
+  snapshot's full `ci_local.sh` run was FAST 340/341 (`test-dsso-opaque3dh`, two
+  assertions); the audit entry above records only C99 modes. The handoff now requires
+  the default (FAST) mode for any change under `src/crypto/` or `include/determ/crypto/`.
+- Blocking under the falsify-on-mutant rule, fixed: guards with no killing test. 17
+  assertion-gated cases were added (ADR-006 §6).
+- A defect the audit introduced, fixed: a failed `peer_mesh_connect` called
+  `on_disconnect` for an index the caller never received.
+- Documentation, corrected in `cf5ae7ee`: NIS2 article scope; the EU Cyber Resilience
+  Act added as unresolved; CISA's non-binding memory-safe-language guidance recorded as
+  a deviation needing rationale and a roadmap; FIPS 140-3; the existing DSSO
+  relying-party PID verification cited rather than described as absent; the ledger rule
+  narrowed to identification data; d5rp.c added to the allocation inventory; handoff
+  steps made conditional on what is already committed.
+- Recorded, not fixed: ADR-006 §6. The audit entry's "Linux aarch64 / Clang 18.1.3 and
+  GCC 13.3 with ASan + UBSan" means Clang `--c99` and GCC `--c99-sanitize` (ADR-006 §5).
+
+**Validation.** Linux x86_64, GCC 13.3.0, Clang 18.1.3. `aee4e535`: default build and
+FAST 341/341 with the 16 guards; `--c99` 26/26 with GCC and with Clang; `--c99-sanitize`
+26/26; `--c99-mutants` 204/204 after fresh builds (206 configured, two kqueue-only cases
+skipped); `--freestanding-examples` PASS (the C99 modes ran on a tree differing only in
+ADR-006's §1 wording). `cf5ae7ee`: `--docs-only` 16/16 and FAST 341/341 with
+`--skip-build` against the parent's binaries (identical code). `git diff --check` with
+the handoff's whitespace set is clean for both; CRYPTO-C99-SPEC keeps CRLF; this log's
+prior bytes are a prefix of each commit's copy.
+
+**Next.** §14.1's coverage and hypothesis record, then §14.2's increments. No finding,
+H obligation or ADR-004 §9.6 decision changes here.
