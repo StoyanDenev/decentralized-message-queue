@@ -2,8 +2,8 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
- * Determ Experimental Services Daemon (Bare-Metal C99).
- * Strictly zero-dependency: Zero Asio, Zero nlohmann/json, Zero OpenSSL.
+ * Determ Experimental Services Daemon (hosted C99).
+ * Uses POSIX and libc. The freestanding target remains a separate qualification.
  */
 
 #ifndef _POSIX_C_SOURCE
@@ -214,12 +214,12 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[i], "--benchmark") == 0) {
             do_benchmark = true;
         } else if (strcmp(argv[i], "--version") == 0) {
-            printf("Determ Node v2.18 (Strict Zero-Dependency C99 Architecture)\n");
+            printf("Determ Node v2.18 (Hosted C99 experiment; POSIX/libc runtime)\n");
             printf("Experimental two-party computation; PoSW consensus integration is incomplete\n");
             printf("Networking: Native POSIX non-blocking kqueue/epoll (Zero Asio)\n");
             printf("Storage: experimental C99 block store <dir>/manifest.bin + <dir>/<height>.blk "
                    "(DMF1/DBK1 records; not the C++ node's <path>.blocks/ store)\n");
-            printf("RPC: Bare-Metal HTTP/1.1 In-Place JSON-RPC Transport\n");
+            printf("RPC: Hosted C99 HTTP/1.1 In-Place JSON-RPC Transport\n");
             return 0;
         } else if (strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);

@@ -8001,3 +8001,85 @@ two, the second in rounds three and four.
   helpers on unaudited profiles (Clang 18 needs `__aeabi_lmul` on ARMv6-M and ARMv8-M
   Baseline);
 - execution of the 32-bit addressability check, which is compiled out on 64-bit targets.
+
+## 2026-09-25 — Public-main C99 memory/lifetime audit and scoped defenses
+
+**Authority and baseline.** The owner requested a C99-only audit of public GitHub
+main, exact defensive patches, an accepted memory-constraints ADR and a commit
+command. Public main was pinned to `6a131af3a96fa20e81d54e3d7057ac28bd1345c7`;
+all 123 `.c`/`.h` files under `src/`, `include/` and `sim/` matched the downloaded
+snapshot. This is provenance, not a proof of all 123 files. No C++ implementation
+was audited or edited. The requested claim of complete structural immunity is
+not supported by C99, static allocation or this audit and is not adopted.
+[ADR-006](../decisions/ADR-006-C99-Memory-Safety.md) instead accepts explicit
+ownership, bounds, captured-incarnation, failure and target-admission constraints.
+The combined consensus plan, ADR-004 §9 resource decisions, H obligations and
+port-then-retire ordering remain unchanged.
+
+**Concrete findings and patch scope.** ADR-006 M1–M7 record guarded codec
+size/offset arithmetic (including additions evaluated in uint32_t on a 64-bit
+host), bounded RPC numeric/token/output handling, immutable reactor/mesh event
+cookies and callback-return revalidation, retirement before close callbacks,
+K2 closed-descriptor sentinels after erasure, checked socket setup and SIGPIPE
+handling, checked crypto workspace arithmetic, PBKDF2 counter/ceiling arithmetic,
+and HMAC failure propagation in HKDF, PBKDF2 and OPAQUE-3DH. Successful wire and
+crypto transcript formats are unchanged; the reactor's public send API now
+explicitly rejects requests above its 4096-byte buffer capacity before writing.
+Generation exhaustion refuses reuse instead of wrapping. Callback-rejected
+initialization leaves supplied storage unchanged; outside callbacks, failed
+initialization establishes closed sentinels. Public extents, no overlap where
+required, single ownership and borrowed-buffer lifetimes remain preconditions.
+
+These are concrete API/callback/error-path defects. No stock-daemon unauthenticated
+remote memory-corruption exploit was established. Static network pools already
+existed; logical lifetime reuse was the problem. Heap-backed crypto, hosted
+POSIX/libc, P-256 global initialization ownership and stack/platform budgets
+remain target-admission blockers. The storage rename/fsync/retry integrity issue
+is separately OPEN in SECURITY.md; this audit changes no storage behavior.
+
+**Review and evidence.** Independent reviewers examined crypto, parser/RPC,
+network lifetime changes, test interception and documentation. Review caught a
+recursive `reactor_run` busy-loop, overly broad failed-init wording, missing
+OPAQUE test-object wiring and backend-specific mutation assumptions; each was
+corrected. OPAQUE retains the existing independently derived frozen v2 transcript
+vector, not only a same-implementation agreement test. New failure adapters stop
+bad copies/allocations or use of missing HMAC output at controlled assertions.
+Fortified-header substitution is disabled only for the injected crypto test
+object; the normal library keeps host hardening. A crash-only mutation and a
+compile-only mutation were discarded as evidence and their harnesses corrected.
+
+Confirmed through `tools/ci_local.sh`:
+
+- all 26 C99 targets on Darwin arm64 / Apple Clang 21;
+- all 26 on Linux aarch64 / Clang 18.1.3 and GCC 13.3 with ASan + UBSan;
+- the five new/extended boundary harnesses rechecked under GCC sanitizers after
+  the instrumentation/width fixes, and the final network harness rechecked again;
+- Linux GCC: 187/187 full-suite mutants rejected after fresh successful builds,
+  with two kqueue-specific cases explicitly skipped;
+- actual ELF32 ARM EABI5 / GCC 13.3 via QEMU 8.2.2: 276,504 crypto assertions;
+  separate fresh-build Argon2 allocation-wrap and PBKDF2 ceil-wrap mutations each
+  rejected by assertion marker and exit 1. This is hosted emulation, not a native
+  hardware, sanitizer, constant-time or freestanding result.
+
+The 47 new mutation cases require an assertion marker and exit 1; crashes, missing
+builds and timeouts do not count. The inherited runner gap for other legacy
+harnesses without assertion markers remains as recorded on 2026-09-24; do not
+infer all legacy rejections are assertion-based. The maximum PBKDF2 block-counter
+endpoint rests on the arithmetic argument, not a 137 GB test. Default 64-bit CI
+does not exercise the two ARM32 width-specific branches; ADR-006 records the
+reproduction procedure.
+
+README, SECURITY, the C99 plan, crypto specification and roadmap converge on the
+hosted/target distinction and audit scope. The exact patch and a scoped commit
+command are prepared for owner review; no audit commit or push is executed by
+this task, and the pre-existing staged `cats.json`/`top100.json` are excluded.
+
+**Final audit validation supplement (same 2026-09-25 entry).** Darwin Apple Clang
+21 completed the full mutation sweep: 187/187 rejected after fresh successful
+builds, with the two epoll-specific cases skipped. Across Linux and Darwin all
+47 new assertion-gated variants ran on their applicable backend. The mesh SIGPIPE
+test explicitly exercises its real send helper before kqueue can short-circuit
+on EOF; final review accepted that scope. All 16 doc-coherence guards passed.
+The exact patch reverse-check, append-only Decision Log check, CRLF preservation
+and unchanged Git index check accompany the artifact; unrelated staged JSON
+files remain untouched.

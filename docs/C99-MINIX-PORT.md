@@ -45,7 +45,7 @@ It is a separate experiment built around the proposed K=2 design (ADR-004): a lo
 two-party commit/reveal attempt (FB74, `K2_VDF_Soundness.md`), a repeated-work
 evaluator, a bounded pending inbox, an in-memory transfer ledger and POSIX
 networking/RPC. It builds as strict ISO C99 (`determ_c99_strict` in CMake; GCC and
-Clang), and CI runs 22 targets with each compiler, again under ASan + UBSan with GCC
+Clang), and CI runs 26 targets with each compiler, again under ASan + UBSan with GCC
 (crypto library included), plus an isolated mutation gate (`tools/ci_local.sh --c99` /
 `--c99-sanitize` / `--c99-mutants`). Against this plan it stands at:
 
@@ -73,6 +73,16 @@ judged against the decided specification and its test vectors, not against C++ b
 and the change goes design-and-prove first (DECISION-LOG doctrine). The C99 pending
 inbox already verifies the decided D23 preimage; the C++ reference will match it only
 when D23 re-lands soundly.
+
+**C99 memory/lifetime audit (2026-09-25).**
+[ADR-006](decisions/ADR-006-C99-Memory-Safety.md) records the pinned public-main
+baseline, concrete fixes, preconditions and evidence. The static reactor and mesh pools
+now carry immutable registration cookies, reject generation wrap and revalidate
+incarnations after callbacks. Codec/RPC sizes are preflighted, failed setup preserves
+closed sentinels, and crypto callers propagate HMAC failures. Hosted crypto allocation,
+stack budgets, P-256 initialization ownership and the platform boundary remain target
+admission work; neither these changes nor zeroing a pool prove complete memory safety.
+The consensus implementation order and open resource decisions remain unchanged.
 
 **Build note.** The root `Makefile` that briefly existed was never run by CI and did not
 build on Linux (`usleep` is not declared under POSIX.1-2008; it built on Darwin only); it

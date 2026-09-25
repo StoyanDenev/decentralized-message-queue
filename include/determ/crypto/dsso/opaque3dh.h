@@ -75,11 +75,14 @@
  * DApp, not wire-interop with other OPAQUE stacks, so the label prefix is the house
  * "DTM-DSSO-OPAQUE3DH-v2-" tag (RFC 9807 uses "OPAQUE-").
  *
- * FAIL-CLOSED edges (return -1, outputs untouched): NULL required args (both static
- * public keys included), an on-wire transcript field longer than
- * DETERM_OPAQUE3DH_MAX_FIELD, or a P-256 op that fails (off-curve/identity DH or an
- * uncompressible static key). Secret scratch (prk, handshake_secret, Km2/Km3, the
- * DH points) is secure-zeroed on every path.
+ * FAIL-CLOSED edges (return -1). NULL required args (both static public keys
+ * included) leave every output untouched, server_mac_ok included (C2-h). After
+ * argument validation the client sets server_mac_ok = 0 before any fallible step,
+ * and the byte outputs stay untouched on: an on-wire transcript field longer than
+ * DETERM_OPAQUE3DH_MAX_FIELD, a P-256 op that fails (off-curve/identity DH or an
+ * uncompressible static key), or an internal HMAC/allocation failure. Secret
+ * scratch (prk, handshake_secret, Km2/Km3, staged session keys and DH points) is
+ * secure-zeroed on every path. Callers must not use outputs after a failure.
  *
  * PERMANENCE: the domain tags + the encoding are permanent once a DSSO deployment
  * exists (login transcripts must reproduce). Any change is a "-v3" tag, never an

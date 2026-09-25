@@ -43,6 +43,383 @@ REJECT_CONFLICTING_ROOTS = """for(size_t i=0;i<n->record_count;i++) if(n->record
             }
     /* This model does not select between competing complete histories. */"""
 MUTANTS = [
+    # Audit regressions first: report instrumentation failures before the legacy sweep.
+    ('codec-size-preflight-wrap',
+     'test-c99-codec-bounds',
+     'src/wire/binary_codec.c',
+     'return prefix <= cap && length <= cap - prefix;',
+     'return prefix + length <= cap;'),
+    ('codec-pq-u32-addition',
+     'test-c99-codec-bounds',
+     'src/wire/binary_codec.c',
+     '        if (!bytes_fit(buf_cap, required, 4)) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;\n'
+     '        required += 4;\n'
+     '        if (tx->pq_auth_len > buf_cap - required) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;\n'
+     '        required += (size_t)tx->pq_auth_len;',
+     '        required += 4 + tx->pq_auth_len;\n'
+     '        if (buf_cap < required) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;'),
+    ('codec-dhf1-u32-addition',
+     'test-c99-codec-bounds',
+     'src/wire/binary_codec.c',
+     '    if (buf_cap < 40 || block_frame_len > buf_cap - 40) return '
+     'WIRE_CODEC_ERR_BUFFER_TOO_SMALL;\n'
+     '    size_t required = 40 + (size_t)block_frame_len;',
+     '    size_t required = 40 + block_frame_len;\n'
+     '    if (buf_cap < required) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;'),
+    ('codec-envelope-null-source',
+     'test-c99-codec-bounds',
+     'src/wire/binary_codec.c',
+     'if (payload_len > 0 && !payload) return WIRE_CODEC_ERR_INVALID_ARG;',
+     '/* mutant: missing payload pointer accepted */'),
+    ('codec-contrib-null-source',
+     'test-c99-codec-bounds',
+     'src/wire/binary_codec.c',
+     '(msg->view_shardtip_count > 0 && !msg->view_shardtip_list)',
+     '0 /* mutant: missing shardtip list accepted */'),
+    ('codec-status-null-source',
+     'test-c99-codec-bounds',
+     'src/wire/binary_codec.c',
+     'if (msg->genesis_len > 0 && !msg->genesis_hex) return WIRE_CODEC_ERR_INVALID_ARG;',
+     '/* mutant: missing genesis bytes accepted */'),
+    # Review 2026-09-25: exact-capacity and extent edges of the codec preflight.
+    ('codec-tx-base-capacity',
+     'test-c99-codec-bounds',
+     'src/wire/binary_codec.c',
+     '    size_t required = 128 + 1 + 2 + overflow + 1 + tx->from_len + 1 + tx->to_len + 64 + 32 + 32 + 4;\n'
+     '    if (buf_cap < required) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;\n',
+     '    size_t required = 128 + 1 + 2 + overflow + 1 + tx->from_len + 1 + tx->to_len + 64 + 32 + 32 + 4;\n'),
+    ('codec-tx-pq-prefix',
+     'test-c99-codec-bounds',
+     'src/wire/binary_codec.c',
+     '        if (!bytes_fit(buf_cap, required, 4)) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;\n',
+     ''),
+    ('codec-dhf1-short-capacity',
+     'test-c99-codec-bounds',
+     'src/wire/binary_codec.c',
+     'if (buf_cap < 40 || block_frame_len > buf_cap - 40)',
+     'if (block_frame_len > buf_cap - 40)'),
+    ('codec-chain-frame-extent',
+     'test-c99-codec-bounds',
+     'src/wire/binary_codec.c',
+     '    uint32_t flen = le_get_u32(blocks_data + off); off += 4;\n'
+     '    if (flen > total_len || off > total_len - flen) return WIRE_CODEC_ERR_TRUNCATED;\n',
+     '    uint32_t flen = le_get_u32(blocks_data + off); off += 4;\n'),
+    ('codec-dhf1-frame-extent',
+     'test-c99-codec-bounds',
+     'src/wire/binary_codec.c',
+     '    uint32_t flen = le_get_u32(headers_data + off); off += 4;\n'
+     '    if (flen > total_len || off > total_len - flen) return WIRE_CODEC_ERR_TRUNCATED;\n',
+     '    uint32_t flen = le_get_u32(headers_data + off); off += 4;\n'),
+    ('rpc-get-block-height-used',
+     'test-http-rpc',
+     'src/rpc/json_rpc.c',
+     'determ_json_token_to_uint64(request_json, h_tok, &target_height) != 0',
+     'determ_json_token_to_uint64(request_json, h_tok, &(uint64_t){0}) != 0'),
+    ('rpc-get-block-height-type',
+     'test-http-rpc',
+     'src/rpc/json_rpc.c',
+     'if (!h_tok || h_tok->type != JSON_TOK_PRIMITIVE ||',
+     'if (!h_tok ||'),
+    ('json-u64-overflow',
+     'test-http-rpc',
+     'src/wire/json_token.c',
+     'if (val > (UINT64_MAX - digit) / 10) return -1;',
+     '/* mutant: decimal overflow wraps */'),
+    ('json-count-int-range',
+     'test-http-rpc',
+     'src/wire/json_token.c',
+     ' || max_tokens > INT_MAX',
+     ''),
+    ('rpc-actual-output-length',
+     'test-http-rpc',
+     'src/rpc/json_rpc.c',
+     '    va_end(args);\n    return written < 0 || (size_t)written >= cap ? -1 : written;',
+     '    va_end(args);\n    return written; /* mutant: reports would-have-written length */'),
+    ('http-null-config-ownership',
+     'test-http-rpc',
+     'src/rpc/http_rpc_server.c',
+     '    if (!server) return -1;\n    memset(server, 0, sizeof(*server));',
+     '    if (!server || !config) return -1;\n    memset(server, 0, sizeof(*server));'),
+    ('http-accepted-setup-failure',
+     'test-c99-http-safety',
+     'src/rpc/http_rpc_server.c',
+     'if (prepare_client_socket(c_fd) != 0) {',
+     'if (prepare_client_socket(c_fd) == -2) {'),
+    ('json-string-terminator-room',
+     'test-http-rpc',
+     'src/wire/json_token.c',
+     'if (tok_len >= max_out) return -1;',
+     'if (tok_len > max_out) return -1;'),
+    ('http-safe-send-path',
+     'test-c99-http-safety',
+     'src/rpc/http_rpc_server.c',
+     'static ssize_t send_client_bytes(int fd, const void *data, size_t len) {\n'
+     '#ifdef MSG_NOSIGNAL\n'
+     '    return send(fd, data, len, MSG_NOSIGNAL);\n'
+     '#else\n'
+     '    return send(fd, data, len, 0); /* SO_NOSIGPIPE checked before publication. */\n'
+     '#endif\n'
+     '}',
+     'static ssize_t send_client_bytes(int fd, const void *data, size_t len) {\n'
+     '    return write(fd, data, len);\n'
+     '}'),
+    ('json-key-value-same-parent',
+     'test-http-rpc',
+     'src/wire/json_token.c',
+     'if (i + 1 < num_tokens && tokens[i + 1].parent == obj_idx)',
+     'if (i + 1 < num_tokens)'),
+    ('crypto-hkdf-extract-zero',
+     'test-c99-crypto-bounds',
+     'src/crypto/sha2/hkdf.c',
+     'if (determ_hmac_sha256(zero_salt, HASHLEN, ikm, ikmlen, prk) != 0) goto done;',
+     '(void)determ_hmac_sha256(zero_salt, HASHLEN, ikm, ikmlen, prk);'),
+    ('crypto-hkdf-extract-salt',
+     'test-c99-crypto-bounds',
+     'src/crypto/sha2/hkdf.c',
+     'if (determ_hmac_sha256(salt, saltlen, ikm, ikmlen, prk) != 0) goto done;',
+     '(void)determ_hmac_sha256(salt, saltlen, ikm, ikmlen, prk);'),
+    ('crypto-hkdf-expand',
+     'test-c99-crypto-bounds',
+     'src/crypto/sha2/hkdf.c',
+     'if (hmac_rc != 0) goto done;',
+     '(void)hmac_rc;'),
+    ('crypto-pbkdf2-u1',
+     'test-c99-crypto-bounds',
+     'src/crypto/sha2/pbkdf2.c',
+     'if (determ_hmac_sha256(pw, pwlen, msg, saltlen + 4, U) != 0) goto done;',
+     '(void)determ_hmac_sha256(pw, pwlen, msg, saltlen + 4, U);'),
+    ('crypto-pbkdf2-uj',
+     'test-c99-crypto-bounds',
+     'src/crypto/sha2/pbkdf2.c',
+     'if (determ_hmac_sha256(pw, pwlen, U, hLen, U) != 0) goto done;',
+     '(void)determ_hmac_sha256(pw, pwlen, U, hLen, U);'),
+    ('crypto-pbkdf2-counter',
+     'test-c99-crypto-bounds',
+     'src/crypto/sha2/pbkdf2.c',
+     'uint32_t block_index = i + 1u;',
+     'uint32_t block_index = i;'),
+    ('crypto-pbkdf2-ceil',
+     'test-c99-crypto-bounds',
+     'src/crypto/sha2/pbkdf2.c',
+     'blocks = outlen / hLen + (outlen % hLen != 0u);',
+     'blocks = outlen / hLen;'),
+    ('crypto-p256-xmd-size',
+     'test-c99-crypto-bounds',
+     'src/crypto/p256/p256.c',
+     'if (msglen > SIZE_MAX - 68u - dstlen) return -1;',
+     '/* MUTANT: no size preflight */'),
+    ('crypto-p256-derive-size',
+     'test-c99-crypto-bounds',
+     'src/crypto/p256/p256.c',
+     'if (seedlen > SIZE_MAX - 3u || infolen > SIZE_MAX - 3u - seedlen) return -1;',
+     '/* MUTANT: no size preflight */'),
+    ('crypto-p256-finalize-size',
+     'test-c99-crypto-bounds',
+     'src/crypto/p256/p256.c',
+     'if (inputlen > SIZE_MAX - 45u) return -1;',
+     '/* MUTANT: no size preflight */'),
+    ('crypto-balance-count',
+     'test-c99-crypto-bounds',
+     'src/crypto/pedersen/balance.c',
+     'if (n_out == SIZE_MAX || n_in > SIZE_MAX - n_out - 1u) return -1;',
+     '/* MUTANT: no count preflight */'),
+    ('crypto-balance-bytes',
+     'test-c99-crypto-bounds',
+     'src/crypto/pedersen/balance.c',
+     'if (cnt > SIZE_MAX / SC || cnt > SIZE_MAX / PT) return -1;',
+     '/* MUTANT: no byte preflight */'),
+    ('crypto-opaque-expand',
+     'test-c99-crypto-bounds',
+     'src/crypto/dsso/opaque3dh.c',
+     'if (determ_hmac_sha256(prk, NH, buf, off, t) != 0) goto done;',
+     'if (determ_hmac_sha256(prk, NH, buf, off, t) == -2) goto done;'),
+    ('crypto-opaque-extract',
+     'test-c99-crypto-bounds',
+     'src/crypto/dsso/opaque3dh.c',
+     'if (determ_hmac_sha256(zero_salt, NH, ikm, 99, prk) != 0) goto done;',
+     '(void)determ_hmac_sha256(zero_salt, NH, ikm, 99, prk);'),
+    ('crypto-opaque-server-mac',
+     'test-c99-crypto-bounds',
+     'src/crypto/dsso/opaque3dh.c',
+     'if (determ_hmac_sha256(km2, NH, pre_hash, NH, smac_tmp) != 0) goto done;',
+     '(void)determ_hmac_sha256(km2, NH, pre_hash, NH, smac_tmp);'),
+    ('crypto-opaque-server-expected',
+     'test-c99-crypto-bounds',
+     'src/crypto/dsso/opaque3dh.c',
+     'if (determ_hmac_sha256(km3, NH, pre_smac_hash, NH, cmac_tmp) != 0) goto done;',
+     '(void)determ_hmac_sha256(km3, NH, pre_smac_hash, NH, cmac_tmp);'),
+    ('crypto-opaque-client-expected',
+     'test-c99-crypto-bounds',
+     'src/crypto/dsso/opaque3dh.c',
+     'if (determ_hmac_sha256(km2, NH, pre_hash, NH, expect_smac) != 0) goto done;',
+     '(void)determ_hmac_sha256(km2, NH, pre_hash, NH, expect_smac);'),
+    ('crypto-opaque-client-mac',
+     'test-c99-crypto-bounds',
+     'src/crypto/dsso/opaque3dh.c',
+     'if (determ_hmac_sha256(km3, NH, pre_smac_hash, NH, mac_tmp) != 0) goto done;',
+     '(void)determ_hmac_sha256(km3, NH, pre_smac_hash, NH, mac_tmp);'),
+    ('crypto-opaque-early-auth',
+     'test-c99-crypto-bounds',
+     'src/crypto/dsso/opaque3dh.c',
+     'mac_matches = (determ_ct_memcmp(server_mac, expect_smac, NH) == 0) ? 1 : 0;',
+     'mac_matches = (determ_ct_memcmp(server_mac, expect_smac, NH) == 0) ? 1 : 0; *server_mac_ok '
+     '= mac_matches;'),
+    # Review 2026-09-25: first rejected sizes, the RFC 9380 length bound and
+    # the C2-h contract (NULL-argument rejection leaves server_mac_ok untouched).
+    ('crypto-p256-xmd-size-edge',
+     'test-c99-crypto-bounds',
+     'src/crypto/p256/p256.c',
+     'if (msglen > SIZE_MAX - 68u - dstlen) return -1;',
+     'if (msglen > SIZE_MAX - 67u - dstlen) return -1;'),
+    ('crypto-p256-finalize-size-edge',
+     'test-c99-crypto-bounds',
+     'src/crypto/p256/p256.c',
+     'if (inputlen > SIZE_MAX - 45u) return -1;',
+     'if (inputlen > SIZE_MAX - 44u) return -1;'),
+    ('crypto-p256-xmd-length-bound',
+     'test-c99-crypto-bounds',
+     'src/crypto/p256/p256.c',
+     'if (outlen == 0 || outlen > 8160 || dstlen > 255) return -1;',
+     'if (outlen == 0 || outlen > 8192 || dstlen > 255) return -1;'),
+    ('crypto-opaque-null-untouched',
+     'test-c99-crypto-bounds',
+     'src/crypto/dsso/opaque3dh.c',
+     '    /* C2-h: a NULL-argument rejection leaves every output untouched,\n',
+     '    if (server_mac_ok) *server_mac_ok = 0; /* mutant: reset before validation */\n'
+     '    /* C2-h: a NULL-argument rejection leaves every output untouched,\n'),
+    ('crypto-opaque-failure-reset',
+     'test-c99-crypto-bounds',
+     'src/crypto/dsso/opaque3dh.c',
+     '    *server_mac_ok = 0;   /* every later failure leaves 0, never a stale 1 */\n',
+     '    /* mutant: a failure after validation leaves the caller\'s value */\n'),
+    # Review 2026-09-25: network guards that previously had no killing test.
+    ('reactor-send-api-bound',
+     'test-c99-network-safety',
+     'src/net/reactor.c',
+     'if (!reactor || fd < 0 || !data || len == 0 || len > REACTOR_BUFFER_CAPACITY) return -1;',
+     'if (!reactor || fd < 0 || !data || len == 0) return -1;'),
+    ('reactor-flush-sigpipe',
+     'test-c99-network-safety',
+     'src/net/reactor.c',
+     '        ssize_t n = reactor_socket_send(slot->fd, slot->tx_buf, slot->tx_len);\n',
+     '        ssize_t n = send(slot->fd, (const char *)slot->tx_buf, slot->tx_len, 0);\n'),
+    ('reactor-run-dispatch-guard',
+     'test-c99-network-safety',
+     'src/net/reactor.c',
+     'if (!reactor || reactor_dispatching || reactor->loop.poll_fd < 0) return;',
+     'if (!reactor || reactor->loop.poll_fd < 0) return;'),
+    ('mesh-connect-failure-silent',
+     'test-c99-network-safety',
+     'src/net/peer_mesh.c',
+     'static void release_unpublished_peer(peer_mesh_t *mesh, int slot) {\n',
+     'static void release_unpublished_peer(peer_mesh_t *mesh, int slot) {\n'
+     '    if (mesh) { peer_mesh_disconnect(mesh, slot); return; } /* mutant: announce */\n'),
+    ('k2-contributor-connect-preconditions',
+     'test-c99-network-safety',
+     'src/net/k2_net.c',
+     'if (!cont || !ip_addr || cont->conn.fd >= 0 || cont->conn.connected || cont->loop.poll_fd < 0) return -1;',
+     'if (!cont || !ip_addr) return -1;'),
+    ('reactor-stale-cookie',
+     'test-c99-network-safety',
+     'src/net/reactor.c',
+     'slot->state != REACTOR_SLOT_UNUSED && slot->registration == cookie ? slot : NULL',
+     'slot->state != REACTOR_SLOT_UNUSED ? slot : NULL'),
+    ('mesh-stale-cookie',
+     'test-c99-network-safety',
+     'src/net/peer_mesh.c',
+     'peer->state != PEER_STATE_FREE && peer->registration == registration ? index : -1',
+     'peer->state != PEER_STATE_FREE ? index : -1'),
+    ('mesh-callback-incarnation',
+     'test-c99-network-safety',
+     'src/net/peer_mesh.c',
+     'if (!mesh->running || registration_index(mesh, registration) != peer_idx) return;',
+     '(void)registration; /* mutant: continue processing the retired frame */'),
+    ('reactor-read-incarnation',
+     'test-c99-network-safety',
+     'src/net/reactor.c',
+     'while (find_registration(reactor, registration) == slot) {\n        ssize_t n = recv',
+     'while (slot->state == REACTOR_SLOT_CONNECTED && registration != 0) {\n'
+     '        ssize_t n = recv'),
+    ('reactor-read-write-incarnation',
+     'test-c99-network-safety',
+     'src/net/reactor.c',
+     'if (find_registration(reactor, registration) == slot &&\n            slot->state',
+     'if (slot->state'),
+    ('reactor-retirement-before-callback',
+     'test-c99-network-safety',
+     'src/net/reactor.c',
+     '    memset(slot, 0, sizeof(*slot));\n    slot->fd = -1;',
+     '    /* mutant: retain slot state through callback */\n    slot->fd = -1;'),
+    ('mesh-generation-exhaustion',
+     'test-c99-network-safety',
+     'src/net/peer_mesh.c',
+     'if (!mesh || !host || !mesh->running || mesh->next_generation == (UINTPTR_MAX >> '
+     'PEER_COOKIE_BITS)) return -1;',
+     'if (!mesh || !host || !mesh->running) return -1;'),
+    ('reactor-queue-room',
+     'test-c99-network-safety',
+     'src/net/reactor.c',
+     'len > REACTOR_BUFFER_CAPACITY - slot->tx_len',
+     'len > REACTOR_BUFFER_CAPACITY - slot->tx_len + 1U'),
+    ('reactor-duplicate-registration',
+     'test-c99-network-safety',
+     'src/net/reactor.c',
+     'if (find_slot_by_fd(reactor, client_fd) || reactor_prepare_socket(client_fd) != 0)',
+     'if (reactor_prepare_socket(client_fd) != 0)'),
+    ('mesh-null-init-sentinels',
+     'test-c99-network-safety',
+     'src/net/peer_mesh.c',
+     'if (!mesh || mesh_dispatching) return -1;',
+     'if (!mesh || !cfg || mesh_dispatching) return -1;'),
+    ('k2-aggregator-close-sentinels',
+     'test-c99-network-safety',
+     'src/net/k2_net.c',
+     'determ_secure_zero(agg, sizeof(*agg));\n'
+     '    agg->listen_fd = -1;\n'
+     '    agg->peer.fd = -1;\n'
+     '    agg->loop.poll_fd = -1;',
+     'determ_secure_zero(agg, sizeof(*agg));'),
+    ('k2-contributor-close-sentinels',
+     'test-c99-network-safety',
+     'src/net/k2_net.c',
+     'determ_secure_zero(cont, sizeof(*cont));\n'
+     '    cont->conn.fd = -1;\n'
+     '    cont->loop.poll_fd = -1;',
+     'determ_secure_zero(cont, sizeof(*cont));'),
+    ('reactor-sigpipe',
+     'test-c99-network-safety',
+     'src/net/reactor.c',
+     'static ssize_t reactor_socket_send(int fd, const void *data, size_t len) {\n'
+     '    int flags = 0;\n'
+     '#ifdef MSG_NOSIGNAL\n'
+     '    flags = MSG_NOSIGNAL;\n'
+     '#endif\n'
+     '    return send(fd, (const char *)data, len, flags);\n'
+     '}',
+     'static ssize_t reactor_socket_send(int fd, const void *data, size_t len) {\n'
+     '#ifdef SO_NOSIGPIPE\n'
+     '    int no = 0;\n'
+     '    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &no, sizeof(no));\n'
+     '#endif\n'
+     '    return send(fd, data, len, 0);\n'
+     '}'),
+    ('mesh-sigpipe',
+     'test-c99-network-safety',
+     'src/net/peer_mesh.c',
+     'static ssize_t peer_socket_send(int fd, const void *data, size_t len) {\n'
+     '    int flags = 0;\n'
+     '#ifdef MSG_NOSIGNAL\n'
+     '    flags = MSG_NOSIGNAL;\n'
+     '#endif\n'
+     '    return send(fd, data, len, flags);\n'
+     '}',
+     'static ssize_t peer_socket_send(int fd, const void *data, size_t len) {\n'
+     '#ifdef SO_NOSIGPIPE\n'
+     '    int no = 0;\n'
+     '    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &no, sizeof(no));\n'
+     '#endif\n'
+     '    return send(fd, data, len, 0);\n'
+     '}'),
     ('http-body-capacity', 'test-http-rpc', 'src/rpc/http_rpc_server.c', 'if (value > limit / 10 || (value == limit / 10 && digit > limit % 10)) return 413;', '(void)limit; /* mutant: unchecked length accumulation */'),
     ('http-header-case', 'test-http-rpc', 'src/rpc/http_rpc_server.c', "if (c >= 'A' && c <= 'Z') c = (uint8_t)(c + ('a' - 'A'));", '/* mutant: case-sensitive header comparison */'),
     ('http-header-name', 'test-http-rpc', 'src/rpc/http_rpc_server.c', 'if (len != strlen(expected)) return 0;', 'if (len < strlen(expected)) return 0;\n    name += len - strlen(expected);\n    len = strlen(expected);'),
@@ -50,7 +427,7 @@ MUTANTS = [
     ('http-transfer-encoding', 'test-http-rpc', 'src/rpc/http_rpc_server.c', 'if (http_field_is(data + pos, colon - pos, "transfer-encoding")) return 400;', '/* mutant: accept transfer encoding with content length */'),
     ('http-decimal-length', 'test-http-rpc', 'src/rpc/http_rpc_server.c', "if (data[i] < '0' || data[i] > '9') return 400;", '/* mutant: accept nondecimal digits */'),
     ('http-reserved-byte', 'test-http-rpc', 'src/rpc/http_rpc_server.c', 'const size_t limit = (HTTP_RPC_BUF_SIZE - 1) - header_len;', 'const size_t limit = HTTP_RPC_BUF_SIZE - header_len;'),
-    ('http-init-client-fds', 'test-http-rpc', 'src/rpc/http_rpc_server.c', '        server->clients[i].fd = -1;\n        server->clients[i].state = HTTP_CLIENT_INACTIVE;\n    }\n    server->port', '        server->clients[i].state = HTTP_CLIENT_INACTIVE;\n    }\n    server->port'),
+    ('http-init-client-fds', 'test-http-rpc', 'src/rpc/http_rpc_server.c', '        server->clients[i].fd = -1;\n        server->clients[i].state = HTTP_CLIENT_INACTIVE;\n    }\n    if (!config)', '        server->clients[i].state = HTTP_CLIENT_INACTIVE;\n    }\n    if (!config)'),
     ('http-incomplete-body', 'test-http-rpc', 'src/rpc/http_rpc_server.c', 'if (c->rx_len < header_len + content_len) {', 'if (0) {'),
     ('pending-signature', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'if (determ_ed25519_verify(sender, signing, sizeof(signing), tx.sig) != 0)', 'if (0)'),
     ('pending-small-order', 'test-pending-transfer', 'src/ledger/pending_transfer.c', 'if (determ_ed25519_point_has_small_order(sender) != 0)', 'if (0)'),
@@ -256,8 +633,8 @@ MUTANTS = [
     ("mesh-dedup-type", "test-peer-mesh", "src/net/peer_mesh.c",
      "determ_sha256_update(&sha, &msg_type, 1);", "/* mutant: key covers the payload only */"),
     ("mesh-accept-once", "test-peer-mesh", "src/net/peer_mesh.c",
-     "net_event_loop_add(&mesh->loop, cfd, NET_EV_READ, (void*)(uintptr_t)slot);\n        peer_mesh_send_hello(mesh, slot);",
-     "net_event_loop_add(&mesh->loop, cfd, NET_EV_READ, (void*)(uintptr_t)slot);\n        peer_mesh_send_hello(mesh, slot);\n        return;"),
+     "if (net_event_loop_add(&mesh->loop, cfd, NET_EV_READ, (void *)peer->registration) != 0 ||\n            peer_mesh_send_hello(mesh, slot) != 0) peer_mesh_disconnect(mesh, slot);",
+     "if (net_event_loop_add(&mesh->loop, cfd, NET_EV_READ, (void *)peer->registration) != 0 ||\n            peer_mesh_send_hello(mesh, slot) != 0) peer_mesh_disconnect(mesh, slot);\n        return;"),
     ("loop-epoll-edge-triggered", "test-peer-mesh", "src/net/event_loop.c",
      "ev.events |= EPOLLERR | EPOLLHUP; /* level-triggered, as mod() and kqueue */",
      "ev.events |= EPOLLERR | EPOLLHUP | EPOLLET;"),
@@ -389,22 +766,38 @@ MUTANTS = [
     ("sq-begin-total", "test-stake-quorum", "src/consensus/stake_quorum.c",
      "if (snapshot->total == 0U) return SQ_ERR_SNAPSHOT; /* SQ_BEGIN_TOTAL */",
      "/* mutant: zero total accepted */"),
+
 ]
 
 # Targets whose harness reports every failed assertion with a marker line and
 # exit status 1. For these a mutant counts as rejected only when the marker and
 # exit 1 both appear, so a crash, sanitizer abort or signal is never a kill
 # (the recorded gap for the other harnesses: DECISION-LOG 2026-09-24).
-ASSERTION_MARKERS = {"test-stake-quorum": "SQ-TEST ASSERTION FAILED"}
+ASSERTION_MARKERS = {
+    "test-stake-quorum": "SQ-TEST ASSERTION FAILED",
+    "test-c99-crypto-bounds": "C99-CRYPTO-BOUNDS ASSERTION FAILED",
+    "test-c99-codec-bounds": "ASSERTION FAILED:",
+    "test-c99-http-safety": "ASSERTION FAILED:",
+    "test-http-rpc": "ASSERTION FAILED:",
+    "test-c99-network-safety": "NETWORK_SAFETY_ASSERT:",
+}
 
 
-# Cases whose mutated code is compiled for one event-loop backend only; on the
-# other backends the mutation is not compiled, so the case is skipped.
-EPOLL_ONLY = ("loop-epoll-edge-triggered",)
-KQUEUE_ONLY = ("loop-kqueue-write-kept",)
+# Cases observable on one event-loop backend only; on the other backends the
+# mutation is either not compiled or has no observable effect, so the case is
+# skipped there rather than counted.
+#  - reactor-read-write-incarnation: kqueue reports READ and WRITE as separate
+#    events, so the combined-event path it breaks does not arise.
+#  - reactor-flush-sigpipe: kqueue hosts also set SO_NOSIGPIPE at registration,
+#    so a plain send() cannot raise SIGPIPE there.
+EPOLL_ONLY = ("loop-epoll-edge-triggered", "reactor-read-write-incarnation",
+              "reactor-flush-sigpipe")
+# epoll ADD already rejects a duplicate FD (EEXIST); kqueue EV_ADD replaces it.
+# Removing the explicit registration guard is observable only on kqueue here.
+KQUEUE_ONLY = ("loop-kqueue-write-kept", "reactor-duplicate-registration")
 
 # The targets tools/ci_c99.sh lists in C99_UNIX (POSIX transport only).
-POSIX_TARGETS = ("test-dsf-k2-duel", "test-k2-net-rpc", "test-peer-mesh", "test-block-store",
+POSIX_TARGETS = ("test-c99-network-safety", "test-c99-http-safety", "test-dsf-k2-duel", "test-k2-net-rpc", "test-peer-mesh", "test-block-store",
                  "test-http-rpc", "test-ledger-state", "fuzz-ledger", "test-triple-entry-ledger",
                  "test-rpc-shard-routing", "test-rpc-pending-transfer", "determ-node")
 

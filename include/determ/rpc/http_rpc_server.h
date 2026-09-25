@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
- * Bare-Metal C99 Non-Blocking HTTP/1.1 JSON-RPC Server Transport.
+ * Hosted C99 Non-Blocking HTTP/1.1 JSON-RPC Server Transport.
  * Zero-allocation, zero third-party dependencies (no libcurl, no libevent).
  */
 
@@ -53,7 +53,10 @@ typedef struct {
 } http_rpc_server_t;
 
 /*
- * Initialize the HTTP RPC server.
+ * Initialize a fresh (not live) HTTP RPC server. The caller owns its storage and
+ * all referenced context objects for the entire server lifetime. Lifecycle calls
+ * are serialized by the event-loop owner. Do not initialize a live server.
+ * A non-NULL server is safe to close after any init result, including NULL config.
  * Returns 0 on success, negative error code on failure.
  */
 int http_rpc_server_init(http_rpc_server_t *server, const http_rpc_config_t *config);

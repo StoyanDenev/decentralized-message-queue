@@ -60,7 +60,9 @@ void determ_sha512(const uint8_t *data, size_t len, uint8_t out[64]);
  * left unwritten; a long key never enters size arithmetic — `keylen > block`
  * hashes the key into the fixed-size k0 block). Secret-bearing intermediates are zeroized before
  * return. (The int return is backward source-compatible: existing statement-call
- * sites that ignore it still compile and behave identically for valid inputs.) */
+ * sites that ignore it still compile and behave identically for valid inputs.)
+ * `out` may alias `msg`: the message is consumed before `out` is written, and
+ * PBKDF2's U_j = HMAC(P, U_{j-1}) relies on it. */
 int determ_hmac_sha256(const uint8_t *key, size_t keylen,
                        const uint8_t *msg, size_t msglen, uint8_t out[32]);
 int determ_hmac_sha512(const uint8_t *key, size_t keylen,
@@ -68,14 +70,19 @@ int determ_hmac_sha512(const uint8_t *key, size_t keylen,
 
 /* HKDF-SHA-256 (RFC 5869): extract-then-expand. `salt`/`info` may be NULL when
  * their length is 0 (a NULL/zero salt is treated as HashLen zero bytes per the
- * RFC). Returns 0 on success, -1 if `outlen` exceeds 255*32 = 8160 bytes. */
+ * RFC). Returns 0 on success, -1 on a length bound/overflow, allocation failure,
+ * or HMAC failure. On failure output may contain a partial result and must not
+ * be used as a derived key. Secret scratch is wiped on internal failure. */
 int determ_hkdf_sha256(const uint8_t *salt, size_t saltlen,
                        const uint8_t *ikm,  size_t ikmlen,
                        const uint8_t *info, size_t infolen,
                        uint8_t *out, size_t outlen);
 
 /* PBKDF2-HMAC-SHA-256 (RFC 8018 / PKCS #5 v2.1). `iters` must be >= 1. `pw`/`salt`
- * may be NULL when their length is 0. Returns 0 on success, -1 if iters == 0. */
+ * may be NULL when their length is 0. Returns 0 on success, -1 on zero iters,
+ * an unrepresentable/RFC-forbidden length, allocation failure or HMAC failure.
+ * On failure output may contain a partial result and must not be used as a key.
+ * Secret scratch is wiped on internal failure. */
 int determ_pbkdf2_hmac_sha256(const uint8_t *pw,   size_t pwlen,
                               const uint8_t *salt, size_t saltlen,
                               uint32_t iters, uint8_t *out, size_t outlen);

@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
- * Core Zero-Dependency C99 Native Event Loop Reactor.
+ * Hosted C99 Native Event Loop Reactor.
  * Single-threaded I/O multiplexer over net_event_loop_t: epoll on Linux,
  * kqueue on macOS/BSD. Other platforms get the event loop's unsupported stub,
  * which registers nothing and reports no events.
@@ -45,6 +45,7 @@ typedef void (*reactor_error_fn)(int fd, int err, void *user_data);
 
 typedef struct {
     int                  fd;
+    uintptr_t            registration; /* captured event identity; meaningful only while state != REACTOR_SLOT_UNUSED */
     reactor_slot_state_t state;
     uint32_t             registered_events; /* NET_EV_READ | NET_EV_WRITE */
 
@@ -66,12 +67,25 @@ typedef struct {
     net_event_loop_t  loop;
     reactor_socket_t  slots[REACTOR_MAX_SOCKETS];
     size_t            active_count;
+    uintptr_t         next_generation; /* never wraps: at UINTPTR_MAX >> 8 new registrations are refused */
     bool              running;
 } reactor_t;
 
 /*
- * Initialize the reactor and its underlying OS multiplexer (kqueue / epoll).
+ * Initialize the reactor and its underlying OS multiplexer (kqueue / epoll) in
+ * fresh or previously destroyed storage (never a live reactor).
  * Returns 0 on success, negative error code on failure.
+ *
+ * Ownership: one thread owns every reactor and peer mesh in the process. The
+ * nested-dispatch guard is a single module-wide flag, so using a reactor from a
+ * second thread is unsupported, not merely unsynchronized. That owner serializes
+ * all calls and does not modify slot/cursor fields directly.
+ * Initialization, stepping and running of any reactor from inside a callback are
+ * refused and leave the supplied storage unchanged (on fresh zero-filled storage
+ * such a refusal establishes no descriptor sentinels: do not close it then).
+ * Outside callbacks, a failed init leaves descriptor sentinels safe to close.
+ * Registrations draw from a generation counter that is refused rather than
+ * wrapped at UINTPTR_MAX >> 8 (2^24 - 1 registrations on a 32-bit host).
  */
 int reactor_init(reactor_t *reactor);
 
@@ -99,6 +113,7 @@ int reactor_register_client(reactor_t *reactor,
  * Send data over a registered socket.
  * If socket would block (EAGAIN/EWOULDBLOCK), remaining bytes are queued
  * in the static tx_buf and write readiness is monitored.
+ * Requests above REACTOR_BUFFER_CAPACITY are rejected before any write.
  * Returns bytes accepted/sent, or -1 on error.
  */
 int reactor_send(reactor_t *reactor, int fd, const void *data, size_t len);
@@ -121,6 +136,9 @@ void reactor_run(reactor_t *reactor);
 void reactor_stop(reactor_t *reactor);
 
 /*
+ * Retire a registered socket before invoking on_close; callbacks may register
+ * a replacement. RX pointers are borrowed and remain valid only until callback
+ * return or an operation that closes/reuses their slot, whichever happens first.
  * Close a registered socket and free its static slot.
  */
 void reactor_close_fd(reactor_t *reactor, int fd);

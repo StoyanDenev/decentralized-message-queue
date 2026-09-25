@@ -146,13 +146,17 @@ static int bounded_poll_ms(uint64_t start, uint64_t duration, int requested) {
     return requested < 0 || requested > remaining ? remaining : requested;
 }
 
-static void suppress_sigpipe(int fd) {
+static int suppress_sigpipe(int fd) {
 #ifdef SO_NOSIGPIPE
     int value = 1;
-    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &value, sizeof(value));
+    if (setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &value, sizeof(value)) != 0) return -1;
+#elif defined(MSG_NOSIGNAL)
+    (void)fd;
 #else
     (void)fd;
+    return -1;
 #endif
+    return 0;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -164,6 +168,7 @@ int k2_aggregator_init(k2_aggregator_t *agg, uint16_t port) {
     memset(agg, 0, sizeof(*agg));
     agg->listen_fd = -1;
     agg->peer.fd = -1;
+    agg->loop.poll_fd = -1;
     agg->port = port;
 
     if (duel_state_init(&agg->duel_sm) != DUEL_SUCCESS) {
@@ -208,6 +213,7 @@ int k2_aggregator_init(k2_aggregator_t *agg, uint16_t port) {
     agg->listen_fd = s;
     if (net_event_loop_add(&agg->loop, s, NET_EV_READ, (void *)(intptr_t)1) != 0) {
         close(s);
+        agg->listen_fd = -1;
         net_event_loop_close(&agg->loop);
         return -1;
     }
@@ -302,7 +308,7 @@ int k2_aggregator_poll(k2_aggregator_t *agg, int timeout_ms) {
                     return fail_attempt(agg, DUEL_ERR_INVALID_STATE);
                 }
                 net_socket_set_nodelay(cfd);
-                suppress_sigpipe(cfd);
+                if (suppress_sigpipe(cfd) != 0) { close(cfd); return fail_attempt(agg, DUEL_ERR_INVALID_STATE); }
                 agg->peer.fd = cfd;
                 agg->peer.connected = true;
                 agg->peer.rx_cursor = 0;
@@ -401,6 +407,9 @@ void k2_aggregator_close(k2_aggregator_t *agg) {
     }
     net_event_loop_close(&agg->loop);
     determ_secure_zero(agg, sizeof(*agg));
+    agg->listen_fd = -1;
+    agg->peer.fd = -1;
+    agg->loop.poll_fd = -1;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -415,14 +424,14 @@ int k2_contributor_init(k2_contributor_t *cont) {
 }
 
 int k2_contributor_connect(k2_contributor_t *cont, const char *ip_addr, uint16_t port) {
-    if (!cont || !ip_addr) return -1;
+    if (!cont || !ip_addr || cont->conn.fd >= 0 || cont->conn.connected || cont->loop.poll_fd < 0) return -1;
 
     int s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) return -1;
 
     net_socket_set_reuseaddr(s);
     net_socket_set_nodelay(s);
-    suppress_sigpipe(s);
+    if (suppress_sigpipe(s) != 0) { close(s); return -1; }
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -585,4 +594,6 @@ void k2_contributor_close(k2_contributor_t *cont) {
     }
     net_event_loop_close(&cont->loop);
     determ_secure_zero(cont, sizeof(*cont));
+    cont->conn.fd = -1;
+    cont->loop.poll_fd = -1;
 }

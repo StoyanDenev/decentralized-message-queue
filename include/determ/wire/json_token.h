@@ -45,6 +45,11 @@ typedef struct {
 /*
  * Parse json_str in-place into tokens array.
  * Returns count of parsed tokens on success, or negative determ_json_err_t.
+ * max_tokens must be <= INT_MAX because parent indices and the result are int.
+ * Tokens borrow the original input: conversion/search callers must supply tokens
+ * from a successful parse and keep the complete input extent alive and immutable.
+ * The tokenizer does not validate the complete JSON grammar; callers admitting
+ * state changes must additionally validate their request grammar.
  */
 int determ_json_parse(const char *json_str, size_t len,
                       determ_json_tok_t *tokens, size_t max_tokens);
@@ -74,7 +79,8 @@ int determ_json_token_to_string(const char *json_str, const determ_json_tok_t *t
 
 /*
  * Parse unsigned integer from primitive/number token.
- * Returns 0 on success, -1 on parse failure.
+ * Returns 0 on success, -1 on empty/nondecimal input or uint64_t overflow.
+ * out_val is unchanged on failure.
  */
 int determ_json_token_to_uint64(const char *json_str, const determ_json_tok_t *tok, uint64_t *out_val);
 

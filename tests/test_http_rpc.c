@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
- * Test Suite: Bare-Metal C99 HTTP/1.1 JSON-RPC Server Transport
+ * Test Suite: Hosted C99 HTTP/1.1 JSON-RPC Server Transport
  */
 
 #ifndef _POSIX_C_SOURCE
@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <limits.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -556,9 +557,130 @@ static void test_http_bounded_post_framing(void) {
     TEST_PASS("test_http_bounded_post_framing");
 }
 
+
+/* Public API error paths must establish closed ownership before returning. */
+static void test_http_null_config(void) {
+    static http_rpc_server_t server;
+    memset(&server, 0, sizeof(server));
+    TEST_ASSERT(http_rpc_server_init(&server, NULL) < 0);
+    TEST_ASSERT(server.server_fd == -1);
+    for (size_t i = 0; i < HTTP_RPC_MAX_CLIENTS; ++i) {
+        TEST_ASSERT(server.clients[i].fd == -1);
+        TEST_ASSERT(server.clients[i].state == HTTP_CLIENT_INACTIVE);
+    }
+    http_rpc_server_close(&server);
+    http_rpc_server_close(&server);
+    TEST_PASS("test_http_null_config");
+}
+
+static void test_rpc_numeric_and_output_bounds(void) {
+    static const char maximum[] = "18446744073709551615";
+    static const char *bad_numbers[] = {
+        "18446744073709551616", "184467440737095516159", "-1", "1x", ""
+    };
+    determ_json_tok_t token = { JSON_TOK_PRIMITIVE, 0, sizeof(maximum) - 1, 0, -1 };
+    uint64_t value = 17;
+    TEST_ASSERT(determ_json_token_to_uint64(maximum, &token, &value) == 0);
+    TEST_ASSERT(value == UINT64_MAX);
+    for (size_t i = 0; i < sizeof(bad_numbers) / sizeof(bad_numbers[0]); ++i) {
+        token.end = strlen(bad_numbers[i]); value = 17;
+        TEST_ASSERT(determ_json_token_to_uint64(bad_numbers[i], &token, &value) == -1);
+        TEST_ASSERT(value == 17);
+    }
+    char small[8] = "intact";
+    token.start = 0; token.end = 3;
+    TEST_ASSERT(determ_json_token_to_string("abc", &token, small, 3) == -1);
+    TEST_ASSERT(strcmp(small, "intact") == 0);
+    TEST_ASSERT(determ_json_token_to_string("abc", &token, small, 4) == 0);
+    TEST_ASSERT(strcmp(small, "abc") == 0);
+    memcpy(small, "intact", 7);
+    token.start = 1; token.end = 0;
+    TEST_ASSERT(determ_json_token_to_string("", &token, small, sizeof(small)) == -1);
+    TEST_ASSERT(strcmp(small, "intact") == 0);
+    token.start = 0; token.end = SIZE_MAX;
+    TEST_ASSERT(determ_json_token_to_string("", &token, small, sizeof(small)) == -1);
+    determ_json_tok_t tokens[8];
+    TEST_ASSERT(determ_json_parse("{}", 2, tokens, (size_t)INT_MAX + 1U) == JSON_ERR_INVAL);
+
+    /* The legacy tokenizer accepts this malformed object plus a trailing
+     * number. A key without an in-object value must not consume that number.
+     * The supplied extent deliberately excludes any terminating NUL. */
+    const char malformed[] = "{\"method\":\"get_block\",\"params\":{\"height\"}}123";
+    char raw[sizeof(malformed) - 1], response[4096];
+    memcpy(raw, malformed, sizeof(raw));
+    int count = determ_json_parse(raw, sizeof(raw), tokens, 8);
+    TEST_ASSERT(count > 0);
+    const determ_json_tok_t *params = determ_json_find_key(raw, tokens, (size_t)count, &tokens[0], "params");
+    TEST_ASSERT(params != NULL);
+    TEST_ASSERT(determ_json_find_key(raw, tokens, (size_t)count, params, "height") == NULL);
+    int n = rpc_dispatch_context(raw, sizeof(raw), NULL, response, sizeof(response));
+    TEST_ASSERT(n > 0 && strstr(response, "\"code\":-32602") != NULL);
+    const char *bad_requests[] = {
+        "{\"method\":\"get_block\",\"params\":{\"height\":18446744073709551616}}",
+        "{\"method\":\"get_block\",\"params\":{\"height\":-1}}",
+        "{\"method\":\"get_block\",\"params\":{\"height\":12x}}"
+    };
+    for (size_t i = 0; i < sizeof(bad_requests) / sizeof(bad_requests[0]); ++i) {
+        n = rpc_dispatch_context(bad_requests[i], strlen(bad_requests[i]), NULL, response, sizeof(response));
+        TEST_ASSERT(n > 0 && strstr(response, "\"code\":-32602") != NULL);
+    }
+    const char *methods[] = { "get_status", "get_height", "get_block", "get_vdf_stats",
+                              "get_difficulty", "get_peer_info", "get_duel_state", "unknown" };
+    for (size_t i = 0; i < sizeof(methods) / sizeof(methods[0]); ++i) {
+        char request[128], exact[4096];
+        int q = snprintf(request, sizeof(request), "{\"method\":\"%s\",\"id\":1}", methods[i]);
+        TEST_ASSERT(q > 0 && (size_t)q < sizeof(request));
+        n = rpc_dispatch_context(request, (size_t)q, NULL, response, sizeof(response));
+        TEST_ASSERT(n > 0 && (size_t)n == strlen(response));
+        TEST_ASSERT(rpc_dispatch_context(request, (size_t)q, NULL, exact, (size_t)n + 1) == n);
+        TEST_ASSERT(strcmp(exact, response) == 0);
+        TEST_ASSERT(rpc_dispatch_context(request, (size_t)q, NULL, exact, (size_t)n) == -1);
+        TEST_ASSERT(rpc_dispatch_context(request, (size_t)q, NULL, exact, 1) == -1);
+    }
+    TEST_PASS("test_rpc_numeric_and_output_bounds");
+}
+
+/* get_block must return the requested height, not the default block 0, and must
+ * refuse a non-numeric height token (review 2026-09-25). */
+static void test_rpc_get_block_selects_height(void) {
+    char dir[] = "/tmp/determ-rpc-height-XXXXXX";
+    char rm_cmd[96];
+    static const uint8_t p0[] = "block-zero", p1[] = "block-one";
+    uint8_t h0[32], h1[32];
+    block_store_t store;
+    rpc_context_t ctx;
+    char response[4096];
+    TEST_ASSERT(mkdtemp(dir) != NULL);
+    TEST_ASSERT(snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf %s", dir) < (int)sizeof(rm_cmd));
+    TEST_ASSERT(block_store_open(&store, dir) == 0);
+    memset(h0, 0x10, sizeof(h0));
+    memset(h1, 0x11, sizeof(h1));
+    TEST_ASSERT(block_store_append_block(&store, 0, h0, p0, sizeof(p0) - 1) == 0);
+    TEST_ASSERT(block_store_append_block(&store, 1, h1, p1, sizeof(p1) - 1) == 0);
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.store = &store;
+    static const char q1[] = "{\"method\":\"get_block\",\"params\":{\"height\":1},\"id\":3}";
+    int n = rpc_dispatch_context(q1, sizeof(q1) - 1, &ctx, response, sizeof(response));
+    TEST_ASSERT(n > 0 && strstr(response, "\"height\":1,") != NULL);
+    TEST_ASSERT(strstr(response, "626c6f636b2d6f6e65") != NULL);     /* "block-one" */
+    TEST_ASSERT(strstr(response, "626c6f636b2d7a65726f") == NULL);   /* "block-zero" */
+    static const char q2[] = "{\"method\":\"get_block\",\"params\":{\"height\":2},\"id\":3}";
+    n = rpc_dispatch_context(q2, sizeof(q2) - 1, &ctx, response, sizeof(response));
+    TEST_ASSERT(n > 0 && strstr(response, "\"code\":-32004") != NULL);
+    static const char q3[] = "{\"method\":\"get_block\",\"params\":{\"height\":\"1\"},\"id\":3}";
+    n = rpc_dispatch_context(q3, sizeof(q3) - 1, &ctx, response, sizeof(response));
+    TEST_ASSERT(n > 0 && strstr(response, "\"code\":-32602") != NULL);
+    block_store_close(&store);
+    TEST_ASSERT(system(rm_cmd) == 0);
+    TEST_PASS("test_rpc_get_block_selects_height");
+}
+
 int main(void) {
     (void)send_http_request;
     printf("=== Starting C99 HTTP/1.1 JSON-RPC Server Test Suite ===\n");
+    test_http_null_config();
+    test_rpc_numeric_and_output_bounds();
+    test_rpc_get_block_selects_height();
     test_http_health_and_options();
     test_http_bind_address();
     test_http_json_rpc_status_and_difficulty();

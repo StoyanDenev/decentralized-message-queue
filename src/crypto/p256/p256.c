@@ -625,10 +625,12 @@ int determ_p256_expand_message_xmd(uint8_t* out, size_t outlen,
                                    const uint8_t* msg, size_t msglen,
                                    const uint8_t* dst, size_t dstlen) {
     /* b_in_bytes = 32, s_in_bytes (r_in_bytes) = 64 for SHA-256. */
-    size_t ell = (outlen + 31) / 32;
+    size_t ell;
     uint8_t b0[32], bi[32];
     size_t off, i, done;
-    if (outlen == 0 || ell > 255 || outlen > 65535 || dstlen > 255) return -1;
+    if (outlen == 0 || outlen > 8160 || dstlen > 255) return -1;
+    if (msglen > SIZE_MAX - 68u - dstlen) return -1;
+    ell = (outlen + 31) / 32; /* outlen <= 8160, so this addition is safe */
 
     /* b0 = H(Z_pad(64) || msg || I2OSP(outlen,2) || 0x00 || DST || len(DST)).
      * msg can be arbitrarily long — hash incrementally? determ_sha256 is
@@ -989,9 +991,11 @@ int determ_p256_oprf_derive_key(uint8_t sk[32],
     uint8_t stackbuf[256];
     uint8_t* buf;
     uint8_t* heap = 0;
-    size_t base = seedlen + 2 + infolen;
+    size_t base;
     int counter;
     int rc = -1;
+    if (seedlen > SIZE_MAX - 3u || infolen > SIZE_MAX - 3u - seedlen) return -1;
+    base = seedlen + 2u + infolen;
     if (base + 1 <= sizeof stackbuf) buf = stackbuf;
     else { heap = (uint8_t*)malloc(base + 1); if (!heap) return -1; buf = heap; }
     if (seedlen) memcpy(buf, seed, seedlen);
@@ -1049,8 +1053,10 @@ int determ_p256_oprf_finalize(uint8_t out[32],
     uint8_t stackbuf[512];
     uint8_t* buf;
     uint8_t* heap = 0;
-    size_t total = 2 + inputlen + 2 + 33 + 8, off = 0;
+    size_t total, off = 0;
     int rc = -1;
+    if (inputlen > SIZE_MAX - 45u) return -1;
+    total = inputlen + 45u;
     /* inv = blind^-1 is the client's secret material; a malicious server can
      * drive the eval-decode reject below to leave it on the stack, so all
      * exit paths scrub via the cleanup label (audit §3.1 Low / §3.2 Info). */

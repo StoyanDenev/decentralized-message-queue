@@ -1,6 +1,7 @@
 # Determ — Roadmap & Future Directions (NON-AUTHORITATIVE)
 
 - [Combined design development plan](decisions/ADR-004-Fault-Model.md#84-adopted-development-plan-2026-09-24) — adopted direction; next is the one-shard receiver/state/resource contract and proof review, not production consensus. [Claude handoff](C99-MINIX-PORT.md#12-claude-commit-and-development-handoff-2026-09-24).
+- [ADR-006: C99 memory ownership, lifetime and bounds](decisions/ADR-006-C99-Memory-Safety.md) — accepted constraints and scoped audit; complete target qualification remains open.
 - [ADR-005: Temporal Sharding design gate](decisions/ADR-005-Temporal-Sharding.md) — proposed; selected membership/recovery/finality rules still require their composed proofs, qualified implementation and cross-shard settlement gates.
 
 > **This file is the single entry point for everything NOT in the Determ 1.0-authoritative

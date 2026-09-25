@@ -37,7 +37,8 @@ extern "C" {
 /* Argon2id v1.3. Writes `outlen` bytes (>= 4) to `out`. `t_cost` >= 1 passes,
  * `m_cost` >= 8*parallelism KiB, `parallelism` >= 1. `pwd`/`salt` may be NULL when
  * their length is 0 (salt should be >= 8 bytes per the spec; libsodium uses 16).
- * Returns 0 on success, -1 on a bad parameter or a memory-allocation failure. */
+ * Returns 0 on success, -1 on a bad parameter, a block workspace not
+ * representable in size_t, or a memory-allocation failure. */
 int determ_argon2id(uint8_t *out, size_t outlen,
                     const uint8_t *pwd, size_t pwdlen,
                     const uint8_t *salt, size_t saltlen,

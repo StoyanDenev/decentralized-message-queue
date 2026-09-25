@@ -92,7 +92,9 @@ int determ_p256_scalar_sub_mod_n(uint8_t r[32], const uint8_t a[32],
 
 /* expand_message_xmd with SHA-256 (RFC 9380 §5.3.1). -1 on the RFC's
  * length/DST bounds (outlen > 8160 i.e. ell > 255, or > 65535; dstlen >
- * 255; zero outlen). Exposed for the appendix-K.1 vector gate. */
+ * 255; zero outlen), an unrepresentable preimage size or allocation failure.
+ * The caller supplies readable input extents and outlen writable bytes.
+ * Exposed for the appendix-K.1 vector gate. */
 int determ_p256_expand_message_xmd(uint8_t* out, size_t outlen,
                                    const uint8_t* msg, size_t msglen,
                                    const uint8_t* dst, size_t dstlen);
@@ -149,7 +151,8 @@ int determ_p256_point_decompress(uint8_t out65[65], const uint8_t in33[33]);
 
 /* DeriveKeyPair (§3.2.1): sk from (seed, info) via the counter loop;
  * DST = "DeriveKeyPair" || contextString (NO hyphen — RFC quirk). -1 if the
- * loop exhausts (probability ~2^-2048) or on expand bounds. */
+ * loop exhausts (probability ~2^-2048), on expand bounds, an unrepresentable
+ * preimage size or allocation failure. */
 int determ_p256_oprf_derive_key(uint8_t sk[32],
                                 const uint8_t* seed, size_t seedlen,
                                 const uint8_t* info, size_t infolen,
@@ -169,7 +172,8 @@ int determ_p256_oprf_evaluate(uint8_t eval33[33], const uint8_t sk[32],
 
 /* Finalize (§3.3.1): out = SHA-256(len2(input) || input || len2(N_c) ||
  * compress(blind^-1 * eval) || "Finalize"). For VOPRF, run voprf_verify
- * FIRST (this function does not verify). */
+ * FIRST (this function does not verify). Returns -1 on an invalid scalar/point,
+ * an unrepresentable preimage size or allocation failure. */
 int determ_p256_oprf_finalize(uint8_t out[32],
                               const uint8_t* input, size_t inputlen,
                               const uint8_t blind[32],

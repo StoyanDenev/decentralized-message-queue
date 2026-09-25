@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
- * Bare-Metal C99 Non-Blocking HTTP/1.1 JSON-RPC Server Transport.
+ * Hosted C99 Non-Blocking HTTP/1.1 JSON-RPC Server Transport.
  * Zero dynamic memory allocations (zero malloc/free).
  */
 
@@ -35,6 +35,29 @@ static int set_nonblocking(int fd) {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+/* SIGPIPE must be an ordinary write error, never a process-wide action. The
+ * supported POSIX hosts provide MSG_NOSIGNAL or per-socket SO_NOSIGPIPE. */
+static int prepare_client_socket(int fd) {
+    if (set_nonblocking(fd) != 0) return -1;
+#if defined(MSG_NOSIGNAL)
+    return 0;
+#elif defined(SO_NOSIGPIPE)
+    int value = 1;
+    return setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &value, sizeof(value));
+#else
+    (void)fd;
+    return -1;
+#endif
+}
+
+static ssize_t send_client_bytes(int fd, const void *data, size_t len) {
+#ifdef MSG_NOSIGNAL
+    return send(fd, data, len, MSG_NOSIGNAL);
+#else
+    return send(fd, data, len, 0); /* SO_NOSIGPIPE checked before publication. */
+#endif
+}
+
 static void close_client(http_client_t *c) {
     if (c->fd >= 0) {
         close(c->fd);
@@ -47,7 +70,7 @@ static void close_client(http_client_t *c) {
 }
 
 int http_rpc_server_init(http_rpc_server_t *server, const http_rpc_config_t *config) {
-    if (!server || !config) return -1;
+    if (!server) return -1;
     memset(server, 0, sizeof(*server));
     server->server_fd = -1;
     /* Before any failure return: close() after a failed init must not see fd 0. */
@@ -55,6 +78,7 @@ int http_rpc_server_init(http_rpc_server_t *server, const http_rpc_config_t *con
         server->clients[i].fd = -1;
         server->clients[i].state = HTTP_CLIENT_INACTIVE;
     }
+    if (!config) return -1;
     server->port = config->port;
     server->rpc_ctx = config->rpc_ctx;
     {
@@ -303,7 +327,10 @@ int http_rpc_server_poll(http_rpc_server_t *server, int timeout_ms) {
             int c_fd = accept(server->server_fd, (struct sockaddr *)&c_addr, &c_len);
             if (c_fd < 0) break;
 
-            (void)set_nonblocking(c_fd);
+            if (prepare_client_socket(c_fd) != 0) {
+                close(c_fd);
+                continue;
+            }
 
             /* Find free client slot */
             int slot = -1;
@@ -325,7 +352,7 @@ int http_rpc_server_poll(http_rpc_server_t *server, int timeout_ms) {
                 static const char sat_resp[] =
                     "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 /* Best effort: the connection is closed either way. */
-                if (write(c_fd, sat_resp, sizeof(sat_resp) - 1) < 0) { /* ignored */ }
+                if (send_client_bytes(c_fd, sat_resp, sizeof(sat_resp) - 1) < 0) { /* ignored */ }
                 close(c_fd);
             }
         }
@@ -365,7 +392,7 @@ int http_rpc_server_poll(http_rpc_server_t *server, int timeout_ms) {
         if ((fds[p].revents & POLLOUT) && c->state == HTTP_CLIENT_SENDING) {
             size_t remaining = c->tx_len - c->tx_sent;
             if (remaining > 0) {
-                ssize_t n = write(c->fd, c->tx_buf + c->tx_sent, remaining);
+                ssize_t n = send_client_bytes(c->fd, c->tx_buf + c->tx_sent, remaining);
                 if (n > 0) {
                     c->tx_sent += (size_t)n;
                     if (c->tx_sent >= c->tx_len) {

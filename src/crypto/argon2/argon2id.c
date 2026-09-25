@@ -136,14 +136,20 @@ int determ_argon2id(uint8_t *out, size_t outlen,
      * §3.1 length fields are 32-bit) or overflow uint32 in the segment math. The
      * p <= UINT32_MAX/8 bound makes both 8*p and p*SYNC_POINTS overflow-free.
      * (audit ARG2ID-001/-002/-003 + ARGON2ID-003/-005) */
-    if (outlen < 4 || outlen > 0xffffffffULL || t_cost < 1 ||
-        pwdlen > 0xffffffffULL || saltlen > 0xffffffffULL ||
-        p < 1 || p > (UINT32_MAX / 8u)) return -1;
+    if (outlen < 4 || t_cost < 1 || p < 1 || p > (UINT32_MAX / 8u)) return -1;
+#if SIZE_MAX > UINT32_MAX
+    if (outlen > UINT32_MAX || pwdlen > UINT32_MAX || saltlen > UINT32_MAX) return -1;
+#endif
     if (m_cost < 8 * p) m_cost = 8 * p;
     seg = m_cost / (p * SYNC_POINTS);
     if (seg < 1) return -1;
     mem = seg * p * SYNC_POINTS;
     lane_len = seg * SYNC_POINTS;
+    /* mem is a block count, not a byte count. On 32-bit targets an otherwise
+     * valid uint32_t count can wrap the allocation below to a tiny object. */
+#if SIZE_MAX < UINT64_MAX
+    if ((uint64_t)mem > (uint64_t)(SIZE_MAX / sizeof(block))) return -1;
+#endif
 
     /* ---- H0 = BLAKE2b-512( params ‖ pwd ‖ salt ‖ secret(0) ‖ ad(0) ) ---- */
     {

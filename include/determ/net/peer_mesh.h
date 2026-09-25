@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
- * Bare-Metal C99 Peer Mesh & Gossip Protocol Engine.
+ * Hosted C99 Peer Mesh & Gossip Protocol Engine.
  *
  * Connects to explicitly configured peers and accepts inbound peers, with:
  *   1. Non-blocking POSIX TCP connections driven by net_event_loop_t.
@@ -54,6 +54,7 @@ typedef enum {
 
 typedef struct {
     int          fd;
+    uintptr_t    registration; /* captured event identity; meaningful only while state != PEER_STATE_FREE */
     peer_state_t state;
     bool         inbound;
     bool         hello_received;
@@ -115,10 +116,29 @@ struct peer_mesh {
     peer_entry_t       peers[PEER_MESH_MAX_PEERS];
     peer_mesh_dedup_t  dedup;
     bool               running;
+    uintptr_t          next_generation; /* never wraps: at UINTPTR_MAX >> 8 new peers are refused */
 };
 
 /*
- * Initialize the peer mesh engine. Returns 0 on success.
+ * Initialize the peer mesh engine in fresh or previously closed storage; cfg must
+ * not overlap mesh. Returns 0 on success.
+ *
+ * Ownership: one thread owns every peer mesh and reactor in the process; the
+ * nested-dispatch guard is a single module-wide flag, so a second thread is
+ * unsupported. Callers must not modify lifecycle/cursor fields directly.
+ * Initialization or polling of any mesh from inside a callback is refused and
+ * leaves the supplied storage unchanged (on fresh zero-filled storage such a
+ * refusal establishes no descriptor sentinels: do not close it then). Outside
+ * callbacks, a failed init on non-NULL storage is safe to close.
+ * Callbacks may disconnect/reconnect peers; envelope/payload pointers are
+ * borrowed for the callback only and must not be retained across any operation
+ * changing peers.
+ * Every outbound connect and every accepted inbound connection consumes one
+ * registration generation before any HELLO. The counter is refused rather than
+ * wrapped at UINTPTR_MAX >> 8: on a 32-bit host an unauthenticated peer can
+ * exhaust the 2^24 - 1 generations by reconnecting, after which the mesh refuses
+ * connections until it is closed and re-initialized (ADR-006 §4). 64-bit hosts
+ * have 2^56 - 1.
  */
 int peer_mesh_init(peer_mesh_t *mesh, const peer_mesh_config_t *cfg);
 

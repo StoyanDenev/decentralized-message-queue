@@ -70,6 +70,12 @@ qualified. Existing Argon2id and libc-backed crypto helpers require a conforming
 independently qualified solution before admission to that target; the goal does not
 waive its secret-independent memory-access requirement for them.
 
+The [2026-09-25 C99 audit and ADR-006](docs/decisions/ADR-006-C99-Memory-Safety.md)
+record scoped fixes for codec arithmetic, recycled network slots, RPC token bounds
+and crypto error propagation. Networking already uses static pools; captured
+registration generations protect logical slot lifetimes that zeroing alone cannot.
+These fixes do not establish whole-program memory safety or freestanding admission.
+
 Run the C99 checks through the project CI entry point:
 
 ```sh
@@ -81,8 +87,8 @@ bash tools/ci_local.sh --freestanding-examples # isolated foundation evidence
 
 The arithmetic and local state-machine tests are portable C99. The network driver
 and its live socket tests currently use POSIX transport; Windows transport support
-is not established by these checks. On a POSIX host `--c99` builds and runs 21
-targets (10 portable, 11 POSIX-only; a Windows shell reports the 11 as
+is not established by these checks. On a POSIX host `--c99` builds and runs 26
+targets (13 portable, 13 POSIX-only; a Windows shell reports the 13 as
 platform-skipped), and `--c99-mutants` runs the isolated mutation gate. Each of
 these targets compiles as strict ISO C99 (no GNU extensions) with
 `-Wall -Wextra -Werror -pedantic` on GCC and Clang (`determ_c99_strict` in

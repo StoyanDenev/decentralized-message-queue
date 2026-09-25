@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
- * Canonical Binary Wire & Storage Frame Codec (C99 Bare-Metal)
+ * Canonical Binary Wire & Storage Frame Codec (hosted C99; libc memory operations)
  *
  * Implements strict zero-allocation serialization and deserialization for:
  *   1. The P2P binary envelope (0xB1, v1): all 19 MsgType values are accepted;
@@ -18,6 +18,13 @@
  *
  *   - Zero dynamic heap allocation (malloc/free) on encode/decode paths.
  *   - Explicit Little-Endian (LE) integer encoding for multi-byte payloads.
+ *   - Buffers are caller-owned: pointers must name the declared readable or
+ *     writable extents and source/destination objects must not overlap. Decoded
+ *     slices borrow the input lifetime; do not retain them after buffer reuse.
+ *     Positive encoded lengths require non-NULL source pointers. Capacity and
+ *     length preflight rejects before encoding writes or publishing out_written.
+ *     Decoder outputs are usable only after WIRE_CODEC_OK; a rejection may leave
+ *     partially decoded fields and must never be treated as admission.
  *   - Fail-closed decoding: truncated input, non-zero reserved or padding bytes
  *     and trailing bytes are rejected, except where a field is defined as the
  *     rest of the input (ABORT_EVENT claims; the SHARD_TIP, RECEIPT_BUNDLE and

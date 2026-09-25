@@ -18,6 +18,15 @@ Argon2id implementation and libc-backed erasure helper do not meet this admissio
 rule (§3.6 and §3.10). Hosted callers remain as implemented; no cryptographic
 algorithm, stored format or production call site is changed by this correction.
 
+**C99 failure/bounds audit (2026-09-25).**
+[ADR-006](../decisions/ADR-006-C99-Memory-Safety.md) records allocation-size
+preflight for Argon2/P-256/Pedersen and checked HMAC propagation in HKDF,
+PBKDF2 and OPAQUE-3DH. Successful algorithms and transcript formats remain
+unchanged; the OPAQUE gate retains the independently derived frozen v2 vector.
+Caller-owned-workspace migration, complete memory safety and compiler/target
+side-channel qualification remain separate obligations. These fixes do not
+admit the hosted library to the freestanding target.
+
 **Companion documents:**
 - `v2.22-PRIVACY-SPEC.md` — confidential transactions spec (consumer; Bulletproofs are over NIST P-256 — secp256k1 was rejected 2026-07-07 and never built)
 - `Beaconless-v2-SPEC.md` — Phase D architecture (consumer; cross-shard randomness uses MPDH commit-reveal aggregation, not FROST — switched 2026-06-07, `DECISION-LOG.md`)

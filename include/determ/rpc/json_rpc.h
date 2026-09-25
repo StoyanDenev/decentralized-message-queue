@@ -50,7 +50,12 @@ typedef struct {
 
 /*
  * Dispatch with full node context.
- * Returns length of response written into out_response, or negative error.
+ * request_json names req_len readable bytes; no trailing NUL is required.
+ * Returns the length actually written (excluding NUL), or negative error on
+ * invalid buffers or truncation. Successful responses are NUL-terminated. After a
+ * negative return the output may hold a truncated prefix; it is not a response.
+ * The caller owns a writable max_response_len-byte output extent, disjoint from
+ * the immutable request and context objects.
  * get_shard_for_pubkey is a read-only mapping query, not transaction admission.
  * Its request is bounded to RPC_ROUTING_MAX_REQUEST_LEN bytes and accepts only
  * jsonrpc="2.0", method, params={"pubkey":64 hex chars}, and an optional id.

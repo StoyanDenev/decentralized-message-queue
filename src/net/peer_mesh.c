@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
- * Bare-Metal C99 Peer Mesh & Gossip Protocol Engine.
+ * Hosted C99 Peer Mesh & Gossip Protocol Engine.
  */
 
 #include <determ/net/peer_mesh.h>
@@ -18,6 +18,43 @@
 #include <time.h>
 
 #define LISTENER_TOKEN ((void*)(uintptr_t)(-1))
+#define PEER_COOKIE_BITS 8U
+#define PEER_COOKIE_MASK ((uintptr_t)255U)
+typedef char peer_cookie_index_fits[(PEER_MESH_MAX_PEERS < 255U) ? 1 : -1];
+static bool mesh_dispatching;
+
+static uintptr_t next_registration(peer_mesh_t *mesh, unsigned index) {
+    if (mesh->next_generation == (UINTPTR_MAX >> PEER_COOKIE_BITS)) return 0;
+    mesh->next_generation++;
+    return (mesh->next_generation << PEER_COOKIE_BITS) | (index + 1U);
+}
+
+static int registration_index(const peer_mesh_t *mesh, uintptr_t registration) {
+    uintptr_t encoded = registration & PEER_COOKIE_MASK;
+    if (encoded == 0 || encoded > PEER_MESH_MAX_PEERS) return -1;
+    int index = (int)(encoded - 1U);
+    const peer_entry_t *peer = &mesh->peers[index];
+    return peer->state != PEER_STATE_FREE && peer->registration == registration ? index : -1;
+}
+
+static int prepare_peer_socket(int fd) {
+#ifdef SO_NOSIGPIPE
+    int yes = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes)) != 0) return -1;
+#elif !defined(MSG_NOSIGNAL)
+    (void)fd;
+    return -1; /* No qualified per-socket/per-send SIGPIPE suppression. */
+#endif
+    return net_socket_set_nonblocking(fd) != 0 || net_socket_set_nodelay(fd) != 0 ? -1 : 0;
+}
+
+static ssize_t peer_socket_send(int fd, const void *data, size_t len) {
+    int flags = 0;
+#ifdef MSG_NOSIGNAL
+    flags = MSG_NOSIGNAL;
+#endif
+    return send(fd, data, len, flags);
+}
 
 static inline uint32_t be_get_u32(const uint8_t *p) {
     return ((uint32_t)p[0] << 24) |
@@ -87,29 +124,30 @@ static bool rate_limiter_consume(peer_entry_t *peer, double per_sec, double burs
 }
 
 int peer_mesh_init(peer_mesh_t *mesh, const peer_mesh_config_t *cfg) {
-    if (!mesh || !cfg) return -1;
+    if (!mesh || mesh_dispatching) return -1;
+    /* Fresh/closed storage only; cfg must not overlap mesh. Failed init is
+     * still safe to close, without treating fd 0 as an owned descriptor. */
     memset(mesh, 0, sizeof(*mesh));
-    mesh->config = *cfg;
-    if (mesh->config.rate_limit_burst <= 0.0) {
-        mesh->config.rate_limit_burst = 100.0;
-    }
-    if (mesh->config.rate_limit_per_sec <= 0.0) {
-        mesh->config.rate_limit_per_sec = 50.0;
-    }
-    if (net_event_loop_init(&mesh->loop) != 0) {
-        return -2;
-    }
     mesh->listen_fd = -1;
+    mesh->loop.poll_fd = -1;
     for (size_t i = 0; i < PEER_MESH_MAX_PEERS; i++) {
         mesh->peers[i].fd = -1;
         mesh->peers[i].state = PEER_STATE_FREE;
     }
+    if (!cfg) return -1;
+    size_t domain_len = 0;
+    while (domain_len < PEER_MESH_MAX_DOMAIN_LEN && cfg->domain[domain_len] != '\0') domain_len++;
+    if (domain_len == PEER_MESH_MAX_DOMAIN_LEN) return -1;
+    mesh->config = *cfg;
+    if (mesh->config.rate_limit_burst <= 0.0) mesh->config.rate_limit_burst = 100.0;
+    if (mesh->config.rate_limit_per_sec <= 0.0) mesh->config.rate_limit_per_sec = 50.0;
+    if (net_event_loop_init(&mesh->loop) != 0) return -2;
     mesh->running = true;
     return 0;
 }
 
 int peer_mesh_listen(peer_mesh_t *mesh, uint16_t port) {
-    if (!mesh || mesh->listen_fd >= 0) return -1;
+    if (!mesh || !mesh->running || mesh->listen_fd >= 0) return -1;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -2;
 
@@ -162,7 +200,7 @@ static int queue_frame(peer_mesh_t *mesh, int peer_idx, const uint8_t *env, size
     peer->tx_len += 4 + env_len;
 
     /* Register for write readiness */
-    net_event_loop_mod(&mesh->loop, peer->fd, NET_EV_READ | NET_EV_WRITE, (void*)(uintptr_t)peer_idx);
+    net_event_loop_mod(&mesh->loop, peer->fd, NET_EV_READ | NET_EV_WRITE, (void *)peer->registration);
     return 0;
 }
 
@@ -189,8 +227,23 @@ static int peer_mesh_send_hello(peer_mesh_t *mesh, int peer_idx) {
     return queue_frame(mesh, peer_idx, env_buf, env_len);
 }
 
+/* Release a slot whose index was never returned to the caller (a failed
+ * connect). No callback runs: the caller learns of the failure from the return
+ * value, and a reconnect-on-disconnect policy cannot recurse on a persistent
+ * setup failure. */
+static void release_unpublished_peer(peer_mesh_t *mesh, int slot) {
+    peer_entry_t *peer = &mesh->peers[slot];
+    if (peer->fd >= 0) {
+        net_event_loop_del(&mesh->loop, peer->fd);
+        close(peer->fd);
+        peer->fd = -1;
+    }
+    peer->state = PEER_STATE_FREE;
+    peer->registration = 0;
+}
+
 int peer_mesh_connect(peer_mesh_t *mesh, const char *host, uint16_t port) {
-    if (!mesh || !host) return -1;
+    if (!mesh || !host || !mesh->running || mesh->next_generation == (UINTPTR_MAX >> PEER_COOKIE_BITS)) return -1;
     int slot = -1;
     for (size_t i = 0; i < PEER_MESH_MAX_PEERS; i++) {
         if (mesh->peers[i].state == PEER_STATE_FREE) {
@@ -202,8 +255,7 @@ int peer_mesh_connect(peer_mesh_t *mesh, const char *host, uint16_t port) {
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -3;
-    net_socket_set_nonblocking(fd);
-    net_socket_set_nodelay(fd);
+    if (prepare_peer_socket(fd) != 0) { close(fd); return -3; }
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -217,17 +269,24 @@ int peer_mesh_connect(peer_mesh_t *mesh, const char *host, uint16_t port) {
     peer_entry_t *peer = &mesh->peers[slot];
     memset(peer, 0, sizeof(*peer));
     peer->fd = fd;
+    peer->registration = next_registration(mesh, (unsigned)slot);
     peer->inbound = false;
     snprintf(peer->remote_addr, sizeof(peer->remote_addr), "%s:%u", host, port);
 
     int rc = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
     if (rc == 0) {
         peer->state = PEER_STATE_HANDSHAKING;
-        net_event_loop_add(&mesh->loop, fd, NET_EV_READ | NET_EV_WRITE, (void*)(uintptr_t)slot);
-        peer_mesh_send_hello(mesh, slot);
+        if (net_event_loop_add(&mesh->loop, fd, NET_EV_READ | NET_EV_WRITE, (void *)peer->registration) != 0 ||
+            peer_mesh_send_hello(mesh, slot) != 0) {
+            release_unpublished_peer(mesh, slot);
+            return -5;
+        }
     } else if (errno == EINPROGRESS) {
         peer->state = PEER_STATE_CONNECTING;
-        net_event_loop_add(&mesh->loop, fd, NET_EV_READ | NET_EV_WRITE, (void*)(uintptr_t)slot);
+        if (net_event_loop_add(&mesh->loop, fd, NET_EV_READ | NET_EV_WRITE, (void *)peer->registration) != 0) {
+            release_unpublished_peer(mesh, slot);
+            return -5;
+        }
     } else {
         close(fd);
         peer->fd = -1;
@@ -249,8 +308,12 @@ void peer_mesh_disconnect(peer_mesh_t *mesh, int peer_idx) {
         peer->fd = -1;
     }
     peer->state = PEER_STATE_FREE;
+    peer->registration = 0;
     if (mesh->config.on_disconnect) {
+        bool previous_dispatch = mesh_dispatching;
+        mesh_dispatching = true;
         mesh->config.on_disconnect(mesh, peer_idx, mesh->config.user_data);
+        mesh_dispatching = previous_dispatch;
     }
 }
 
@@ -329,17 +392,17 @@ static void handle_inbound_connections(peer_mesh_t *mesh) {
                 break;
             }
         }
-        if (slot < 0) {
+        if (slot < 0 || mesh->next_generation == (UINTPTR_MAX >> PEER_COOKIE_BITS)) {
             close(cfd);
             continue;
         }
 
-        net_socket_set_nonblocking(cfd);
-        net_socket_set_nodelay(cfd);
+        if (prepare_peer_socket(cfd) != 0) { close(cfd); continue; }
 
         peer_entry_t *peer = &mesh->peers[slot];
         memset(peer, 0, sizeof(*peer));
         peer->fd = cfd;
+        peer->registration = next_registration(mesh, (unsigned)slot);
         peer->inbound = true;
         peer->state = PEER_STATE_HANDSHAKING;
 
@@ -347,13 +410,16 @@ static void handle_inbound_connections(peer_mesh_t *mesh) {
         inet_ntop(AF_INET, &caddr.sin_addr, ip_str, sizeof(ip_str));
         snprintf(peer->remote_addr, sizeof(peer->remote_addr), "%s:%u", ip_str, ntohs(caddr.sin_port));
 
-        net_event_loop_add(&mesh->loop, cfd, NET_EV_READ, (void*)(uintptr_t)slot);
-        peer_mesh_send_hello(mesh, slot);
+        if (net_event_loop_add(&mesh->loop, cfd, NET_EV_READ, (void *)peer->registration) != 0 ||
+            peer_mesh_send_hello(mesh, slot) != 0) peer_mesh_disconnect(mesh, slot);
+        if (!mesh->running) return;
     }
 }
 
 static void handle_peer_read(peer_mesh_t *mesh, int peer_idx) {
     peer_entry_t *peer = &mesh->peers[peer_idx];
+    uintptr_t registration = peer->registration;
+    if (peer->rx_cursor > PEER_MESH_RX_BUF_SIZE) { peer_mesh_disconnect(mesh, peer_idx); return; }
     size_t space = PEER_MESH_RX_BUF_SIZE - peer->rx_cursor;
     if (space == 0) {
         peer_mesh_disconnect(mesh, peer_idx);
@@ -422,6 +488,10 @@ static void handle_peer_read(peer_mesh_t *mesh, int peer_idx) {
             }
         }
 
+        /* A callback may disconnect/reconnect the same index. Its old frame
+         * length must never be subtracted from the new connection cursor. */
+        if (!mesh->running || registration_index(mesh, registration) != peer_idx) return;
+
         /* Shift unconsumed bytes to buffer start */
         size_t remaining = peer->rx_cursor - frame_total;
         if (remaining > 0) {
@@ -447,7 +517,7 @@ static void handle_peer_write(peer_mesh_t *mesh, int peer_idx) {
 
     if (peer->tx_len > peer->tx_cursor) {
         size_t to_write = peer->tx_len - peer->tx_cursor;
-        ssize_t n = write(peer->fd, peer->tx_buf + peer->tx_cursor, to_write);
+        ssize_t n = peer_socket_send(peer->fd, peer->tx_buf + peer->tx_cursor, to_write);
         if (n <= 0) {
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
             peer_mesh_disconnect(mesh, peer_idx);
@@ -457,39 +527,36 @@ static void handle_peer_write(peer_mesh_t *mesh, int peer_idx) {
         if (peer->tx_cursor >= peer->tx_len) {
             peer->tx_cursor = 0;
             peer->tx_len = 0;
-            net_event_loop_mod(&mesh->loop, peer->fd, NET_EV_READ, (void*)(uintptr_t)peer_idx);
+            net_event_loop_mod(&mesh->loop, peer->fd, NET_EV_READ, (void *)peer->registration);
         }
     }
 }
 
 int peer_mesh_poll(peer_mesh_t *mesh, int timeout_ms) {
-    if (!mesh || !mesh->running) return -1;
+    if (!mesh || !mesh->running || mesh_dispatching) return -1;
     net_event_t events[NET_MAX_EVENTS_PER_POLL];
     int n = net_event_loop_poll(&mesh->loop, timeout_ms, events, NET_MAX_EVENTS_PER_POLL);
     if (n <= 0) return n;
 
-    for (int i = 0; i < n; i++) {
+    mesh_dispatching = true;
+    for (int i = 0; i < n && mesh->running; i++) {
         net_event_t *ev = &events[i];
         if (ev->user_data == LISTENER_TOKEN) {
-            if (ev->flags & NET_EV_READ) {
-                handle_inbound_connections(mesh);
-            }
+            if (ev->flags & NET_EV_READ) handle_inbound_connections(mesh);
         } else {
-            int peer_idx = (int)(uintptr_t)ev->user_data;
-            if (peer_idx >= 0 && peer_idx < (int)PEER_MESH_MAX_PEERS) {
-                if (ev->flags & (NET_EV_ERROR | NET_EV_EOF)) {
-                    peer_mesh_disconnect(mesh, peer_idx);
-                } else {
-                    if (ev->flags & NET_EV_WRITE) {
-                        handle_peer_write(mesh, peer_idx);
-                    }
-                    if (ev->flags & NET_EV_READ) {
-                        handle_peer_read(mesh, peer_idx);
-                    }
-                }
+            uintptr_t registration = (uintptr_t)ev->user_data;
+            int peer_idx = registration_index(mesh, registration);
+            if (peer_idx < 0) continue; /* retired event, including fd reuse */
+            if (ev->flags & (NET_EV_ERROR | NET_EV_EOF)) {
+                peer_mesh_disconnect(mesh, peer_idx);
+            } else {
+                if (ev->flags & NET_EV_WRITE) handle_peer_write(mesh, peer_idx);
+                if (mesh->running && registration_index(mesh, registration) == peer_idx &&
+                    (ev->flags & NET_EV_READ)) handle_peer_read(mesh, peer_idx);
             }
         }
     }
+    mesh_dispatching = false;
     return n;
 }
 

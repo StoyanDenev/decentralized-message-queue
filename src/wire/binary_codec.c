@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Determ Contributors
  *
- * Canonical Binary Wire & Storage Frame Codec (C99 Bare-Metal)
+ * Canonical Binary Wire & Storage Frame Codec (hosted C99; libc memory operations)
  */
 
 #include <determ/wire/binary_codec.h>
@@ -45,6 +45,13 @@ static inline uint64_t le_get_u64(const uint8_t *p) {
         v |= ((uint64_t)p[i]) << (i * 8);
     }
     return v;
+}
+
+/* Validate the sum before forming it or touching the byte buffers. Since
+ * prefix <= cap and length <= cap - prefix, prefix + length <= cap <= SIZE_MAX.
+ * The caller still owns the actual extents and non-overlap of the buffers. */
+static int bytes_fit(size_t cap, size_t prefix, size_t length) {
+    return prefix <= cap && length <= cap - prefix;
 }
 
 /* ─── 1. Binary Envelope Header ─────────────────────────────────────────── */
@@ -91,7 +98,8 @@ wire_codec_status_t wire_envelope_encode(uint8_t *out_buf, size_t buf_cap,
     if (msg_type >= WIRE_MSG_TYPE_COUNT) {
         return WIRE_CODEC_ERR_BAD_MSG_TYPE;
     }
-    if (buf_cap < WIRE_ENVELOPE_HEADER_LEN + payload_len) {
+    if (payload_len > 0 && !payload) return WIRE_CODEC_ERR_INVALID_ARG;
+    if (!bytes_fit(buf_cap, WIRE_ENVELOPE_HEADER_LEN, payload_len)) {
         return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;
     }
     out_buf[0] = WIRE_ENVELOPE_MAGIC;
@@ -112,6 +120,7 @@ wire_codec_status_t wire_hello_encode(uint8_t *out_buf, size_t buf_cap,
     if (!out_buf || !msg || !out_written) {
         return WIRE_CODEC_ERR_INVALID_ARG;
     }
+    if (msg->domain_len > 0 && !msg->domain) return WIRE_CODEC_ERR_INVALID_ARG;
     size_t required = 1 + (size_t)msg->domain_len + 2 + 1 + 4 + 1;
     if (buf_cap < required) {
         return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;
@@ -175,11 +184,14 @@ wire_codec_status_t wire_tx_encode(uint8_t *out_buf, size_t buf_cap,
     }
     size_t overflow = (tx->payload_len > 32) ? (size_t)(tx->payload_len - 32) : 0;
     size_t required = 128 + 1 + 2 + overflow + 1 + tx->from_len + 1 + tx->to_len + 64 + 32 + 32 + 4;
+    if (buf_cap < required) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;
     if (tx->pq_auth_len > 0) {
-        required += 4 + tx->pq_auth_len;
-    }
-    if (buf_cap < required) {
-        return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;
+        /* Check the prefix separately: 4 + a uint32_t length can wrap in
+         * uint32_t even when size_t is 64 bits. No sum is formed first. */
+        if (!bytes_fit(buf_cap, required, 4)) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;
+        required += 4;
+        if (tx->pq_auth_len > buf_cap - required) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;
+        required += (size_t)tx->pq_auth_len;
     }
 
     /* Core 128 bytes */
@@ -311,7 +323,7 @@ wire_codec_status_t wire_tx_decode(const uint8_t *data, size_t len,
         }
         uint32_t pq_len = le_get_u32(data + off);
         off += 4;
-        if (pq_len == 0 || off + pq_len != len) {
+        if (pq_len == 0 || pq_len != len - off) {
             return WIRE_CODEC_ERR_TRAILING_BYTES;
         }
         tx->pq_auth = data + off;
@@ -329,6 +341,7 @@ wire_codec_status_t wire_block_sig_encode(uint8_t *out_buf, size_t buf_cap,
     if (!out_buf || !msg || !out_written) {
         return WIRE_CODEC_ERR_INVALID_ARG;
     }
+    if (msg->signer_len > 0 && !msg->signer) return WIRE_CODEC_ERR_INVALID_ARG;
     size_t required = 8 + 1 + msg->signer_len + 32 + 32 + 64;
     if (buf_cap < required) {
         return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;
@@ -384,6 +397,13 @@ wire_codec_status_t wire_contrib_encode(uint8_t *out_buf, size_t buf_cap,
     if (!out_buf || !msg || !out_written) {
         return WIRE_CODEC_ERR_INVALID_ARG;
     }
+    if ((msg->signer_len > 0 && !msg->signer) ||
+        (msg->tx_hash_count > 0 && !msg->tx_hashes) ||
+        (msg->view_eq_count > 0 && !msg->view_eq_list) ||
+        (msg->view_abort_count > 0 && !msg->view_abort_list) ||
+        (msg->view_inbound_count > 0 && !msg->view_inbound_list) ||
+        (msg->view_shardtip_count > 0 && !msg->view_shardtip_list))
+        return WIRE_CODEC_ERR_INVALID_ARG;
     size_t required = 8 + 1 + msg->signer_len + 32 + 8 +
                       2 + (size_t)msg->tx_hash_count * 32 +
                       32 + 32 + 32 + 32 +
@@ -528,6 +548,7 @@ wire_codec_status_t wire_status_response_encode(uint8_t *out_buf, size_t buf_cap
                                                 const wire_status_response_t *msg, size_t *out_written) {
     if (!out_buf || !msg || !out_written) return WIRE_CODEC_ERR_INVALID_ARG;
     if (msg->genesis_len != 0 && msg->genesis_len != 64) return WIRE_CODEC_ERR_INVALID_FIELD;
+    if (msg->genesis_len > 0 && !msg->genesis_hex) return WIRE_CODEC_ERR_INVALID_ARG;
     size_t required = 8 + 1 + (size_t)msg->genesis_len;
     if (buf_cap < required) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;
     le_put_u64(out_buf, msg->height);
@@ -594,6 +615,8 @@ wire_codec_status_t wire_headers_req_decode(const uint8_t *data, size_t len,
 wire_codec_status_t wire_abort_claim_encode(uint8_t *out_buf, size_t buf_cap,
                                             const wire_abort_claim_t *msg, size_t *out_written) {
     if (!out_buf || !msg || !out_written) return WIRE_CODEC_ERR_INVALID_ARG;
+    if ((msg->missing_creator_len > 0 && !msg->missing_creator) ||
+        (msg->claimer_len > 0 && !msg->claimer)) return WIRE_CODEC_ERR_INVALID_ARG;
     /* shared encode_abort_claims blob with count=1: u16 count (2) + fields */
     size_t required = 2 + 8 + 1 + 32 + 64 + 1 + msg->missing_creator_len + 1 + msg->claimer_len;
     if (buf_cap < required) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;
@@ -642,8 +665,10 @@ wire_codec_status_t wire_abort_claim_decode(const uint8_t *data, size_t len,
 wire_codec_status_t wire_abort_event_encode(uint8_t *out_buf, size_t buf_cap,
                                             const wire_abort_event_t *msg, size_t *out_written) {
     if (!out_buf || !msg || !out_written) return WIRE_CODEC_ERR_INVALID_ARG;
-    size_t required = 8 + 32 + 1 + 1 + msg->aborting_node_len + 8 + 32 + msg->claims_blob_len;
-    if (buf_cap < required) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;
+    if ((msg->aborting_node_len > 0 && !msg->aborting_node) ||
+        (msg->claims_blob_len > 0 && !msg->claims_blob)) return WIRE_CODEC_ERR_INVALID_ARG;
+    size_t prefix = 8 + 32 + 1 + 1 + msg->aborting_node_len + 8 + 32;
+    if (!bytes_fit(buf_cap, prefix, msg->claims_blob_len)) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;
     size_t off = 0;
     le_put_u64(out_buf + off, msg->block_index); off += 8;
     memcpy(out_buf + off, msg->prev_hash, 32); off += 32;
@@ -687,6 +712,7 @@ wire_codec_status_t wire_equivocation_encode(uint8_t *out_buf, size_t buf_cap,
                                              const wire_equivocation_evidence_t *msg, size_t *out_written) {
     if (!out_buf || !msg || !out_written) return WIRE_CODEC_ERR_INVALID_ARG;
     if (msg->kind > 1) return WIRE_CODEC_ERR_INVALID_FIELD;
+    if (msg->equivocator_len > 0 && !msg->equivocator) return WIRE_CODEC_ERR_INVALID_ARG;
     size_t required = 1 + msg->equivocator_len + 8 + 1 + 8 + 8 + 32 + 64 + 8 + 8 + 32 + 64 + 4 + 8;
     if (buf_cap < required) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;
     size_t off = 0;
@@ -743,7 +769,8 @@ wire_codec_status_t wire_equivocation_decode(const uint8_t *data, size_t len,
 wire_codec_status_t wire_shard_tip_encode(uint8_t *out_buf, size_t buf_cap,
                                           const wire_shard_tip_t *msg, size_t *out_written) {
     if (!out_buf || !msg || !out_written) return WIRE_CODEC_ERR_INVALID_ARG;
-    if (buf_cap < 4 + msg->block_frame_len) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;
+    if (msg->block_frame_len > 0 && !msg->block_frame) return WIRE_CODEC_ERR_INVALID_ARG;
+    if (!bytes_fit(buf_cap, 4, msg->block_frame_len)) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;
     le_put_u32(out_buf, msg->shard_id);
     if (msg->block_frame_len > 0 && msg->block_frame) {
         memcpy(out_buf + 4, msg->block_frame, msg->block_frame_len);
@@ -765,7 +792,8 @@ wire_codec_status_t wire_shard_tip_decode(const uint8_t *data, size_t len,
 wire_codec_status_t wire_receipt_bundle_encode(uint8_t *out_buf, size_t buf_cap,
                                                const wire_receipt_bundle_t *msg, size_t *out_written) {
     if (!out_buf || !msg || !out_written) return WIRE_CODEC_ERR_INVALID_ARG;
-    if (buf_cap < 4 + msg->block_frame_len) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;
+    if (msg->block_frame_len > 0 && !msg->block_frame) return WIRE_CODEC_ERR_INVALID_ARG;
+    if (!bytes_fit(buf_cap, 4, msg->block_frame_len)) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;
     le_put_u32(out_buf, msg->src_shard);
     if (msg->block_frame_len > 0 && msg->block_frame) {
         memcpy(out_buf + 4, msg->block_frame, msg->block_frame_len);
@@ -804,8 +832,7 @@ wire_codec_status_t wire_chain_response_next_block(const uint8_t *blocks_data, s
         return WIRE_CODEC_ERR_INVALID_ARG;
     }
     size_t off = *cursor;
-    if (off >= total_len) return WIRE_CODEC_ERR_TRUNCATED;
-    if (off + 4 > total_len) return WIRE_CODEC_ERR_TRUNCATED;
+    if (!bytes_fit(total_len, off, 4)) return WIRE_CODEC_ERR_TRUNCATED;
     uint32_t flen = le_get_u32(blocks_data + off); off += 4;
     if (flen > total_len || off > total_len - flen) return WIRE_CODEC_ERR_TRUNCATED;
     *out_block_frame = blocks_data + off;
@@ -846,7 +873,8 @@ wire_codec_status_t wire_dbk1_wrap(uint8_t *out_buf, size_t buf_cap,
                                    const uint8_t *block_frame, size_t block_frame_len,
                                    size_t *out_written) {
     if (!out_buf || !out_written) return WIRE_CODEC_ERR_INVALID_ARG;
-    if (buf_cap < 4 + block_frame_len) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;
+    if (block_frame_len > 0 && !block_frame) return WIRE_CODEC_ERR_INVALID_ARG;
+    if (!bytes_fit(buf_cap, 4, block_frame_len)) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;
     out_buf[0] = 'D';
     out_buf[1] = 'B';
     out_buf[2] = 'K';
@@ -888,8 +916,7 @@ wire_codec_status_t wire_headers_response_next_record(const uint8_t *headers_dat
     if (!headers_data || !cursor || !out_rec) return WIRE_CODEC_ERR_INVALID_ARG;
     size_t off = *cursor;
     /* DHF1 record: magic 4 + block_hash 32 + frame_len 4 */
-    if (off >= total_len) return WIRE_CODEC_ERR_TRUNCATED;
-    if (off + 40 > total_len) return WIRE_CODEC_ERR_TRUNCATED;
+    if (!bytes_fit(total_len, off, 40)) return WIRE_CODEC_ERR_TRUNCATED;
     if (memcmp(headers_data + off, "DHF1", 4) != 0) return WIRE_CODEC_ERR_BAD_MAGIC;
     off += 4;
     memcpy(out_rec->block_hash, headers_data + off, 32); off += 32;
@@ -906,8 +933,10 @@ wire_codec_status_t wire_dhf1_record_encode(uint8_t *out_buf, size_t buf_cap,
                                             const uint8_t *block_frame, uint32_t block_frame_len,
                                             size_t *out_written) {
     if (!out_buf || !block_hash || !out_written) return WIRE_CODEC_ERR_INVALID_ARG;
-    size_t required = 4 + 32 + 4 + block_frame_len;
-    if (buf_cap < required) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;
+    if (block_frame_len > 0 && !block_frame) return WIRE_CODEC_ERR_INVALID_ARG;
+    /* Compare the uint32_t value before conversion/addition. */
+    if (buf_cap < 40 || block_frame_len > buf_cap - 40) return WIRE_CODEC_ERR_BUFFER_TOO_SMALL;
+    size_t required = 40 + (size_t)block_frame_len;
     out_buf[0] = 'D';
     out_buf[1] = 'H';
     out_buf[2] = 'F';

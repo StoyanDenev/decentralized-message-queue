@@ -19,6 +19,7 @@ int determ_hkdf_sha256(const uint8_t *salt, size_t saltlen,
     size_t tlen = 0;
     size_t done = 0;
     unsigned counter = 1;
+    int rc = -1;
 
     if (outlen > 255 * HASHLEN) return -1;
     /* Guard size_t overflow of n = tlen + infolen + 1 (tlen <= HASHLEN). */
@@ -27,9 +28,9 @@ int determ_hkdf_sha256(const uint8_t *salt, size_t saltlen,
     /* Extract: PRK = HMAC(salt, IKM). A NULL/zero salt is HashLen zero bytes. */
     if (saltlen == 0) {
         memset(zero_salt, 0, HASHLEN);
-        determ_hmac_sha256(zero_salt, HASHLEN, ikm, ikmlen, prk);
+        if (determ_hmac_sha256(zero_salt, HASHLEN, ikm, ikmlen, prk) != 0) goto done;
     } else {
-        determ_hmac_sha256(salt, saltlen, ikm, ikmlen, prk);
+        if (determ_hmac_sha256(salt, saltlen, ikm, ikmlen, prk) != 0) goto done;
     }
 
     /* Expand: T(i) = HMAC(PRK, T(i-1) || info || i); OKM = T(1) || T(2) || ... */
@@ -38,26 +39,24 @@ int determ_hkdf_sha256(const uint8_t *salt, size_t saltlen,
         uint8_t *buf = (uint8_t *)malloc(n);
         size_t off = 0;
         size_t take;
-        if (buf == NULL) {                       /* allocation failure: scrub + fail */
-            determ_secure_zero(prk, sizeof prk);
-            determ_secure_zero(t, sizeof t);
-            determ_secure_zero(zero_salt, sizeof zero_salt);
-            return -1;
-        }
+        if (buf == NULL) goto done;
         if (tlen) { memcpy(buf, t, tlen); off += tlen; }
         if (infolen) { memcpy(buf + off, info, infolen); off += infolen; }
         buf[off] = (uint8_t)counter;
-        determ_hmac_sha256(prk, HASHLEN, buf, n, t);
+        int hmac_rc = determ_hmac_sha256(prk, HASHLEN, buf, n, t);
         determ_secure_zero(buf, n);              /* holds prior T (PRK-derived) */
         free(buf);
+        if (hmac_rc != 0) goto done;             /* t was not produced */
         tlen = HASHLEN;
         take = (outlen - done < HASHLEN) ? (outlen - done) : HASHLEN;
         memcpy(out + done, t, take);
         done += take;
         counter++;
     }
+    rc = 0;
+done:
     determ_secure_zero(prk, sizeof prk);         /* the pseudorandom key — derives all OKM */
     determ_secure_zero(t, sizeof t);
     determ_secure_zero(zero_salt, sizeof zero_salt);
-    return 0;
+    return rc;
 }

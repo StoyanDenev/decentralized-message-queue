@@ -32,7 +32,8 @@ extern "C" {
  * n_in / n_out consecutive 33-byte compressed commitments; fee is a public uint64.
  * Returns 0 (E is a non-identity point — the normal case), 1 (E is the group identity —
  * the degenerate x==0 case, which has no compressed encoding and cannot be proven), or
- * -1 (a commitment fails to decode / an internal scalar is out of range). */
+ * -1 (a commitment fails to decode, an internal scalar is out of range, a
+ * count/workspace size is not representable, or allocation fails). */
 int determ_p256_balance_excess(uint8_t E_out[33],
                                const uint8_t *C_in, size_t n_in,
                                const uint8_t *C_out, size_t n_out, uint64_t fee);

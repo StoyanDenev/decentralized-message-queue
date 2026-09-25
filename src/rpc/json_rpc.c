@@ -12,7 +12,6 @@
 
 #include <stdio.h>
 #include <stdarg.h>
-#include <stdlib.h>
 #include <string.h>
 
 static int rpc_error_response(char *out, size_t cap, const char *format, ...) {
@@ -446,7 +445,7 @@ int rpc_dispatch_context(const char *request_json, size_t req_len,
 
         size_t peers = count_active_peers(mesh);
 
-        return snprintf(out_resp, max_resp,
+        return rpc_error_response(out_resp, max_resp,
                         "{\"jsonrpc\":\"2.0\",\"result\":{"
                         "\"version\":\"%s\","
                         "\"state\":\"%s\","
@@ -470,7 +469,7 @@ int rpc_dispatch_context(const char *request_json, size_t req_len,
                 bytes_to_hex(head_hash, 32, head_hex, sizeof(head_hex));
             }
         }
-        return snprintf(out_resp, max_resp,
+        return rpc_error_response(out_resp, max_resp,
                         "{\"jsonrpc\":\"2.0\",\"result\":{\"height\":%llu,\"head_hash\":\"%s\"},\"id\":%s}\n",
                         (unsigned long long)height, head_hex, id_str);
     }
@@ -481,13 +480,17 @@ int rpc_dispatch_context(const char *request_json, size_t req_len,
         uint64_t target_height = 0;
         if (params_tok && params_tok->type == JSON_TOK_OBJECT) {
             const determ_json_tok_t *h_tok = determ_json_find_key(request_json, tokens, (size_t)num_tokens, params_tok, "height");
-            if (h_tok && h_tok->type == JSON_TOK_PRIMITIVE) {
-                target_height = (uint64_t)strtoull(request_json + h_tok->start, NULL, 10);
+            if (!h_tok || h_tok->type != JSON_TOK_PRIMITIVE ||
+                h_tok->parent != (int)(params_tok - tokens) || h_tok->end > req_len ||
+                determ_json_token_to_uint64(request_json, h_tok, &target_height) != 0) {
+                return rpc_error_response(out_resp, max_resp,
+                    "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"Invalid height\"},\"id\":%s}\n",
+                    id_str);
             }
         }
 
         if (!store) {
-            return snprintf(out_resp, max_resp,
+            return rpc_error_response(out_resp, max_resp,
                             "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32001,\"message\":\"Block store unavailable\"},\"id\":%s}\n",
                             id_str);
         }
@@ -495,7 +498,7 @@ int rpc_dispatch_context(const char *request_json, size_t req_len,
         uint8_t blk_buf[1024];
         size_t blk_size = 0;
         if (block_store_read_block(store, target_height, blk_buf, sizeof(blk_buf), &blk_size) != 0) {
-            return snprintf(out_resp, max_resp,
+            return rpc_error_response(out_resp, max_resp,
                             "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32004,\"message\":\"Block not found\"},\"id\":%s}\n",
                             id_str);
         }
@@ -503,7 +506,7 @@ int rpc_dispatch_context(const char *request_json, size_t req_len,
         char hex_buf[2049];
         bytes_to_hex(blk_buf, blk_size > 1024 ? 1024 : blk_size, hex_buf, sizeof(hex_buf));
 
-        return snprintf(out_resp, max_resp,
+        return rpc_error_response(out_resp, max_resp,
                         "{\"jsonrpc\":\"2.0\",\"result\":{"
                         "\"height\":%llu,"
                         "\"size\":%zu,"
@@ -520,7 +523,7 @@ int rpc_dispatch_context(const char *request_json, size_t req_len,
             iters = dda->current_iterations;
             avg_time_ms = calculate_average_vdf_time(dda);
         }
-        return snprintf(out_resp, max_resp,
+        return rpc_error_response(out_resp, max_resp,
                         "{\"jsonrpc\":\"2.0\",\"result\":{"
                         "\"algorithm\":\"AES256-Round-Chained\","
                         "\"scope\":\"dda-helper-only\","
@@ -539,7 +542,7 @@ int rpc_dispatch_context(const char *request_json, size_t req_len,
     if (strcmp(method, "get_peer_info") == 0) {
         size_t peers = count_active_peers(mesh);
         const char *domain = mesh ? mesh->config.domain : "none";
-        return snprintf(out_resp, max_resp,
+        return rpc_error_response(out_resp, max_resp,
                         "{\"jsonrpc\":\"2.0\",\"result\":{"
                         "\"domain\":\"%s\","
                         "\"peer_count\":%zu"
@@ -553,7 +556,7 @@ int rpc_dispatch_context(const char *request_json, size_t req_len,
         if (sm && sm->state != DUEL_STATE_IDLE) {
             elapsed_ms = (duel_clock_monotonic_ns() - sm->epoch_start_time) / 1000000ULL;
         }
-        return snprintf(out_resp, max_resp,
+        return rpc_error_response(out_resp, max_resp,
                         "{\"jsonrpc\":\"2.0\",\"result\":{"
                         "\"attempt_deadline_ms\":2000,"
                         "\"deadline_origin\":\"attempt_start\","
@@ -569,7 +572,7 @@ int rpc_dispatch_context(const char *request_json, size_t req_len,
     }
 
     /* Method not found */
-    return snprintf(out_resp, max_resp,
+    return rpc_error_response(out_resp, max_resp,
                     "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,\"message\":\"Method not found\"},\"id\":%s}\n",
                     id_str);
 }

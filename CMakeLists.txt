@@ -788,6 +788,36 @@ target_compile_features(test-binary-codec PRIVATE c_std_99)
 determ_c99_strict(test-binary-codec)
 target_include_directories(test-binary-codec PRIVATE include src)
 
+# The source is included once by this harness with a copy interceptor: a
+# deliberately broken preflight produces an assertion, not a huge invalid copy.
+add_executable(test-c99-codec-bounds tests/test_c99_codec_bounds.c)
+target_include_directories(test-c99-codec-bounds PRIVATE include)
+determ_c99_strict(test-c99-codec-bounds)
+
+# Real crypto sources with test-only failure injection. The ordinary library and
+# production callers retain their normal allocator/HMAC/copy implementations.
+add_library(c99-crypto-bounds-object OBJECT
+  src/crypto/sha2/hkdf.c src/crypto/sha2/pbkdf2.c src/crypto/p256/p256.c
+  src/crypto/pedersen/balance.c src/crypto/argon2/argon2id.c
+  src/crypto/dsso/opaque3dh.c)
+target_include_directories(c99-crypto-bounds-object PRIVATE include)
+target_compile_definitions(c99-crypto-bounds-object PRIVATE
+  malloc=c99_bounds_malloc calloc=c99_bounds_calloc free=c99_bounds_free
+  memcpy=c99_bounds_memcpy determ_hmac_sha256=c99_bounds_hmac_sha256
+  determ_ct_memcmp=c99_bounds_ct_memcmp)
+# Fortified string headers can inline __memcpy_chk under the renamed function,
+# bypassing the assertion adapter. Disable that header substitution only in
+# this injected test object; the ordinary crypto library keeps host hardening.
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(c99-crypto-bounds-object PRIVATE -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0)
+endif()
+determ_c99_strict(c99-crypto-bounds-object)
+add_executable(test-c99-crypto-bounds tests/test_c99_crypto_bounds.c
+  $<TARGET_OBJECTS:c99-crypto-bounds-object>)
+target_include_directories(test-c99-crypto-bounds PRIVATE include)
+target_link_libraries(test-c99-crypto-bounds PRIVATE determ-crypto-c99)
+determ_c99_strict(test-c99-crypto-bounds)
+
 # The C99 socket prototype currently has a POSIX transport. Keep its integration
 # gate explicit instead of presenting an uncompiled Windows path as supported.
 if(UNIX)
@@ -815,7 +845,7 @@ if(UNIX)
   determ_c99_strict(determ-c99-node-core)
   target_include_directories(determ-c99-node-core PUBLIC include src)
   target_link_libraries(determ-c99-node-core PUBLIC determ-crypto-c99)
-  foreach(c99_test k2-net-rpc peer-mesh block-store http-rpc ledger-state rpc-shard-routing rpc-pending-transfer)
+  foreach(c99_test k2-net-rpc peer-mesh block-store http-rpc ledger-state rpc-shard-routing rpc-pending-transfer c99-network-safety c99-http-safety)
     string(REPLACE "-" "_" c99_test_source "${c99_test}")
     add_executable(test-${c99_test} tests/test_${c99_test_source}.c)
     target_link_libraries(test-${c99_test} PRIVATE determ-c99-node-core)

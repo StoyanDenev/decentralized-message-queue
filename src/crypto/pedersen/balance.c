@@ -67,7 +67,12 @@ int determ_p256_balance_excess(uint8_t E_out[PT],
                                const uint8_t *C_in, size_t n_in,
                                const uint8_t *C_out, size_t n_out, uint64_t fee) {
     int rc = -1;
-    size_t cnt = n_in + n_out + 1;
+    size_t cnt;
+    /* Guard the count sum before calloc sees it: calloc can check its own
+     * multiplication, but cannot recover a count that already wrapped. */
+    if (n_out == SIZE_MAX || n_in > SIZE_MAX - n_out - 1u) return -1;
+    cnt = n_in + n_out + 1u;
+    if (cnt > SIZE_MAX / SC || cnt > SIZE_MAX / PT) return -1;
     uint8_t *scal = calloc(cnt, SC), *pts = calloc(cnt, PT);
     if (!scal || !pts) goto done;
     uint8_t one[SC], negone[SC], feesc[SC], negfee[SC], g33[PT];

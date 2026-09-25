@@ -8,7 +8,7 @@
 
 #include <determ/wire/json_token.h>
 #include <string.h>
-#include <ctype.h>
+#include <limits.h>
 
 static inline determ_json_tok_t *alloc_token(determ_json_tok_t *tokens,
                                              size_t max_tokens,
@@ -28,7 +28,7 @@ static inline determ_json_tok_t *alloc_token(determ_json_tok_t *tokens,
 
 int determ_json_parse(const char *js, size_t len,
                       determ_json_tok_t *tokens, size_t max_tokens) {
-    if (!js || len == 0 || !tokens || max_tokens == 0) {
+    if (!js || len == 0 || !tokens || max_tokens == 0 || max_tokens > INT_MAX) {
         return JSON_ERR_INVAL;
     }
 
@@ -160,7 +160,7 @@ const determ_json_tok_t *determ_json_find_key(const char *js,
         if (tokens[i].parent == obj_idx && tokens[i].type == JSON_TOK_STRING) {
             if (determ_json_token_streq(js, &tokens[i], key)) {
                 /* Found matching key; its value is the immediately following token */
-                if (i + 1 < num_tokens) {
+                if (i + 1 < num_tokens && tokens[i + 1].parent == obj_idx) {
                     return &tokens[i + 1];
                 }
             }
@@ -170,7 +170,7 @@ const determ_json_tok_t *determ_json_find_key(const char *js,
 }
 
 int determ_json_token_streq(const char *js, const determ_json_tok_t *tok, const char *expected) {
-    if (!js || !tok || !expected) return 0;
+    if (!js || !tok || !expected || tok->end < tok->start) return 0;
     size_t tok_len = tok->end - tok->start;
     size_t exp_len = strlen(expected);
     if (tok_len != exp_len) return 0;
@@ -179,9 +179,9 @@ int determ_json_token_streq(const char *js, const determ_json_tok_t *tok, const 
 
 int determ_json_token_to_string(const char *js, const determ_json_tok_t *tok,
                                 char *out_buf, size_t max_out) {
-    if (!js || !tok || !out_buf || max_out == 0) return -1;
+    if (!js || !tok || !out_buf || max_out == 0 || tok->end < tok->start) return -1;
     size_t tok_len = tok->end - tok->start;
-    if (tok_len + 1 > max_out) return -1;
+    if (tok_len >= max_out) return -1;
     memcpy(out_buf, js + tok->start, tok_len);
     out_buf[tok_len] = '\0';
     return 0;
@@ -193,7 +193,9 @@ int determ_json_token_to_uint64(const char *js, const determ_json_tok_t *tok, ui
     for (size_t i = tok->start; i < tok->end; ++i) {
         char c = js[i];
         if (c < '0' || c > '9') return -1;
-        val = val * 10 + (uint64_t)(c - '0');
+        uint64_t digit = (uint64_t)(c - '0');
+        if (val > (UINT64_MAX - digit) / 10) return -1;
+        val = val * 10 + digit;
     }
     *out_val = val;
     return 0;
