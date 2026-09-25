@@ -350,7 +350,7 @@ Identify the mutexes on the path between an io_context worker entering a state-m
 
 - `state_mutex_` — the chain-state mutex. Held by writers and readers; never re-acquired recursively.
 - `save_mutex_` — the async-save worker's coordination mutex. Held only at the top of `save_worker_loop` and inside `enqueue_save`. Never held while `state_mutex_` is held.
-- `net::RateLimiter::mu_` (S-014 sibling) — the rate-limiter mutex. Held only inside `RateLimiter::consume`; never nests with `state_mutex_` because RateLimiter::consume is called before the RPC dispatch reaches any handler that takes `state_mutex_` (`rpc.cpp:172` and `gossip.cpp:154` per `S014ConcurrencyAnalysis.md` §3.6).
+- `net::RateLimiter::mu_` (S-014 sibling) — the rate-limiter mutex. Held only inside `RateLimiter::consume`; never nests with `state_mutex_` because RateLimiter::consume is called before the RPC dispatch reaches any handler that takes `state_mutex_` (`rpc.cpp:182` and `gossip.cpp:154` per `S014ConcurrencyAnalysis.md` §3.6).
 - `gossip_.mu_` (the GossipNet's internal mutex protecting peer list + send queues) — taken inside `gossip_.broadcast()`. Order: every RPC mutator releases `state_mutex_` BEFORE calling `broadcast` per T-6's v2.6 polish. So `state_mutex_` → `gossip_.mu_` ordering is never violated on the RPC mutator paths.
 
 Cross-mutex ordering audit:

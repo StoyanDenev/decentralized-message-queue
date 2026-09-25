@@ -297,7 +297,7 @@ Per-theorem citation table for an auditor walking from theorem to code.
 | SU-4 | `Chain::state_proof` | `src/chain/chain.cpp:581-608` | `leaf_count = leaves.size()` (l.602) from the same tree as the root. |
 | SU-E | `read_account_trustless` (template for `cmd_supply_trustless`) | `light/trustless_read.cpp:439-599` | The composite read skeleton; `supply-trustless` differs by `namespace="c"`, repeated per counter against the same head. |
 | SU-1 | `Chain::compute_state_root` | `src/chain/chain.cpp:559-560` | `merkle_root(build_state_leaves())` — the root the committee transitively signs; binds the SET of leaves + `leaf_count`, so a present shielded leaf cannot be dropped under the same root (SU-3 §4.3, §6.4). |
-| SU-1 | state_proof RPC dispatch | `src/rpc/rpc.cpp:253-254` | `method == "state_proof"` → `rpc_state_proof(namespace, key)`. |
+| SU-1 | state_proof RPC dispatch | `src/rpc/rpc.cpp:263-264` | `method == "state_proof"` → `rpc_state_proof(namespace, key)`. |
 
 **Tests** (the `c:` read shares the light-client + Merkle + supply test surface; `tools/test_light_supply_trustless.sh` is the shipped end-to-end script):
 
@@ -338,7 +338,7 @@ Per-theorem citation table for an auditor walking from theorem to code.
 - `src/chain/chain.cpp:1866-1892` — A1 unitary-supply apply-tail gate (`live_total_supply() == expected_total()`).
 - `src/node/node.cpp:4631-4780` — `Node::rpc_state_proof` (`c:` supported l.4667; composite key built generically l.4670-4673; single envelope l.4732-4742; atomic value fast-path l.4758-4778 — five counters only).
 - `src/node/node.cpp:3679-3684` — `rpc_chain_summary` cleartext counters (five always-present; `accumulated_shielded` NOT exposed — §6.4 owner-gated gap).
-- `src/rpc/rpc.cpp:253-254` — `state_proof` RPC dispatch.
+- `src/rpc/rpc.cpp:263-264` — `state_proof` RPC dispatch.
 - `include/determ/chain/chain.hpp:548-553` — counter accessors (`accumulated_shielded()` at l.553).
 - `include/determ/chain/chain.hpp:590-597` — `Chain::expected_total` (**six-term** closed-form A1 identity).
 - `include/determ/chain/chain.hpp:889-898` — counter fields (`accumulated_shielded_` at l.898).

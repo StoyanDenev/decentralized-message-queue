@@ -67,6 +67,15 @@ private:
     net::RateLimiter              rate_limiter_;
 };
 
+// v2.16 / S-122: the RPC authentication key for a configured hex secret. An
+// empty string yields an empty key (authentication disabled). Otherwise the
+// string must be an even number of hex digits (0-9, a-f, A-F) and decodes to
+// half as many bytes; anything else throws std::invalid_argument, so the
+// RpcServer constructor (and rpc_call) refuse a mistyped secret instead of
+// disabling authentication or deriving a different key. The message never
+// contains the secret.
+std::vector<uint8_t> rpc_auth_key(const std::string& secret_hex);
+
 // v2.16 / S-118: the verdict RpcServer::verify_auth applies to a computed tag.
 // Returns "" (accept) only when `expected` is a complete 64-character tag and
 // `got` equals it, compared in constant time; "auth_failed" otherwise. Any other

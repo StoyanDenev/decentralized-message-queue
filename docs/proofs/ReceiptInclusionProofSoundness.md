@@ -325,7 +325,7 @@ Per-theorem citation table for an auditor walking from theorem to code.
 | §6.4 (RPC sourcing) | `Node::rpc_state_proof` composite-namespace branch | `src/node/node.cpp` rpc_state_proof (`i\|m\|p` hex-decoded + length-checked) | `i:` served via R-ext (hex key body); soundness sourcing-independent (RI-2). |
 | §5.5 (apply-side dual) | inbound-receipt admission + insert | `src/chain/chain.cpp:1358-1381` (insert `:1373-1374`) | FA7/T-R1 first-application credit; the record `i:` reads back. |
 | RPC transport | `RpcClient::call` | `light/rpc_client.cpp` | Generic JSON-RPC the proof/header fetch rides on. |
-| `state_proof` RPC dispatch | `src/rpc/rpc.cpp:235-238` | `method == "state_proof"` → `rpc_state_proof(namespace, key)`. |
+| `state_proof` RPC dispatch | `src/rpc/rpc.cpp:245-248` | `method == "state_proof"` → `rpc_state_proof(namespace, key)`. |
 
 **Tests** (the `i:` read shares the light-client + Merkle test surface; sibling I3 adds an end-to-end `verify-receipt-inclusion` script this round):
 
@@ -368,7 +368,7 @@ Per-theorem citation table for an auditor walking from theorem to code.
 - `src/chain/block.cpp:336-364` — `Block::signing_bytes` / `compute_hash` (binds `state_root` when non-zero).
 - `src/crypto/merkle.cpp:25-34` — `merkle_leaf_hash` (length-prefixed key; MT-2).
 - `src/crypto/merkle.cpp:113-141` — `merkle_verify`.
-- `src/rpc/rpc.cpp:235-238` — `state_proof` RPC dispatch.
+- `src/rpc/rpc.cpp:245-248` — `state_proof` RPC dispatch.
 - `light/verify.cpp:330-396` — `verify_state_proof` (consumes `key_bytes` at `:349-350`).
 - `light/trustless_read.cpp:439-599` — `read_account_trustless` (template for the `i:` read); S-042 committee-binding `committee_bound_state_root` `:335-437`.
 

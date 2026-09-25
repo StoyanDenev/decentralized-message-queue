@@ -515,7 +515,7 @@ This is strictly stronger than a "drop and continue" disposition: it imposes a p
 
 **Proof of T-5 (Composition with S-014 Rate Limiter).** Direct from L-6 + T-1 of `S014RateLimiterSoundness.md`. The two defenses operate at different layers and are independent:
 
-- **S-014** (`include/determ/net/rate_limiter.hpp`, `src/net/gossip.cpp:154`, `src/rpc/rpc.cpp:172`): per-peer-IP token bucket. Bounds the **count** of accepted messages per IP per window.
+- **S-014** (`include/determ/net/rate_limiter.hpp`, `src/net/gossip.cpp:154`, `src/rpc/rpc.cpp:182`): per-peer-IP token bucket. Bounds the **count** of accepted messages per IP per window.
 - **S-022** (`src/net/peer.cpp:90`, `include/determ/net/messages.hpp::max_message_bytes`): per-MsgType body-size cap. Bounds the **size** of each accepted message by its type.
 
 The composition is multiplicative:

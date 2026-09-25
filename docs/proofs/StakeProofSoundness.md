@@ -220,7 +220,7 @@ Per-theorem citation table for an auditor walking from theorem to code.
 | SP-3 | `Chain::state_proof` | `src/chain/chain.cpp:435-462` | `leaf_count = leaves.size()` (l.456) from the same tree as the root. |
 | SP-E | `read_account_trustless` (template for `read_stake_trustless`) | `light/trustless_read.cpp:439-599` | The composite read skeleton; `stake-trustless` differs only by `namespace="s"`. |
 | SP-1 | `Chain::compute_state_root` | `src/chain/chain.cpp:413-415` | `merkle_root(build_state_leaves())` — the root the committee transitively signs. |
-| SP-1 | state_proof RPC dispatch | `src/rpc/rpc.cpp:235-238` | `method == "state_proof"` → `rpc_state_proof(namespace, key)`. |
+| SP-1 | state_proof RPC dispatch | `src/rpc/rpc.cpp:245-248` | `method == "state_proof"` → `rpc_state_proof(namespace, key)`. |
 
 **Tests** (the `s:` read shares the light-client + Merkle test surface; the sibling agent adds an end-to-end `stake-trustless` script this round):
 
@@ -253,7 +253,7 @@ Per-theorem citation table for an auditor walking from theorem to code.
 - `src/chain/chain.cpp:435-462` — `Chain::state_proof` (`leaf_count` at l.456).
 - `src/chain/chain.cpp:413-415` — `Chain::compute_state_root`.
 - `src/node/node.cpp:3363-3454` — `Node::rpc_state_proof` (`s:` supported l.3390; single envelope l.3443-3453).
-- `src/rpc/rpc.cpp:235-238` — `state_proof` RPC dispatch.
+- `src/rpc/rpc.cpp:245-248` — `state_proof` RPC dispatch.
 - `include/determ/chain/chain.hpp:23-30` — `StakeEntry`.
 - `src/crypto/merkle.cpp:131-162` — `merkle_verify`.
 - `light/verify.cpp:330-394` — `verify_state_proof`.

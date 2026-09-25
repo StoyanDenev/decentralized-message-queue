@@ -15,24 +15,24 @@ isolation and FB25 (RateLimiterEviction.tla) models the rate-limiter
 bucket lifecycle in isolation, NEITHER pins the ORDER in which those
 two gates fire on a single inbound RPC line — and ordering is itself
 a security property. This spec formalizes the per-connection request
-loop at `src/rpc/rpc.cpp:142-195` (`RpcServer::handle_session`), the
+loop at `src/rpc/rpc.cpp:161-232` (`RpcServer::handle_session`), the
 one place where both subsystems compose on the hot path:
 
   Stage 1 (rate-limit, BEFORE parse). `rate_limiter_.consume(peer_ip)`
-    at `src/rpc/rpc.cpp:172`. Mirrors the S-014 per-peer-IP token
+    at `src/rpc/rpc.cpp:183`. Mirrors the S-014 per-peer-IP token
     bucket. A peer that exceeds its bucket is shed with
     `error = "rate_limited"` and the request is NOT parsed, NOT
     authenticated, NOT dispatched. The deliberate ordering comment at
-    `src/rpc/rpc.cpp:166-171` states two reasons: (a) avoid spending
+    `src/rpc/rpc.cpp:177-182` states two reasons: (a) avoid spending
     JSON-parse cost on rate-limited callers, and (b) rate-limited
     callers should not even learn whether their auth was valid.
   Stage 2 (HMAC auth, AFTER parse, BEFORE dispatch).
-    `verify_auth(req)` at `src/rpc/rpc.cpp:179`. Mirrors the S-001
+    `verify_auth(req)` at `src/rpc/rpc.cpp:190`. Mirrors the S-001
     HMAC-SHA-256 gate. Runs only on rate-limit-admitted requests
     (it is in the ELSE arm of the rate-limit branch at lines
     175-186). On a non-empty `auth_err` the request is shed with that
     error and NOT dispatched.
-  Stage 3 (dispatch). `dispatch(req)` at `src/rpc/rpc.cpp:184`. Runs
+  Stage 3 (dispatch). `dispatch(req)` at `src/rpc/rpc.cpp:221`. Runs
     only on the doubly-admitted path: rate-limit PASS and auth PASS.
 
 This composition surface is novel relative to the two component
@@ -55,7 +55,7 @@ Four paired theorems are pinned:
         rate-limited never has its auth evaluated — its outcome is
         RATE_LIMITED and its `auth_evaluated` flag is FALSE. This is
         the information-non-leakage contract at
-        `src/rpc/rpc.cpp:166-171`: a flooding peer cannot use the
+        `src/rpc/rpc.cpp:177-182`: a flooding peer cannot use the
         server's response to distinguish a valid auth header from an
         invalid one, because the rate-limit shed happens before the
         HMAC recompute. State-form witness: INV_RateLimitedNeverAuthed.
@@ -69,7 +69,7 @@ Four paired theorems are pinned:
   (T-4) Outcome-totality + mutual-exclusion. Every processed request
         lands in EXACTLY ONE of {RATE_LIMITED, AUTH_FAILED,
         DISPATCHED}, matching the three response branches at
-        `src/rpc/rpc.cpp:172-186`. No request is silently dropped and
+        `src/rpc/rpc.cpp:183-224`. No request is silently dropped and
         none is double-counted. State-form witness:
         INV_OutcomeTotality.
 
@@ -87,7 +87,7 @@ Stutter to bound TLC):
   * Arrive(peer, hdr) — a peer enqueues a request bearing an auth
     header that is either the canonical HMAC for the request body
     ("VALID") or a forged value ("FORGED"). Models a line arriving on
-    the socket at `src/rpc/rpc.cpp:158`. We abstract the request body
+    the socket at `src/rpc/rpc.cpp:173`. We abstract the request body
     to its single peer identity (the bucket key) plus the auth-header
     validity tag — the auth payload's cryptographic detail is FB36
     territory; here we only need the boolean "would verify_auth pass".
@@ -96,7 +96,7 @@ Stutter to bound TLC):
     (parsed = FALSE, auth_evaluated = FALSE); else spend a token,
     parse (parsed = TRUE), evaluate auth (auth_evaluated = TRUE):
     if the header is "VALID" outcome = DISPATCHED, else AUTH_FAILED.
-    Mirrors `RpcServer::handle_session` lines 165-191.
+    Mirrors `RpcServer::handle_session` lines 176-228.
   * Refill(peer) — restore one token to a peer's bucket, bounded by
     burst. Abstracts the S-014 refill-on-elapsed-time arithmetic
     (`rate_limiter.hpp` consume() refill branch); we model token
@@ -118,14 +118,14 @@ Modeling scope (kept tractable for TLC):
   * The auth header is abstracted to a tag in {"VALID", "FORGED"}:
     "VALID" is the canonical HMAC the legitimate caller computes
     (`hmac_sha256_hex(key, canonical_for_hmac(method, params))` at
-    `src/rpc/rpc.cpp:305-306`); "FORGED" is any adversary-chosen
+    `src/rpc/rpc.cpp:356-357`); "FORGED" is any adversary-chosen
     header distinct from the canonical value. The cryptographic
     non-collision (a FORGED header never equals the canonical HMAC)
     is FB36's contract (its ForgedHeaders ∩ HmacOutputs = {}
     disjointness); FB51 consumes it as the precondition that a
     "FORGED" header always fails verify_auth.
   * The auth-disabled escape hatch (`auth_secret_.empty()` short-
-    circuit at `src/rpc/rpc.cpp:113`) is abstracted out: the spec
+    circuit at `src/rpc/rpc.cpp:138`) is abstracted out: the spec
     models the auth-ENABLED configuration (the security-relevant
     case). With auth disabled, Stage 2 is a pass-through and the
     ordering contract degenerates trivially.
@@ -141,9 +141,9 @@ Process invocation. The flags `parsed` and `auth_evaluated` are
 spec-only observability lifts that make the ordering contracts
 (T-2, T-3) checkable as state-form invariants: the C++ side does not
 materialize these booleans, but the control-flow structure at
-`src/rpc/rpc.cpp:172-186` determines them deterministically (a
+`src/rpc/rpc.cpp:183-224` determines them deterministically (a
 rate-limited request takes the if-arm and never reaches the parse at
-line 176 nor the verify at line 179).
+line 187 nor the verify at line 190).
 
 To check (assuming TLC installed):
   $ tlc RpcAdmissionOrdering.tla -config RpcAdmissionOrdering.cfg
@@ -152,18 +152,18 @@ Recommended config (state space ~10^4, < 30s):
   Peers = {"p1", "p2"}, Burst = 2, MaxArrivals = 4.
 
 Cross-references:
-  - src/rpc/rpc.cpp:142-195 : RpcServer::handle_session — the
+  - src/rpc/rpc.cpp:161-232 : RpcServer::handle_session — the
       per-connection request loop; the proof's primary object. The
       spec's Process action mirrors the three-stage gate.
-  - src/rpc/rpc.cpp:166-171 : the ordering-comment block — the
+  - src/rpc/rpc.cpp:177-182 : the ordering-comment block — the
       design rationale for rate-limit-before-auth (cost-shedding +
       information-non-leakage); the structural witness for T-2 + T-3.
-  - src/rpc/rpc.cpp:172     : rate_limiter_.consume(peer_ip) — Stage 1.
-  - src/rpc/rpc.cpp:176     : json::parse(line) — the parse that the
+  - src/rpc/rpc.cpp:183     : rate_limiter_.consume(peer_ip) — Stage 1.
+  - src/rpc/rpc.cpp:187     : json::parse(line) — the parse that the
       rate-limit gate defers past (T-3).
-  - src/rpc/rpc.cpp:179-182 : verify_auth(req) — Stage 2 (in the
+  - src/rpc/rpc.cpp:190-193 : verify_auth(req) — Stage 2 (in the
       rate-limit ELSE arm; runs only on admitted requests).
-  - src/rpc/rpc.cpp:184     : dispatch(req) — Stage 3 (the doubly-
+  - src/rpc/rpc.cpp:221     : dispatch(req) — Stage 3 (the doubly-
       admitted path).
   - include/determ/net/rate_limiter.hpp:42-117 : configure() +
       consume() — the S-014 token bucket the Stage-1 gate consults.
@@ -212,10 +212,10 @@ ASSUME ConfigOK ==
 AuthTags == {"VALID", "FORGED"}
 
 \* Outcomes: the three terminal branches of handle_session's request
-\* loop at `src/rpc/rpc.cpp:172-186`:
-\*   "RATE_LIMITED" — Stage 1 shed (line 173-174).
-\*   "AUTH_FAILED"  — Stage 2 shed (line 181-182).
-\*   "DISPATCHED"   — Stage 3 reached (line 184-185).
+\* loop at `src/rpc/rpc.cpp:183-224`:
+\*   "RATE_LIMITED" — Stage 1 shed (line 184-185).
+\*   "AUTH_FAILED"  — Stage 2 shed (line 192-193).
+\*   "DISPATCHED"   — Stage 3 reached (line 221-222).
 
 Outcomes == {"RATE_LIMITED", "AUTH_FAILED", "DISPATCHED"}
 
@@ -271,7 +271,7 @@ Init ==
 \* -----------------------------------------------------------------
 
 \* Arrive(peer, hdr): a peer enqueues a request bearing an auth-header
-\* tag. Models a line arriving on the socket at `src/rpc/rpc.cpp:158`.
+\* tag. Models a line arriving on the socket at `src/rpc/rpc.cpp:173`.
 \* Bounded by MaxArrivals on the combined queue+processed length so
 \* TLC explores a bounded universe.
 \*
@@ -290,7 +290,7 @@ Arrive(peer, hdr) ==
 
 \* Process: dequeue the head request and run the three-stage gate.
 \*
-\* Mirrors `RpcServer::handle_session` lines 165-191:
+\* Mirrors `RpcServer::handle_session` lines 176-228:
 \*
 \*   if (!rate_limiter_.consume(peer_ip)) {        // Stage 1 shed
 \*       response["error"] = "rate_limited";
@@ -309,7 +309,7 @@ Arrive(peer, hdr) ==
 \* the structural witness for T-2 (rate-limited never authed) + T-3
 \* (rate-limited never parsed): the spec sets parsed = FALSE and
 \* auth_evaluated = FALSE on this branch, exactly mirroring the
-\* control flow that never reaches line 176 (parse) nor line 179
+\* control flow that never reaches line 187 (parse) nor line 190
 \* (verify_auth).
 \*
 \* Stage 1 PASS: spend a token (tokens[peer] - 1), parse (parsed =
@@ -419,10 +419,10 @@ INV_DispatchImpliesBothGates ==
 \* Every processed entry with outcome = "RATE_LIMITED" has
 \* auth_evaluated = FALSE — the rate-limit shed happened before the
 \* HMAC recompute, so the auth was never evaluated. This is the
-\* information-non-leakage contract at `src/rpc/rpc.cpp:166-171`: a
+\* information-non-leakage contract at `src/rpc/rpc.cpp:177-182`: a
 \* flooding peer cannot tell from the response whether its auth
 \* header was valid, because rate-limited requests never reach
-\* verify_auth at line 179.
+\* verify_auth at line 190.
 \*
 \* Structural witness in Process: the RATE_LIMITED branch sets
 \* auth_evaluated = admitted = FALSE.
@@ -436,7 +436,7 @@ INV_RateLimitedNeverAuthed ==
 \* INV_RateLimitedNeverParsed (T-3).
 \*
 \* Every processed entry with outcome = "RATE_LIMITED" has
-\* parsed = FALSE — the JSON parse at `src/rpc/rpc.cpp:176` is in the
+\* parsed = FALSE — the JSON parse at `src/rpc/rpc.cpp:187` is in the
 \* rate-limit ELSE arm, so a rate-limited request is never parsed.
 \* This is the DoS-cost contract: the per-peer token bucket bounds
 \* the parse + verify work an attacker can induce, because the
@@ -460,7 +460,7 @@ INV_RateLimitedNeverParsed ==
 \*   - DISPATCHED    ⇒  parsed ∧  auth_evaluated ∧ hdr = "VALID".
 \* No request is silently dropped (every Process appends exactly one
 \* entry) and none is double-counted. Matches the three response
-\* branches at `src/rpc/rpc.cpp:172-186`.
+\* branches at `src/rpc/rpc.cpp:183-224`.
 \*
 \* The mutual-exclusion + totality is structurally guaranteed by the
 \* outcome being a single value from the three-element Outcomes set;
@@ -542,7 +542,7 @@ PROP_EventualDrain ==
 \*     models the RPC admission surface only.
 \*
 \*   * The auth-DISABLED escape hatch (`auth_secret_.empty()` short-
-\*     circuit at `src/rpc/rpc.cpp:113`) is abstracted out: the spec
+\*     circuit at `src/rpc/rpc.cpp:138`) is abstracted out: the spec
 \*     models the auth-ENABLED configuration. With auth disabled,
 \*     Stage 2 is a pass-through (every admitted request DISPATCHes)
 \*     and the ordering contract degenerates trivially.
@@ -568,7 +568,7 @@ PROP_EventualDrain ==
 \*   * Token-bucket refill arithmetic + idle-eviction — FB25 /
 \*     RateLimiterEviction.tla + S014RateLimiterSoundness.md.
 \*   * The constant-time auth compare — FB36 T-3 (the byte-level
-\*     XOR-OR loop at `src/rpc/rpc.cpp:122-128`).
+\*     XOR-OR loop at `src/rpc/rpc.cpp:128-134`).
 \*   * Concurrent-session interleaving across distinct sockets — the
 \*     C++ side serializes the rate limiter via `std::mutex mu_`
 \*     (`rate_limiter.hpp`); the spec uses TLA+ atomic actions to model
@@ -578,19 +578,19 @@ PROP_EventualDrain ==
 \* Cross-references.
 \*
 \* C++ enforcement:
-\*   src/rpc/rpc.cpp:142-195 : RpcServer::handle_session — the per-
+\*   src/rpc/rpc.cpp:161-232 : RpcServer::handle_session — the per-
 \*       connection request loop; the proof's primary object. The
 \*       spec's Process action mirrors the three-stage gate.
-\*   src/rpc/rpc.cpp:166-171 : the ordering-comment block — the design
+\*   src/rpc/rpc.cpp:177-182 : the ordering-comment block — the design
 \*       rationale (cost-shedding + information-non-leakage); the
 \*       structural witness for T-2 + T-3.
-\*   src/rpc/rpc.cpp:172     : rate_limiter_.consume(peer_ip) — Stage 1
+\*   src/rpc/rpc.cpp:183     : rate_limiter_.consume(peer_ip) — Stage 1
 \*       (rate-limit, BEFORE parse).
-\*   src/rpc/rpc.cpp:176     : json::parse(line) — the parse the
+\*   src/rpc/rpc.cpp:187     : json::parse(line) — the parse the
 \*       rate-limit gate defers past (T-3).
-\*   src/rpc/rpc.cpp:179-182 : verify_auth(req) — Stage 2 (HMAC auth,
+\*   src/rpc/rpc.cpp:190-193 : verify_auth(req) — Stage 2 (HMAC auth,
 \*       in the rate-limit ELSE arm; runs only on admitted requests).
-\*   src/rpc/rpc.cpp:184-185 : dispatch(req) — Stage 3 (the doubly-
+\*   src/rpc/rpc.cpp:221-222 : dispatch(req) — Stage 3 (the doubly-
 \*       admitted path: rate-limit PASS and auth PASS).
 \*   include/determ/net/rate_limiter.hpp:42-117 : configure() +
 \*       consume() — the S-014 token bucket the Stage-1 gate consults.

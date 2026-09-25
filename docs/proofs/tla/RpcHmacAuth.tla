@@ -9,19 +9,19 @@ RpcHmacAuth.cfg RpcHmacAuth.tla` once the TLC toolchain is installed
 in CI.
 
 Scope. Formalizes the RPC authentication state machine that governs
-Determ's `RpcServer::verify_auth` flow at `src/rpc/rpc.cpp:112-129`.
+Determ's `RpcServer::verify_auth` flow at `src/rpc/rpc.cpp:137-148`.
 Every state-mutating RPC request must carry an `auth` header
 containing `hex(HMAC-SHA-256(server_secret, canonical(method, body)))`
 where `canonical(method, body) := method ‖ "|" ‖ body.dump()`. The
 server recomputes the expected HMAC under its locally-stored secret
 and accepts the request iff the constant-time compare at
-`src/rpc/rpc.cpp:122-128` returns `diff == 0`.
+`src/rpc/rpc.cpp:128-134` returns `diff == 0`.
 
 This spec abstracts the HMAC primitive (delegating cryptographic
 strength to A2 / H1 SHA-256 collision resistance per
 `Preliminaries.md` §2.1 + the standard HMAC PRF reduction of
 Bellare-Canetti-Krawczyk 1996 / Bellare 2006) and the constant-time
-compare (the per-byte XOR-OR loop at `src/rpc/rpc.cpp:124-128`
+compare (the per-byte XOR-OR loop at `src/rpc/rpc.cpp:130-134`
 modeled as a spec-level pure-function predicate; the operational
 constant-time property is asserted as a precondition citing the C++
 source).
@@ -41,7 +41,7 @@ S001RpcAuthSoundness.md §3):
         value is admitted. State-form witness: INV_NoAuthBypass.
   (T-3) Constant-time comparison. The verify-time compare is
         constant in the inputs (the C++ XOR-OR loop at
-        `src/rpc/rpc.cpp:124-128`); modeled at spec level as an
+        `src/rpc/rpc.cpp:130-134`); modeled at spec level as an
         atomic predicate (no per-byte timing side-channel). State-
         form witness: INV_ConstantTimeCompare (assertion-form
         precondition citing the C++ source).
@@ -62,14 +62,14 @@ The state machine. Four actions cover the auth-pipeline surface:
   * ConfigureSecret(s) — the server sets (or rotates) its secret
     to s ∈ RpcSecrets. Mirrors the operator-configured
     `auth_secret_` field set at `RpcServer::RpcServer` construction
-    (`src/rpc/rpc.cpp:79-90`) via the hex-decoded
+    (`src/rpc/rpc.cpp:71-99`, decoded by `rpc_auth_key` at line 79) via the hex-decoded
     `DETERM_RPC_AUTH_SECRET` env var or explicit `--auth-secret`
     CLI argument. The C++ side decodes from hex; the spec layer
     uses the secret universe `RpcSecrets` directly.
   * IssueAuthorizedRequest(body) — legitimate caller computes
     `auth_header := Hmac(server_secret, body)` and enqueues
     (body, auth_header) to pending_requests. Mirrors the client-
-    side `rpc_call` at `src/rpc/rpc.cpp:276-321` which reads the
+    side `rpc_call` at `src/rpc/rpc.cpp:329-367` which reads the
     secret from the env var, computes the HMAC, and writes the
     JSON line.
   * IssueForgedRequest(body, forged_header) — adversary picks any
@@ -82,7 +82,7 @@ The state machine. Four actions cover the auth-pipeline surface:
     `expected := Hmac(server_secret, head.body)`; accept iff
     `head.auth_header = expected`; log the (server_secret, body,
     auth_header, result) tuple to auth_log. Mirrors
-    `RpcServer::verify_auth` at `src/rpc/rpc.cpp:112-129` with the
+    `RpcServer::verify_auth` at `src/rpc/rpc.cpp:137-148` with the
     constant-time compare assumed as a precondition (modeled at
     spec level as an atomic equality check).
 
@@ -95,7 +95,7 @@ Five invariants codify T-1..T-4 + a type predicate:
         lifted to the state-machine layer.
   INV_ConstantTimeCompare (T-3) — assertion-form predicate citing
         the C++ source: the verify compare at
-        `src/rpc/rpc.cpp:122-128` is constant-time (no per-byte
+        `src/rpc/rpc.cpp:128-134` is constant-time (no per-byte
         timing side-channel). At the spec layer, the compare is
         an atomic equality predicate; the precondition is asserted
         as TRUE and the C++ source is cited.
@@ -141,7 +141,7 @@ Modeling scope (kept tractable for TLC):
   * `Messages` is a SUBSET of strings — the universe of
     request bodies. Production bodies are JSON-serialized
     (method, params) tuples canonicalized via
-    `canonical_for_hmac` at `src/rpc/rpc.cpp:52-58`; the spec
+    `canonical_for_hmac` at `src/rpc/rpc.cpp:40-46`; the spec
     abstracts the canonicalization (delegating to L-2 of
     `RpcAuthHmacSoundness.md`) and treats messages as opaque
     strings.
@@ -179,11 +179,11 @@ The state machine. Four actions cover the auth-pipeline surface
     + pending_requests. The legitimate-caller's secret-of-record
     follows server_secret implicitly (the client side re-reads
     DETERM_RPC_AUTH_SECRET on each call per the spec at
-    `src/rpc/rpc.cpp:294`); rotations are picked up on the next
+    `src/rpc/rpc.cpp:343`); rotations are picked up on the next
     IssueAuthorizedRequest call.
   * IssueAuthorizedRequest(body) — append
     `[body, Hmac(server_secret, body)]` to pending_requests.
-    Mirrors the legitimate client at `src/rpc/rpc.cpp:276-321`.
+    Mirrors the legitimate client at `src/rpc/rpc.cpp:329-367`.
     The server_secret is read at the call site (not stored in
     the request body — INV_SecretConfidentiality's structural
     witness).
@@ -210,29 +210,30 @@ Recommended config (state space ~10^4, < 30s):
   MaxRequests = 4.
 
 Cross-references:
-  - src/rpc/rpc.cpp:52-58   : canonical_for_hmac(method, params)
+  - src/rpc/rpc.cpp:40-46   : canonical_for_hmac(method, params)
       canonical-serialization helper (method ‖ "|" ‖ params.dump());
       the spec's Hmac() input domain is the canonicalized bytes,
       abstracted to opaque Messages strings.
-  - src/rpc/rpc.cpp:60-70   : hmac_sha256_hex(key, message) HMAC
+  - src/rpc/rpc.cpp:48-62   : hmac_sha256_hex(key, message) HMAC
       primitive wrapping OpenSSL HMAC(EVP_sha256(), ...); the
       spec's Hmac() operator is the spec-layer projection.
-  - src/rpc/rpc.cpp:79-90   : RpcServer constructor; secret hex-
+  - src/rpc/rpc.cpp:71-99   : RpcServer constructor; secret hex-
       decoded into auth_secret_ at construction; the spec's
       ConfigureSecret action mirrors this initialization (and the
       operational rotation path via DETERM_RPC_AUTH_SECRET env
       var re-read).
-  - src/rpc/rpc.cpp:92-104  : Startup log emitting only
+  - src/rpc/rpc.cpp:81-98  : Startup log emitting only
       auth_secret_.size(), never the value; the structural witness
       for INV_SecretConfidentiality at the log-output surface.
-  - src/rpc/rpc.cpp:112-129 : verify_auth — the proof's primary
+  - src/rpc/rpc.cpp:137-148 : verify_auth — the proof's primary
       object. The spec's ProcessRequest action mirrors this flow:
-      empty-secret short-circuit (line 113) → missing-auth check
-      (lines 114-116) → expected Hmac recompute (lines 117-120) →
-      constant-time XOR-OR compare (lines 122-128).
-  - src/rpc/rpc.cpp:122-128 : Constant-time XOR-OR loop; the
+      empty-secret short-circuit (line 138) → missing-auth check
+      (lines 139-141) → expected Hmac recompute (lines 142-145) →
+      auth_tag_verdict: incomplete-tag refusal and constant-time
+      XOR-OR compare (lines 127-134).
+  - src/rpc/rpc.cpp:128-134 : Constant-time XOR-OR loop; the
       structural witness for T-3 / INV_ConstantTimeCompare.
-  - src/rpc/rpc.cpp:276-321 : Client-side rpc_call with
+  - src/rpc/rpc.cpp:329-367 : Client-side rpc_call with
       DETERM_RPC_AUTH_SECRET env var support; the spec's
       IssueAuthorizedRequest action mirrors this.
   - docs/proofs/RpcAuthHmacSoundness.md — the analytic FA-track
@@ -292,8 +293,8 @@ ASSUME ConfigOK ==
 \* §1. Abstract HMAC operator.
 \* -----------------------------------------------------------------
 
-\* Hmac(secret, body): the spec-layer projection of OpenSSL
-\* HMAC(EVP_sha256(), secret, body) at `src/rpc/rpc.cpp:60-70`.
+\* Hmac(secret, body): the spec-layer projection of the C99
+\* HMAC-SHA-256 that `hmac_sha256_hex` computes at `src/rpc/rpc.cpp:48-62`.
 \* Modeled as a tagged tuple <<"HMAC", secret, body>>: two distinct
 \* (secret, body) pairs produce distinct outputs by TLA+ extensional
 \* equality on tuples; same (secret, body) pair always produces the
@@ -362,7 +363,7 @@ VARIABLES
                          \*  server's currently-configured secret.
                          \*  "NONE" is the pre-configure sentinel
                          \*  (auth disabled per
-                         \*  `src/rpc/rpc.cpp:113`); the spec
+                         \*  `src/rpc/rpc.cpp:138`); the spec
                          \*  abstracts the auth-disabled branch by
                          \*  requiring ConfigureSecret to fire
                          \*  before any ProcessRequest.
@@ -422,7 +423,7 @@ PendingEntry == [
 \* -----------------------------------------------------------------
 \*
 \* server_secret starts at the pre-configure sentinel "NONE" —
-\* mirrors the auth-disabled default at `src/rpc/rpc.cpp:113`
+\* mirrors the auth-disabled default at `src/rpc/rpc.cpp:138`
 \* (`if (auth_secret_.empty()) return ""`). The spec requires
 \* ConfigureSecret to fire before any meaningful ProcessRequest;
 \* the auth-disabled branch is the operator-acknowledged single-
@@ -460,9 +461,9 @@ ConfigureSecret(s) ==
 \* `auth_header := Hmac(server_secret, body)` and enqueues
 \* (body, auth_header) to pending_requests.
 \*
-\* Mirrors `rpc_call` at `src/rpc/rpc.cpp:276-321`. The caller
-\* reads the secret from DETERM_RPC_AUTH_SECRET (line :294),
-\* computes the HMAC via `hmac_sha256_hex` (line :60-70), and
+\* Mirrors `rpc_call` at `src/rpc/rpc.cpp:329-367`. The caller
+\* reads the secret from DETERM_RPC_AUTH_SECRET (line :343),
+\* computes the HMAC via `hmac_sha256_hex` (line :356-357), and
 \* embeds it in the request JSON. The secret bytes themselves
 \* are NEVER written to the request body or the wire — only the
 \* HMAC output (which is one-way per A_HMAC).
@@ -522,16 +523,16 @@ IssueForgedRequest(body, forged_header) ==
 \* expected := Hmac(server_secret, head.body); accept iff
 \* head.auth_header = expected; log result to auth_log.
 \*
-\* Mirrors `RpcServer::verify_auth` at `src/rpc/rpc.cpp:112-129`:
-\*   line :113   — empty-secret short-circuit (auth disabled; the
+\* Mirrors `RpcServer::verify_auth` at `src/rpc/rpc.cpp:137-148`:
+\*   line :138   — empty-secret short-circuit (auth disabled; the
 \*                  spec abstracts this branch out by requiring
 \*                  server_secret ∈ RpcSecrets pre-condition).
-\*   line :114-6 — missing-auth field check (the spec's queue
+\*   line :139-41 — missing-auth field check (the spec's queue
 \*                  shape guarantees every entry has an
 \*                  auth_header by construction; the missing-
 \*                  auth surface collapses to ForgedHeaders).
-\*   line :117-0 — recompute expected via hmac_sha256_hex.
-\*   line :122-8 — constant-time XOR-OR compare; the spec models
+\*   line :142-5 — recompute expected via hmac_sha256_hex.
+\*   line :147 (auth_tag_verdict, :127-134) — constant-time XOR-OR compare; the spec models
 \*                  this as an atomic equality predicate, with
 \*                  the constant-time property asserted as a
 \*                  precondition (INV_ConstantTimeCompare cites
@@ -625,14 +626,15 @@ INV_NoForgedAccepted ==
 
 \* INV_ConstantTimeCompare (T-3).
 \*
-\* The verify-time compare at `src/rpc/rpc.cpp:122-128` is
+\* The verify-time compare at `src/rpc/rpc.cpp:128-134` is
 \* constant-time: every byte of `expected` is XOR-OR'd into a
 \* single accumulator `diff` over a fixed-length loop, with no
 \* early return/break/continue inside the loop body. The early
-\* `expected.size() != got.size()` check at line :123 is a length
-\* comparison only, and `expected.size()` is the fixed constant 64
-\* (the hex-encoded length of HMAC-SHA-256 output), so the length
-\* comparison reveals no information about the secret.
+\* length checks at lines :127 and :129 compare lengths only: a
+\* computed tag that is not 64 characters is refused outright
+\* (S-118), so `expected.size()` is the constant 64 whenever the
+\* comparison runs, and the length check reveals no information
+\* about the secret.
 \*
 \* At the spec layer, the compare is modeled as an atomic equality
 \* predicate `head.auth_header = expected` inside ProcessRequest;
@@ -652,7 +654,7 @@ INV_NoForgedAccepted ==
 INV_ConstantTimeCompare ==
     TRUE
     \* Documentary invariant; structural witness is the C++ source
-    \* at `src/rpc/rpc.cpp:122-128` (the XOR-OR loop with no early
+    \* at `src/rpc/rpc.cpp:128-134` (the XOR-OR loop with no early
     \* exit). The spec layer's atomic equality predicate in
     \* ProcessRequest is the spec-layer projection of the constant-
     \* time compare; the analytic side's L-3 audit verifies the
@@ -820,7 +822,7 @@ PROP_NoForgeryWithoutSecret ==
 \*     layer; the spec layer enforces only the determinism +
 \*     distinctness contract.
 \*
-\*   * The constant-time compare at `src/rpc/rpc.cpp:122-128` is
+\*   * The constant-time compare at `src/rpc/rpc.cpp:128-134` is
 \*     modeled as an atomic equality predicate in ProcessRequest.
 \*     TLA+'s semantic model is discrete state transitions, not
 \*     real-time execution, so the spec layer cannot meaningfully
@@ -838,7 +840,7 @@ PROP_NoForgeryWithoutSecret ==
 \*     Hmac output without knowing the secret.
 \*
 \*   * The canonical serialization `method ‖ "|" ‖ params.dump()`
-\*     at `src/rpc/rpc.cpp:52-58` is abstracted to opaque Messages
+\*     at `src/rpc/rpc.cpp:40-46` is abstracted to opaque Messages
 \*     strings. The L-2 audit of `RpcAuthHmacSoundness.md` verifies
 \*     the canonical-form fixpoint of nlohmann::json's parse-then-
 \*     dump round trip; the spec layer assumes the canonicalization
@@ -867,7 +869,7 @@ PROP_NoForgeryWithoutSecret ==
 \* What the spec does NOT check (consistent with the §scope above):
 \*
 \*   * The byte-level constant-time guarantee at
-\*     `src/rpc/rpc.cpp:122-128`. The spec uses an atomic equality
+\*     `src/rpc/rpc.cpp:128-134`. The spec uses an atomic equality
 \*     predicate; the byte-level audit is `RpcAuthHmacSoundness.md`
 \*     L-3 territory.
 \*   * The cryptographic strength of HMAC-SHA-256. The spec assumes
@@ -883,7 +885,7 @@ PROP_NoForgeryWithoutSecret ==
 \*     concern (operator filesystem hygiene + v2.17 passphrase
 \*     encryption pattern).
 \*   * The localhost-only / external-bind binding mode
-\*     (Option 1 of S-001's closure at `src/rpc/rpc.cpp:79-89`).
+\*     (Option 1 of S-001's closure at `src/rpc/rpc.cpp:78`).
 \*     The spec models the post-bind state; the network-layer
 \*     binding mode is the operator-policy side of S-001.
 \*   * The rate limiter (S-014 / FB25 RateLimiterEviction.tla)
@@ -895,23 +897,23 @@ PROP_NoForgeryWithoutSecret ==
 \* Cross-references.
 \*
 \* C++ enforcement:
-\*   src/rpc/rpc.cpp:52-58   : canonical_for_hmac(method, params)
+\*   src/rpc/rpc.cpp:40-46   : canonical_for_hmac(method, params)
 \*       canonical-serialization helper; the spec's Hmac() input
 \*       domain abstracts to opaque Messages strings.
-\*   src/rpc/rpc.cpp:60-70   : hmac_sha256_hex(key, message) HMAC
+\*   src/rpc/rpc.cpp:48-62   : hmac_sha256_hex(key, message) HMAC
 \*       primitive wrapping OpenSSL HMAC(EVP_sha256(), ...); the
 \*       spec's Hmac() operator is the spec-layer projection.
-\*   src/rpc/rpc.cpp:79-90   : RpcServer constructor; secret hex-
+\*   src/rpc/rpc.cpp:71-99   : RpcServer constructor; secret hex-
 \*       decoded into auth_secret_; the spec's ConfigureSecret
 \*       mirrors this initialization.
-\*   src/rpc/rpc.cpp:92-104  : Startup log emitting only
+\*   src/rpc/rpc.cpp:81-98  : Startup log emitting only
 \*       auth_secret_.size(), never the value; the structural
 \*       witness for INV_SecretConfidentiality at the log surface.
-\*   src/rpc/rpc.cpp:112-129 : verify_auth — the proof's primary
+\*   src/rpc/rpc.cpp:137-148 : verify_auth — the proof's primary
 \*       object; the spec's ProcessRequest mirrors this flow.
-\*   src/rpc/rpc.cpp:122-128 : Constant-time XOR-OR loop; the
+\*   src/rpc/rpc.cpp:128-134 : Constant-time XOR-OR loop; the
 \*       structural witness for T-3 / INV_ConstantTimeCompare.
-\*   src/rpc/rpc.cpp:276-321 : Client-side rpc_call with
+\*   src/rpc/rpc.cpp:329-367 : Client-side rpc_call with
 \*       DETERM_RPC_AUTH_SECRET env var support; the spec's
 \*       IssueAuthorizedRequest mirrors this.
 \*

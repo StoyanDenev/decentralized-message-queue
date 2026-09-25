@@ -31,7 +31,7 @@ The implementation uses `std::chrono::steady_clock` (RFC-monotonic; never moves 
 
 **Call sites** for `consume`:
 
-1. **RPC** at `src/rpc/rpc.cpp:172`: `if (!rate_limiter_.consume(peer_ip)) { … "rate_limited" … }`. Runs BEFORE JSON parse + auth in `handle_session`. The `peer_ip` is `socket->remote_endpoint().address().to_string()` cached once per session.
+1. **RPC** at `src/rpc/rpc.cpp:182`: `if (!rate_limiter_.consume(peer_ip)) { … "rate_limited" … }`. Runs BEFORE JSON parse + auth in `handle_session`. The `peer_ip` is `socket->remote_endpoint().address().to_string()` cached once per session.
 2. **Gossip** at `src/net/gossip.cpp:154`: `if (!rate_limiter_.consume(ip)) return;`. Runs at the top of `handle_message` for every non-HELLO message. The `ip` is `peer->address()` with `":<port>"` stripped, so multiple connections from the same source share one bucket.
 3. **HELLO is exempt** at `src/net/gossip.cpp:148-155`: the conditional `if (msg.type != MsgType::HELLO)` gates the consume call.
 
@@ -152,7 +152,7 @@ mutable std::mutex            mu_;
 std::map<std::string, Bucket> buckets_;
 ```
 
-The RPC call site at `src/rpc/rpc.cpp:166-175`:
+The RPC call site at `src/rpc/rpc.cpp:176-185`:
 
 ```cpp
 // S-014: rate-limit check BEFORE parse to avoid spending
@@ -167,7 +167,7 @@ if (!rate_limiter_.consume(peer_ip)) {
 } else { /* … parse + auth + dispatch … */ }
 ```
 
-with `peer_ip` cached at session start (`src/rpc/rpc.cpp:143-153`):
+with `peer_ip` cached at session start (`src/rpc/rpc.cpp:153-163`):
 
 ```cpp
 // S-014: cache the peer's IP once per session for rate-limit lookup.
@@ -215,7 +215,7 @@ void GossipNet::set_rate_limit(double per_sec, double burst) {
 }
 ```
 
-and the RPC equivalent at `src/rpc/rpc.cpp:91-107`:
+and the RPC equivalent at `src/rpc/rpc.cpp:79-95`:
 
 ```cpp
 rate_limiter_.configure(rate_per_sec, burst);
@@ -379,7 +379,7 @@ Compared to the no-S-014 baseline, the amplification reduction is roughly:
 - RPC: `O(log N)` vs `O(|line|)` parse + `O(|line|)` HMAC + dispatch ≈ 100× reduction for typical 1 KB request.
 - Gossip: `O(log N)` vs `O(|payload|)` deserialize + signature verifies ≈ 1000× reduction for typical block/contrib/sig message.
 
-The rate-limit-first ordering at `src/rpc/rpc.cpp:172` and `src/net/gossip.cpp:154` ensures the reduction applies on every flood request, not just every other request.   ∎
+The rate-limit-first ordering at `src/rpc/rpc.cpp:182` and `src/net/gossip.cpp:154` ensures the reduction applies on every flood request, not just every other request.   ∎
 
 **Proof of T-3 (Per-IP independence).** Direct from L-3. For `k ≠ k'`, the `consume(k)` call mutates only `buckets_[k]` (Lemma L-3). Symmetrically `consume(k')` mutates only `buckets_[k']`. The joint state factors as a product:
 
@@ -511,7 +511,7 @@ The three findings are advisory; none invalidates T-1 .. T-6. They are surfaced 
 **Shipped (S-014 closed in-session per `docs/SECURITY.md` §S-014).** The token-bucket rate-limiter is live on both surfaces in the current `main` branch:
 
 - `include/determ/net/rate_limiter.hpp:1-71` — shared `RateLimiter` helper (the proof's primary object).
-- `src/rpc/rpc.cpp:91, 105, 143-153, 172-175` — RPC `handle_session` integration; cache `peer_ip` once per session; `consume` before parse + auth.
+- `src/rpc/rpc.cpp:79, 93, 153-163, 182-185` — RPC `handle_session` integration; cache `peer_ip` once per session; `consume` before parse + auth.
 - `src/net/gossip.cpp:22-28, 139-155` — gossip `handle_message` integration; HELLO exemption + IP normalization (strip `:port`).
 - `include/determ/rpc/rpc.hpp:30, 54-55` — `RpcServer::rate_limiter_` field.
 - `include/determ/net/gossip.hpp` — `GossipNet::rate_limiter_` field + `set_rate_limit` declaration.
@@ -549,7 +549,7 @@ This proof was added in the current review pass as part of the analytic-closure 
 ### Determ-internal references
 
 - `include/determ/net/rate_limiter.hpp:1-71` — `RateLimiter` helper (the proof's primary object).
-- `src/rpc/rpc.cpp:172` — RPC consume call site.
+- `src/rpc/rpc.cpp:182` — RPC consume call site.
 - `src/net/gossip.cpp:154` — gossip consume call site.
 - `src/net/gossip.cpp:148` — HELLO exemption gate.
 - `src/net/peer.cpp:90-94` — S-022 per-MsgType body cap (HELLO bound).
@@ -575,7 +575,7 @@ This section is a focused re-cap of the proof's main results in the labeling sty
 
 **In scope** — this proof formalizes the soundness of the S-014 per-peer-IP token-bucket rate-limiter as deployed on Determ's two wire surfaces:
 
-1. The RPC accept layer at `src/rpc/rpc.cpp:172` (`rate_limiter_.consume(peer_ip)` gating every non-rate-limited RPC request).
+1. The RPC accept layer at `src/rpc/rpc.cpp:182` (`rate_limiter_.consume(peer_ip)` gating every non-rate-limited RPC request).
 2. The gossip receive layer at `src/net/gossip.cpp:154` (`rate_limiter_.consume(ip)` gating every non-HELLO gossip message).
 
 with the HELLO-message exemption at `src/net/gossip.cpp:148` preserving handshake liveness under flood pressure.
@@ -726,8 +726,8 @@ The proof establishes the soundness of the token-bucket scheme as parameterized;
 | File | Role |
 |---|---|
 | `include/determ/net/rate_limiter.hpp` | The shared `determ::net::RateLimiter` helper (capacity + refill arithmetic; F-1 eviction; configure_eviction). |
-| `src/rpc/rpc.cpp:172` | RPC-channel `consume(peer_ip)` integration; runs BEFORE JSON parse + auth. |
-| `src/rpc/rpc.cpp:143-153` | `peer_ip` cached once per session (S-014 design pattern; minimizes per-request overhead). |
+| `src/rpc/rpc.cpp:182` | RPC-channel `consume(peer_ip)` integration; runs BEFORE JSON parse + auth. |
+| `src/rpc/rpc.cpp:153-163` | `peer_ip` cached once per session (S-014 design pattern; minimizes per-request overhead). |
 | `src/net/gossip.cpp:154` | Gossip-channel `consume(ip)` integration; HELLO-exempt; IP normalized (strip `:port`). |
 | `src/net/gossip.cpp:148` | HELLO exemption gate (`if (msg.type != MsgType::HELLO)`). |
 | `tools/test_gossip_rate_limit.sh` | Gossip-channel integration test (3/3 PASS). |

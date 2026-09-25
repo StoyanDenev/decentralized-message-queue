@@ -7,25 +7,13 @@
 #include <iostream>
 #include <sstream>
 #include <iomanip>
+#include <stdexcept>
 
 namespace determ::rpc {
 
 using json = nlohmann::json;
 
 namespace {
-
-// v2.16: parse hex string → bytes. Returns empty on parse failure.
-std::vector<uint8_t> hex_to_bytes(const std::string& s) {
-    if (s.size() % 2 != 0) return {};
-    std::vector<uint8_t> out;
-    out.reserve(s.size() / 2);
-    for (size_t i = 0; i < s.size(); i += 2) {
-        unsigned int byte;
-        if (std::sscanf(s.c_str() + i, "%02x", &byte) != 1) return {};
-        out.push_back(static_cast<uint8_t>(byte));
-    }
-    return out;
-}
 
 // v2.16: hex-encode bytes.
 std::string bytes_to_hex(const uint8_t* data, size_t len) {
@@ -88,7 +76,7 @@ RpcServer::RpcServer(net::Transport& transport, net::EventLoop& loop,
     , loop_(loop)
     , node_(node)
     , acceptor_(transport_.listen(port, localhost_only))
-    , auth_secret_(hex_to_bytes(auth_secret_hex)) {
+    , auth_secret_(rpc_auth_key(auth_secret_hex)) {
     rate_limiter_.configure(rate_per_sec, burst);
     std::cout << "[rpc] listening on "
               << (localhost_only ? "127.0.0.1" : "0.0.0.0")
@@ -108,6 +96,28 @@ RpcServer::RpcServer(net::Transport& transport, net::EventLoop& loop,
                   << rate_limiter_.burst() << ")";
     }
     std::cout << "\n";
+}
+
+std::vector<uint8_t> rpc_auth_key(const std::string& secret_hex) {
+    // S-122: strict, so a mistyped secret stops the caller instead of
+    // decoding to an empty key (authentication off) or to another key.
+    auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    if (secret_hex.size() % 2 != 0)
+        throw std::invalid_argument("RPC auth secret has an odd number of hex digits");
+    std::vector<uint8_t> key(secret_hex.size() / 2);
+    for (size_t i = 0; i < key.size(); ++i) {
+        int hi = nibble(secret_hex[2 * i]);
+        int lo = nibble(secret_hex[2 * i + 1]);
+        if (hi < 0 || lo < 0)
+            throw std::invalid_argument("RPC auth secret contains a non-hex character");
+        key[i] = static_cast<uint8_t>((hi << 4) | lo);
+    }
+    return key;
 }
 
 std::string auth_tag_verdict(const std::string& expected, const std::string& got) {
@@ -334,8 +344,10 @@ json rpc_call(const std::string& host, uint16_t port,
         if (env && *env) effective_secret = env;
     }
     if (!effective_secret.empty()) {
-        auto key = hex_to_bytes(effective_secret);
-        if (key.empty()) {
+        std::vector<uint8_t> key;
+        try {
+            key = rpc_auth_key(effective_secret);
+        } catch (const std::invalid_argument&) {
             throw std::runtime_error(
                 "rpc_call: auth secret is not valid hex "
                 "(expected 2N hex chars from --auth-secret or "

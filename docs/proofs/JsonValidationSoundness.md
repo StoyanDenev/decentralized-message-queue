@@ -430,7 +430,7 @@ peer-supplied JSON:
   own well-formed JSON responses. Not peer-supplied. Conversion would
   impose runtime overhead with no diagnostic improvement.
 
-- **Client-side RPC response parser.** `src/rpc/rpc.cpp:319` extracts
+- **Client-side RPC response parser.** `src/rpc/rpc.cpp:329` extracts
   `j["error"].get<std::string>()` from an RPC response. CLIENT side
   parsing the daemon's own well-formed response. Not an attack surface.
 

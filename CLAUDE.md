@@ -94,8 +94,8 @@ Read this before writing code or docs. On any decision conflict, docs/proofs/DEC
 STATE 2026-09-25 — §14.2 INCREMENTS (DECISION-LOG entries from "S-118 closed: an
 incomplete RPC tag never authenticates"). Each increment is reviewed, gated and committed
 on its own; this entry lists them as they land. LANDED: S-118 (the RPC verdict refuses a
-computed tag that is not 64 characters). NEXT: a malformed rpc_auth_secret silently
-disables RPC authentication (found by the S-118 review), then the block-store stat() rule,
+computed tag that is not 64 characters); S-122 (a malformed rpc_auth_secret stops the
+daemon instead of silently disabling authentication). NEXT: the block-store stat() rule,
 heap-free HMAC/HKDF/PBKDF2, S-121 and the DSSO overflow items, R3-01 and S-119. S-120
 still waits for the owner's -v3 transcript decision.
 

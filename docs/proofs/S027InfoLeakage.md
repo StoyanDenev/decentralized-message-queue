@@ -82,7 +82,7 @@ Let `L` denote the set of strings ever emitted to `std::cout` or `std::cerr` by 
 
 Two specific sub-claims warrant explicit citation:
 
-- **Sub-claim T-1a (RPC auth secret never logged by value).** The only log statement that references `auth_secret_` is the startup banner at `src/rpc/rpc.cpp:92-109`, and the only field of `auth_secret_` it references is `.size()` (line 97: `<< auth_secret_.size() << "-byte secret"`). The actual bytes are never written. Confirmed by `grep -n 'std::cout\|std::cerr' src/rpc/rpc.cpp` returning exactly 5 lines, all within the startup banner block.
+- **Sub-claim T-1a (RPC auth secret never logged by value).** The only log statement that references `auth_secret_` is the startup banner at `src/rpc/rpc.cpp:80-97`, and the only field of `auth_secret_` it references is `.size()` (line 97: `<< auth_secret_.size() << "-byte secret"`). The actual bytes are never written. Confirmed by `grep -n 'std::cout\|std::cerr' src/rpc/rpc.cpp` returning exactly 5 lines, all within the startup banner block.
 
 - **Sub-claim T-1b (dh_secret revealed-only).** The `dh_secret` field of `BlockSigMsg` is gossiped as part of Phase-2 reveal. The audit confirms that no `std::cout` or `std::cerr` call in `src/node/node.cpp` emits `msg.dh_secret` (or any equivalent) by value. The closest call site is `src/node/node.cpp:2268` ("BlockSig dh_secret/commit mismatch from <signer>") — the diagnostic identifies WHICH peer's reveal failed to match the prior commit, but does not emit the bytes of either the reveal or the commit.
 
@@ -108,7 +108,7 @@ Let `cfg.log_quiet ∈ {false, true}` denote the operator's configuration. Let `
 
 6. **WARN/ERROR diagnostics** (e.g. `src/node/node.cpp:1376` "beacon header prev_hash mismatch", `:1410` "shard tip: insufficient sigs", `:2090` "invalid Contrib sig", `:2157` "S-006 ContribMsg equivocation detected", `:2251` "invalid BlockSig", `:2268` "BlockSig dh_secret/commit mismatch", `:2346` "peer on different genesis"): NONE of these are gated by `log_quiet`. They continue to surface regardless. The operator's `log_quiet=true` setting does not suppress structural diagnostics.
 
-7. **Startup banner** (`src/rpc/rpc.cpp:92-109`, `src/net/gossip.cpp:34`, `src/node/node.cpp:404-406` shard-manifest, `:451-458` snapshot-restore confirmation, `:499-508` genesis-loaded confirmation, `:511-512` warning on missing genesis_path): NONE of these are gated by `log_quiet`. They are once-per-start, structural, and useful for operator-confidence ("yes my node started in the configuration I expected"). The audit accepts keeping them visible by default.
+7. **Startup banner** (`src/rpc/rpc.cpp:80-97`, `src/net/gossip.cpp:34`, `src/node/node.cpp:404-406` shard-manifest, `:451-458` snapshot-restore confirmation, `:499-508` genesis-loaded confirmation, `:511-512` warning on missing genesis_path): NONE of these are gated by `log_quiet`. They are once-per-start, structural, and useful for operator-confidence ("yes my node started in the configuration I expected"). The audit accepts keeping them visible by default.
 
 The set difference is therefore exactly the per-block / per-bundle / per-connection chatty class. Regression test `tools/test_log_quiet.sh` exercises the verbose→quiet differential by counting `[node] accepted block #` occurrences in two sequential phases (one with `log_quiet=false`, one with `log_quiet=true`) and asserting that the verbose phase emits ≥ 3 lines and the quiet phase emits 0 lines — a clean differential.
 
@@ -199,7 +199,7 @@ The audit's current pass corresponds to a snapshot of `src/` as of this commit. 
 
 Even with the log surface fully audited (T-1) and the operator's `log_quiet=true` setting honored (T-2 + T-3), a residual secret-leak surface exists if the RPC auth secret is delivered via the command-line argument: `ps aux` reveals the command line to any UID on the host (modulo `/proc/<pid>/cmdline` ACLs which by default are world-readable), shell history captures it (`~/.bash_history`, `~/.zsh_history`), and `--help` or `usage:` text may echo it if the operator passes `--help` after configuring the secret.
 
-The S-001 closure pairs with the S-027 audit by requiring that the secret be delivered via the `DETERM_RPC_AUTH_SECRET` environment variable (or via the `Config::rpc_auth_secret` field loaded from the operator's `config.json` file). The env-var path is implemented at `src/rpc/rpc.cpp:294`:
+The S-001 closure pairs with the S-027 audit by requiring that the secret be delivered via the `DETERM_RPC_AUTH_SECRET` environment variable (or via the `Config::rpc_auth_secret` field loaded from the operator's `config.json` file). The env-var path is implemented at `src/rpc/rpc.cpp:304`:
 
 ```cpp
 const char* env = std::getenv("DETERM_RPC_AUTH_SECRET");
@@ -386,8 +386,8 @@ The audit closes: no `std::cout` or `std::cerr` call site in the audit scope emi
 - **`src/node/node.cpp:2481`** — `Node::rpc_status` emits `log_quiet: <bool>` in the `protections` block (operator-visible status readback).
 - **`src/net/gossip.cpp:53-55`** — `log_quiet_` gate on per-connection diagnostic.
 - **`src/net/gossip.cpp:324-326`** — `log_quiet_` gate on per-disconnect diagnostic.
-- **`src/rpc/rpc.cpp:92-109`** — RPC startup banner emitting only `auth_secret_.size()`, never the value.
-- **`src/rpc/rpc.cpp:294`** — `DETERM_RPC_AUTH_SECRET` env-var read.
+- **`src/rpc/rpc.cpp:80-97`** — RPC startup banner emitting only `auth_secret_.size()`, never the value.
+- **`src/rpc/rpc.cpp:304`** — `DETERM_RPC_AUTH_SECRET` env-var read.
 
 ### 5.4 Tests
 

@@ -2,7 +2,7 @@
 
 This document gives the comprehensive composition theorem for S-001 (RPC HMAC authentication) covering BOTH the cryptographic-soundness layer (HMAC-SHA-256 PRF + constant-time verify + secret confidentiality, as established in `RpcAuthHmacSoundness.md`) AND the second-line input-validation layer (range checks, length caps, type checks on RPC method arguments, as established in `RpcInputValidationDefense.md`). The composition exists to make a single end-to-end statement: under the **outside adversary** model (`A_outside` — no shared secret) the cryptographic layer alone establishes soundness; under the **authenticated insider** model (`A_inside` — has the operator's `rpc_auth_secret` but attempts to inject malformed or out-of-contract payloads) the input-validation layer is the second-line defense; and under **both** models replay safety reduces to apply-layer nonce gating (`FA-Apply-3`), so the joint soundness statement is the full RPC defense posture.
 
-The proof is structural rather than novel: each constituent soundness statement is already proved in its respective companion document. The contribution here is to compose those statements into a single auth-then-validate pipeline soundness theorem, exhibit an exhaustive bypass-surface enumeration for state-mutating endpoints, and surface composition findings that no single per-layer proof catches — in particular, the question of whether a future RPC handler could bypass the canonical pattern at `src/rpc/rpc.cpp:130-145` (the pre-dispatch auth gate) by adding an out-of-band handler entry.
+The proof is structural rather than novel: each constituent soundness statement is already proved in its respective companion document. The contribution here is to compose those statements into a single auth-then-validate pipeline soundness theorem, exhibit an exhaustive bypass-surface enumeration for state-mutating endpoints, and surface composition findings that no single per-layer proof catches — in particular, the question of whether a future RPC handler could bypass the canonical pattern at `src/rpc/rpc.cpp:190-193` (the pre-dispatch auth gate) by adding an out-of-band handler entry.
 
 **Companion documents:** `RpcAuthHmacSoundness.md` (the HMAC-PRF cryptographic layer; T-1..T-5 composed here); `RpcInputValidationDefense.md` (the five-layer defense; Layer B / Layer C composed into the input-validation arm); `JsonValidationSoundness.md` (S-018; the structural-validation portion of the input-validation layer); `S022WireFormatCaps.md` (the framing-layer body-cap which gates the maximum size of any RPC request); `NonceMonotonicity.md` (FA-Apply-3; the apply-layer nonce gate that provides the replay backstop when HMAC alone does not bind a nonce per T-2); `S014RateLimiterSoundness.md` (the cheaper-than-HMAC pre-gate that defeats online HMAC brute-force by capping verify rate); `Preliminaries.md` §2.1 (A2 SHA-256 collision resistance), §2.0 (A6 HMAC-SHA-256 PRF), §2.2 (A1 Ed25519 EUF-CMA — cited for the Layer C `submit_tx` sig-verify gate but not directly used for the HMAC auth); `SECURITY.md` §S-001 (closure narrative this composition formalizes) + §S-018 (input-validation closure that the second arm composes).
 
@@ -14,8 +14,8 @@ The proof is structural rather than novel: each constituent soundness statement 
 
 S-001 originally documented two adversaries on the RPC surface:
 
-1. **Network-reachable unauthenticated RPC.** Closed by Option 1 (localhost-only default at `src/rpc/rpc.cpp:79-89`). An attacker without same-host access cannot connect; the surface vanishes at the network layer.
-2. **Cross-tenant on the same host.** Closed by Option 3 (HMAC-SHA-256 RPC authentication at `src/rpc/rpc.cpp:60-138`). An attacker without the operator's `rpc_auth_secret` cannot forge a valid request; the HMAC-PRF assumption (`RpcAuthHmacSoundness.md` T-1) bounds the forgery probability at `≤ 2^-256 + q²/2^256` per attempt.
+1. **Network-reachable unauthenticated RPC.** Closed by Option 1 (localhost-only default at `src/rpc/rpc.cpp:67-77`). An attacker without same-host access cannot connect; the surface vanishes at the network layer.
+2. **Cross-tenant on the same host.** Closed by Option 3 (HMAC-SHA-256 RPC authentication at `src/rpc/rpc.cpp:48-148`). An attacker without the operator's `rpc_auth_secret` cannot forge a valid request; the HMAC-PRF assumption (`RpcAuthHmacSoundness.md` T-1) bounds the forgery probability at `≤ 2^-256 + q²/2^256` per attempt.
 
 Both closures are shipped in the current `main` branch. `RpcAuthHmacSoundness.md` formalizes Option 3 in isolation: T-1 (auth soundness), T-2 (replay analysis — confirms known limitation per S-001's threat model), T-3 (constant-time compare audit — passes), T-4 (secret confidentiality at the RPC surface — passes), T-5 (HMAC PRF soundness with q²/2^256 q-query bound).
 
@@ -23,7 +23,7 @@ Both closures are shipped in the current `main` branch. `RpcAuthHmacSoundness.md
 
 The cryptographic layer alone is sufficient against `A_outside` — an adversary with no access to the operator's secret. But once an adversary obtains the secret (e.g., via the F-1 / F-2 finding in `RpcAuthHmacSoundness.md` §6, or via a compromised operator workflow), the HMAC layer's soundness statement no longer constrains them: they can compute the HMAC over any (`method`, `params`) pair and the server's `verify_auth` will accept. The second-line defense against this authenticated-insider class is the input-validation layer (Layer B + Layer C of `RpcInputValidationDefense.md`): the server still applies structural validation (JSON shape + S-018 hardened from_json paths) and semantic validation (per-method semantic gates — balance pre-checks, nonce monotonicity at gossip-handler entry, signature verification, address canonicalization, etc.) before any state mutation.
 
-The composition statement is: under `A_outside`, the HMAC layer is the security; under `A_inside`, the input-validation layer is the security; under both, the apply-layer nonce gate (`FA-Apply-3`) provides replay safety because the HMAC alone does not bind a nonce (T-2 in `RpcAuthHmacSoundness.md`). The three layers fire in canonical order at `src/rpc/rpc.cpp:142-195` (rate-limit → parse → auth → dispatch-to-handler-with-semantic-gates) and compose without cross-layer interference.
+The composition statement is: under `A_outside`, the HMAC layer is the security; under `A_inside`, the input-validation layer is the security; under both, the apply-layer nonce gate (`FA-Apply-3`) provides replay safety because the HMAC alone does not bind a nonce (T-2 in `RpcAuthHmacSoundness.md`). The three layers fire in canonical order at `src/rpc/rpc.cpp:152-205` (rate-limit → parse → auth → dispatch-to-handler-with-semantic-gates) and compose without cross-layer interference.
 
 ### 1.3 Why a composition document
 
@@ -39,11 +39,11 @@ Each per-layer proof is self-contained and provides the per-property soundness s
 
 ### 2.1 Notation
 
-Let `K ∈ {0,1}*` denote the server's `auth_secret_` field — the operator's RPC secret bytes (`src/rpc/rpc.cpp:90`). Let `R = (method, params, auth)` denote an RPC request triple. Let `H(K, m) := hex(HMAC-SHA-256(K, m))` denote the canonical HMAC-hex output. Let `canonical(method, params) := method ‖ "|" ‖ params.dump()` denote the canonical pre-image bytes (`src/rpc/rpc.cpp:52-58`).
+Let `K ∈ {0,1}*` denote the server's `auth_secret_` field — the operator's RPC secret bytes, decoded strictly by `rpc_auth_key` at construction (`src/rpc/rpc.cpp:79`; a malformed secret stops the daemon, S-122). Let `R = (method, params, auth)` denote an RPC request triple. Let `H(K, m) := hex(HMAC-SHA-256(K, m))` denote the canonical HMAC-hex output. Let `canonical(method, params) := method ‖ "|" ‖ params.dump()` denote the canonical pre-image bytes (`src/rpc/rpc.cpp:40-46`).
 
-A request `R` is **authenticated** iff `H(K, canonical(method, params)) = auth`, modulo the constant-time compare at `src/rpc/rpc.cpp:120-124` (`auth_tag_verdict`, which first refuses a computed tag that is not 64 characters — S-118). A request is **state-mutating** iff its `method` is in `MUTATE_STATE := {send, stake, unstake, register, submit_tx, submit_equivocation}` (the six endpoints that touch `chain_` state or the mempool via `Node::rpc_*`).
+A request `R` is **authenticated** iff `H(K, canonical(method, params)) = auth`, modulo the constant-time compare at `src/rpc/rpc.cpp:130-134` (`auth_tag_verdict`, which first refuses a computed tag that is not 64 characters — S-118). A request is **state-mutating** iff its `method` is in `MUTATE_STATE := {send, stake, unstake, register, submit_tx, submit_equivocation}` (the six endpoints that touch `chain_` state or the mempool via `Node::rpc_*`).
 
-Let `RPC_DISPATCH` denote the set of methods accepted by `RpcServer::dispatch` at `src/rpc/rpc.cpp:197-272`. `MUTATE_STATE ⊂ RPC_DISPATCH`; the remaining methods are read-only.
+Let `RPC_DISPATCH` denote the set of methods accepted by `RpcServer::dispatch` at `src/rpc/rpc.cpp:207-282`. `MUTATE_STATE ⊂ RPC_DISPATCH`; the remaining methods are read-only.
 
 ### 2.2 Assumptions
 
@@ -52,7 +52,7 @@ The composition reduces to:
 - **(A1) Ed25519 EUF-CMA** (Preliminaries §2.2). Not directly used by the HMAC scheme but cited by Layer C's `submit_tx` semantic gate where the tx's Ed25519 signature is verified before mempool admit (`src/node/node.cpp:3163-3168`). Provides the cryptographic backstop that even under `A_inside` (where the attacker has the HMAC secret), forging a transaction signed by an unowned account requires breaking A1.
 - **(A2) SHA-256 collision resistance** (Preliminaries §2.1). Used implicitly by HMAC-SHA-256's PRF-via-compression-function-CR reduction (Bellare–Canetti–Krawczyk 1996; tightened by Bellare 2006). The single-query forgery bound `2^-256` and the q-query birthday bound `q²/2^256` both reduce to A2 + the standard HMAC reduction. Also used by Layer B's JSON parse on a sense: structural-validation soundness rests on the underlying parser's correctness, which itself does not consume A2 — but the apply-layer nonce gate and the per-tx hash-uniqueness check (T-2 below) reduce to A2.
 - **(A6) HMAC-SHA-256 PRF assumption.** The standard cryptographic primitive's security parameter is `q²/2^256` for q-query distinguishing advantage (`RpcAuthHmacSoundness.md` §2.1 + L-5). Together with A2 above, this gives the auth-forgery bound `2^-256 + q²/2^256` per attempt that T-1 below composes.
-- **(H_RPC_ORDERING) Canonical pre-dispatch ordering.** Every state-mutating method passes through `handle_session` at `src/rpc/rpc.cpp:142-195` whose control flow is rate-limit (`src/rpc/rpc.cpp:172`) → parse (`:176`) → auth (`:179`) → dispatch (`:184`). This is a property of the implementation; the audit at T-3 below confirms no state-mutating handler bypasses this ordering.
+- **(H_RPC_ORDERING) Canonical pre-dispatch ordering.** Every state-mutating method passes through `handle_session` at `src/rpc/rpc.cpp:161-232` whose control flow is rate-limit (`src/rpc/rpc.cpp:183`) → parse (`:187`) → auth (`:190`) → dispatch (`:221`). This is a property of the implementation; the audit at T-3 below confirms no state-mutating handler bypasses this ordering.
 
 ### 2.3 Adversary models
 
@@ -81,8 +81,8 @@ The joint statement is the conjunction over both: every request is either reject
 
 A request `R` that reaches a state-mutating handler at `src/node/node.cpp::rpc_*` (the Layer C entry point for any `method ∈ MUTATE_STATE`) has passed **all three of**:
 
-1. The HMAC-auth gate at `src/rpc/rpc.cpp:179` (Layer E in `RpcInputValidationDefense.md`'s nomenclature; T-1 in `RpcAuthHmacSoundness.md`'s nomenclature).
-2. The JSON structural validation gate at Layer B — `json::parse` at `src/rpc/rpc.cpp:176` plus any downstream `from_json` calls in `dispatch`. For `submit_tx`, the `tx` sub-object is routed through the S-018-hardened `Transaction::from_json` per `JsonValidationSoundness.md`.
+1. The HMAC-auth gate at `src/rpc/rpc.cpp:189` (Layer E in `RpcInputValidationDefense.md`'s nomenclature; T-1 in `RpcAuthHmacSoundness.md`'s nomenclature).
+2. The JSON structural validation gate at Layer B — `json::parse` at `src/rpc/rpc.cpp:186` plus any downstream `from_json` calls in `dispatch`. For `submit_tx`, the `tx` sub-object is routed through the S-018-hardened `Transaction::from_json` per `JsonValidationSoundness.md`.
 3. The per-method semantic validation gate at Layer C — the gates enumerated in `RpcInputValidationDefense.md` §3.4 (S-028 anon-address canonicalization, hash recompute, nonce monotonicity at gossip-handler entry, signature verification, mempool admission, replace-by-fee, balance pre-check).
 
 The joint statement is:
@@ -113,32 +113,32 @@ The composition statement: HMAC ensures that an outside attacker cannot fabricat
 
 ### Theorem T-3 (Authentication Bypass Surfaces — Exhaustive)
 
-We enumerate every state-mutating endpoint reachable through the RPC server and confirm that the auth check fires **before** any state mutation. The audit method is exhaustive case analysis over `dispatch` at `src/rpc/rpc.cpp:197-272`.
+We enumerate every state-mutating endpoint reachable through the RPC server and confirm that the auth check fires **before** any state mutation. The audit method is exhaustive case analysis over `dispatch` at `src/rpc/rpc.cpp:207-282`.
 
 | Endpoint (Layer C entry) | RPC method name | dispatch line | Layer C handler (in `src/node/node.cpp`) | Auth-before-handler? |
 |---|---|---|---|---|
-| `rpc_send` | `send` | `:206-211` | `node.cpp:2804` | ✓ (via `:179` gate) |
-| `rpc_stake` | `stake` | `:212-216` | `node.cpp:2850` | ✓ (via `:179` gate) |
-| `rpc_unstake` | `unstake` | `:217-221` | `node.cpp:2884` | ✓ (via `:179` gate) |
-| `rpc_register` | `register` | `:203` | `node.cpp:3338` | ✓ (via `:179` gate) |
-| `rpc_submit_tx` | `submit_tx` | `:226-227` | `node.cpp:3121` | ✓ (via `:179` gate) |
-| `rpc_submit_equivocation` | `submit_equivocation` | `:228-230` | `node.cpp:3207` | ✓ (via `:179` gate) |
+| `rpc_send` | `send` | `:243-248` | `node.cpp:2804` | ✓ (via `:190` gate) |
+| `rpc_stake` | `stake` | `:249-253` | `node.cpp:2850` | ✓ (via `:190` gate) |
+| `rpc_unstake` | `unstake` | `:254-258` | `node.cpp:2884` | ✓ (via `:190` gate) |
+| `rpc_register` | `register` | `:240` | `node.cpp:3338` | ✓ (via `:190` gate) |
+| `rpc_submit_tx` | `submit_tx` | `:263-264` | `node.cpp:3121` | ✓ (via `:190` gate) |
+| `rpc_submit_equivocation` | `submit_equivocation` | `:265-267` | `node.cpp:3207` | ✓ (via `:190` gate) |
 
-For every endpoint, the dispatch entry is reached from `handle_session` at line `:184` (`response["result"] = dispatch(req);`), which executes only when `verify_auth(req)` at `:179` returned empty (passed) — see the control flow at lines `:165-187`. The audit conclusion is that **no state-mutating RPC method is reachable without auth** when `auth_secret_` is non-empty.
+For every endpoint, the dispatch entry is reached from `handle_session` at line `:221` (`response["result"] = dispatch(req);`), which executes only when `verify_auth(req)` at `:190` returned empty (passed) — see the control flow at lines `:176-224`. The audit conclusion is that **no state-mutating RPC method is reachable without auth** when `auth_secret_` is non-empty.
 
 A subtle point: when `auth_secret_` is empty (the default for single-tenant boxes per `RpcAuthHmacSoundness.md` §2.3), `verify_auth` returns empty unconditionally (line `:113`), so every request reaches dispatch. This is the documented single-tenant escape hatch (`SECURITY.md` §S-001 narrative; `RpcInputValidationDefense.md` §2.2 deployment recommendation). Under the multi-tenant or external-bind threat model, the operator MUST enable the secret; under the single-tenant model, the host-level access control (only the operator can connect to localhost on a single-user box) substitutes for the HMAC layer.
 
 The audit confirms three structural facts about `handle_session`:
 
-1. **Single entry point.** All RPC requests arrive via `handle_session` (`:142-195`); there is no out-of-band injection path. The asio `accept_loop` (`:131-140`) is the only `post`-er to `handle_session`.
-2. **Single dispatch point.** All `Node::rpc_*` invocations route through `dispatch` (`:197-272`). There is no direct call into a state-mutating `rpc_*` method from outside `dispatch`.
-3. **Auth-before-dispatch is invariant.** The control flow at `:165-187` runs `verify_auth` (line `:179`) before `dispatch` (line `:184`). Refactoring this to call `dispatch` before `verify_auth` (or to allow `dispatch` from a different path) would require a non-trivial diff that the existing per-layer tests (`tools/test_rpc_hmac_auth.sh` 5 assertions) would not catch on their own — but **F-2 below** registers this as a code-review discipline finding.
+1. **Single entry point.** All RPC requests arrive via `handle_session` (`:161-232`); there is no out-of-band injection path. The asio `accept_loop` (`:131-140`) is the only `post`-er to `handle_session`.
+2. **Single dispatch point.** All `Node::rpc_*` invocations route through `dispatch` (`:234-325`). There is no direct call into a state-mutating `rpc_*` method from outside `dispatch`.
+3. **Auth-before-dispatch is invariant.** The control flow at `:176-224` runs `verify_auth` (line `:190`) before `dispatch` (line `:221`). Refactoring this to call `dispatch` before `verify_auth` (or to allow `dispatch` from a different path) would require a non-trivial diff that the existing per-layer tests (`tools/test_rpc_hmac_auth.sh` 7 assertions) would not catch on their own — but **F-2 below** registers this as a code-review discipline finding.
 
 The exhaustive enumeration is the bedrock of the composition theorem: T-1's "no out-of-contract request mutates state under either adversary model" reduces, for the `A_outside` arm, to "no state-mutating endpoint is reachable without auth," which is exactly T-3.
 
 ### Theorem T-4 (Constant-Time Verify Audit Under Composition)
 
-`RpcAuthHmacSoundness.md` T-3 establishes that the HMAC compare at `src/rpc/rpc.cpp:117-124` is constant-time: the XOR-OR loop iterates fixed 64 bytes with no early exit, the per-iteration body has no branch dependence on individual byte values, and the final `(diff == 0) ? "" : "auth_failed"` ternary is the only conditional whose information content is "all 64 bytes matched vs ≥ 1 mismatched" — a single aggregate bit, useless for per-byte probing.
+`RpcAuthHmacSoundness.md` T-3 establishes that the HMAC compare at `src/rpc/rpc.cpp:127-134` is constant-time: the XOR-OR loop iterates fixed 64 bytes with no early exit, the per-iteration body has no branch dependence on individual byte values, and the final `(diff == 0) ? "" : "auth_failed"` ternary is the only conditional whose information content is "all 64 bytes matched vs ≥ 1 mismatched" — a single aggregate bit, useless for per-byte probing.
 
 The composition argument under `A_inside`'s repeated probing model is:
 
@@ -148,7 +148,7 @@ The composition statement: constant-time compare prevents timing-channel leakage
 
 ### Theorem T-5 (Secret Lifecycle Composition)
 
-`RpcAuthHmacSoundness.md` T-4 establishes that `auth_secret_` is never written to any log, error response, or wire message by `src/rpc/rpc.cpp`. The startup log at `src/rpc/rpc.cpp:95-97` emits only the length (`auth_secret_.size()`), never the value. The `verify_auth` error returns at lines `:115` and `:128` are fixed string constants with no dependence on `K`. The dispatch method at `:197-272` doesn't touch `auth_secret_`. The client-side `rpc_call` at `:276-321` reads the secret from either the explicit argument or the `DETERM_RPC_AUTH_SECRET` env var, computes the HMAC, embeds it in the request — the secret itself is never written to any output.
+`RpcAuthHmacSoundness.md` T-4 establishes that `auth_secret_` is never written to any log, error response, or wire message by `src/rpc/rpc.cpp`. The startup log at `src/rpc/rpc.cpp:84-86` emits only the length (`auth_secret_.size()`), never the value. The `verify_auth` error returns at lines `:140` and `:127`, `:129`, `:134` (`auth_tag_verdict`) are fixed string constants with no dependence on `K`. The dispatch method at `:234-325` doesn't touch `auth_secret_`. The client-side `rpc_call` at `:329-367` reads the secret from either the explicit argument or the `DETERM_RPC_AUTH_SECRET` env var, computes the HMAC, embeds it in the request — the secret itself is never written to any output.
 
 The composition with the input-validation layer's defense against secret-exposure via crafted JSON responses is:
 
@@ -206,11 +206,11 @@ The composition is: an attacker attempting an oversize RPC request (e.g., a 100 
 | Online brute-force of HMAC | `2^-256` per attempt (T-1) + S-014 rate limit caps verify rate per peer-IP at `≤ ⌊C + r·Δ⌋` per window. At `r = 100 req/s` (web profile default) the attacker's per-IP forge-rate is ≤ 100/s; cumulative `Q · 2^-256` is negligible for any operational `Q`. | Aggregate from N coordinated IPs scales the forge-rate to N · 100/s; even at N = 10^6 and `Q = 10^14 / day` the bound `Q · 2^-256` is `≤ 2^-209`, strongly negligible. | Log-and-alert at operator level on any `auth_failed` rate exceeding a threshold (e.g., `>100/min` per IP); the alert signals targeted probing rather than a probabilistic success risk. |
 | Offline brute-force of `rpc_auth_secret` hash | Secret never persisted as a hash anywhere; the runtime secret is stored as raw bytes in `auth_secret_` (decoded from hex at server construction). No collision attack on a hash digest of the secret is available. | Plaintext at-rest in `Config::to_json` per `RpcAuthHmacSoundness.md` F-1. Env-var leak at `/proc/PID/environ` per F-2. | Config-file permissions `chmod 0600` + `hidepid=2` Linux mount option. Long-term: passphrase encryption (v2.17 pattern applied to RPC secret) + secrets-manager integration. |
 | Replay of authenticated state-mutating RPC | Apply-layer nonce gate at `src/chain/chain.cpp:739` (FA-Apply-3) — every state-mutating tx is gated by strict-equality nonce check at apply; replays are silently no-op'd. For `submit_equivocation`, FA-Apply-10 T-E3 provides the parallel replay-safety. | Idempotent reads (`balance`, `nonce`, `status`, `block`, `headers`, etc.) are replay-safe by design — replaying a read query is no information leakage beyond the original query. | None required; the residual is benign. |
-| Timing-channel HMAC compare | Constant-time XOR-OR loop at `src/rpc/rpc.cpp:120-123` (T-4). No per-byte timing channel. | Process-level timing observability (`top`, `perf`, kernel scheduling) is outside the RPC server's scope. An attacker with kernel-level observability already has the secret via memory dump. | Operator monitoring + kernel hardening (out of scope for the RPC server). |
+| Timing-channel HMAC compare | Constant-time XOR-OR loop at `src/rpc/rpc.cpp:130-133` (T-4). No per-byte timing channel. | Process-level timing observability (`top`, `perf`, kernel scheduling) is outside the RPC server's scope. An attacker with kernel-level observability already has the secret via memory dump. | Operator monitoring + kernel hardening (out of scope for the RPC server). |
 | Malformed JSON payload | S-018 hardened `from_json` paths (Layer B per `RpcInputValidationDefense.md`) catch missing/wrong-type/wrong-hex-length fields with `"S-018: <field>"` diagnostic. Layer B's S-018 surface is exhaustively documented in `JsonValidationSoundness.md`'s conversion inventory. | None for state-mutating methods — every required field flows through S-018. Scalar-input methods (e.g., `balance(domain)`) accept wrong-type input as the default value (e.g., `""`), which Layer C's semantic check absorbs. | None required. |
 | Oversized JSON payload | Framing-layer ceiling `kMaxFrameBytes` = 16 MB (S-022). Per-tx ceiling at canonical encoding limits any individual transaction to well under 64 KB. | Pre-cap parse cost is bounded by S-014's rate limit (the attacker pays parse work per request, capped at the bucket budget per peer-IP). Slow-consume attacks via partial bytes without newline are bounded by OS TCP backpressure + asio idle timeout. | `RpcInputValidationDefense.md` F-1 surfaces the residual hardening (add `max_size` to `read_until` to mirror the gossip path's per-MsgType cap on RPC). |
 | State-mutation under no-auth | T-3 exhaustive enumeration confirms no state-mutating handler is reachable without auth when `auth_secret_` is non-empty. | Localhost-only mode (S-001 Option 1; default for single-tenant boxes) does not require auth — single-tenant operator owns the whole host, so the host-level access control substitutes for the HMAC layer. | Documented escape hatch in `SECURITY.md` §S-001 closure narrative; operator deploying for multi-tenant or external-bind use MUST enable the secret. F-2 surfaces a recommended "refuse external bind without auth" CLI flag. |
-| Secret in log files | Startup log at `src/rpc/rpc.cpp:95-97` emits only `auth_secret_.size()`, never the value. All error paths return fixed string constants (T-5 above + `RpcAuthHmacSoundness.md` L-4). | None for chain logs (the audit confirms no secret material reaches any log emit site in `src/rpc/rpc.cpp` or `src/node/node.cpp`). Operator log-management is policy: log files containing the startup banner are no information leakage; if the operator pipes logs to a third-party aggregator, the startup-banner's `len = N` is `0 bits` of secret information (every operator follows the recommended 32-byte length). | None required for chain code; operator log-aggregator hygiene is operations scope. |
+| Secret in log files | Startup log at `src/rpc/rpc.cpp:83-85` emits only `auth_secret_.size()`, never the value. All error paths return fixed string constants (T-5 above + `RpcAuthHmacSoundness.md` L-4). | None for chain logs (the audit confirms no secret material reaches any log emit site in `src/rpc/rpc.cpp` or `src/node/node.cpp`). Operator log-management is policy: log files containing the startup banner are no information leakage; if the operator pipes logs to a third-party aggregator, the startup-banner's `len = N` is `0 bits` of secret information (every operator follows the recommended 32-byte length). | None required for chain code; operator log-aggregator hygiene is operations scope. |
 | Authenticated insider with malformed payload (`A_inside`) | Input-validation layer's Layer B (S-018) + Layer C (semantic gates) — under T-1, the request reaching `rpc_submit_tx` has passed both. | The insider can still submit a transaction signed by their own account; the apply layer treats this as a legitimate transaction. | This is the intended behavior — `A_inside` is the operator themselves (or a host compromise). Apply-layer FA-Apply-3 + FA-Apply-4 + FA-Apply-6 enforce the chain-state invariants regardless. |
 | Authenticated insider replaying captured tx (`A_inside` + replay) | Apply-layer nonce gate (FA-Apply-3 T-N1) drops the replay at apply boundary. | None — even an authenticated insider cannot replay a state-mutating transaction to double-spend. | None required. |
 | Authenticated insider submitting tx from someone else's account | Layer C's signature verification gate at `src/node/node.cpp:3163-3168` rejects any `submit_tx` whose `sig` does not verify against the embedded `signing_bytes` under the claimed `from` address's Ed25519 public key. Forging this requires breaking A1 (Ed25519 EUF-CMA). | None — A1 + Layer C composition is tight. | None required. |
@@ -232,13 +232,13 @@ The input-validation layer's defense against secret-exposure via crafted JSON re
 
 ### Finding F-2 (Composition gap if a future RPC handler bypasses the canonical auth pattern).
 
-The T-3 exhaustive enumeration is valid as of the current code (rev. main as of this commit). It rests on the structural property that every `Node::rpc_*` handler is reached only via `dispatch` (`src/rpc/rpc.cpp:197-272`), which is itself reached only via `handle_session` (`:142-195`)'s auth-then-dispatch ordering at `:179-184`. A future RPC handler that bypasses this pattern — for example, a new handler invoked from an out-of-band code path (e.g., a WebSocket upgrade, a long-polling endpoint, or an admin-only side channel) — would not inherit the auth gate.
+The T-3 exhaustive enumeration is valid as of the current code (rev. main as of this commit). It rests on the structural property that every `Node::rpc_*` handler is reached only via `dispatch` (`src/rpc/rpc.cpp:234-325`), which is itself reached only via `handle_session` (`:161-232`)'s auth-then-dispatch ordering at `:190-221`. A future RPC handler that bypasses this pattern — for example, a new handler invoked from an out-of-band code path (e.g., a WebSocket upgrade, a long-polling endpoint, or an admin-only side channel) — would not inherit the auth gate.
 
 **Severity:** Very Low (process discipline, not a code defect — the current code passes T-3).
 
 **Recommended mitigation:** Add a code-review checkbox to the contribution guide: "Every new state-mutating RPC handler MUST be added to `RpcServer::dispatch` AND only invoked from there." Add a structural unit test that scans `src/node/node.cpp` for `rpc_*` methods and asserts that every method's only call site is `RpcServer::dispatch` (a static analysis check could be a CI gate). Cross-reference this proof file in the dispatch table's leading comment.
 
-A related canonical-position recommendation: keep the auth gate at `:179` in front of the dispatch call at `:184` in any future refactor of `handle_session`. The comment at `:177-178` already documents the rationale ("HMAC auth check before dispatching"), but a more explicit "DO NOT MOVE THIS BELOW DISPATCH" comment would prevent accidental regression.
+A related canonical-position recommendation: keep the auth gate at `:190` in front of the dispatch call at `:221` in any future refactor of `handle_session`. The comment at `:177-178` already documents the rationale ("HMAC auth check before dispatching"), but a more explicit "DO NOT MOVE THIS BELOW DISPATCH" comment would prevent accidental regression.
 
 **Effort:** ~5 lines of dispatch-table comment + ~30 LOC for the structural-test CI gate. Estimated 0.5d.
 
@@ -256,7 +256,7 @@ For example, the hash-recompute error at `src/node/node.cpp:3150-3155` throws `"
 
 ### Finding F-4 (No paired regression test exercises the auth-then-validate composition).
 
-The existing per-layer tests cover the cryptographic layer (`tools/test_rpc_hmac_auth.sh` — 5 assertions for Layer E) and the input-validation layer (`tools/test_s018_json_validation.sh` — 10 assertions for Layer B; `tools/test_anon_address_case.sh` — Layer C S-028; `tools/test_rpc_rate_limit.sh` — Layer D) in isolation. There is no paired test that exercises the full composition: send a request that is well-authenticated AND well-validated AND succeeds vs send a request that is well-authenticated BUT input-malformed AND fails at Layer B vs send a request that is unauthenticated AND would have been valid AND fails at Layer E.
+The existing per-layer tests cover the cryptographic layer (`tools/test_rpc_hmac_auth.sh` — 7 assertions for Layer E) and the input-validation layer (`tools/test_s018_json_validation.sh` — 10 assertions for Layer B; `tools/test_anon_address_case.sh` — Layer C S-028; `tools/test_rpc_rate_limit.sh` — Layer D) in isolation. There is no paired test that exercises the full composition: send a request that is well-authenticated AND well-validated AND succeeds vs send a request that is well-authenticated BUT input-malformed AND fails at Layer B vs send a request that is unauthenticated AND would have been valid AND fails at Layer E.
 
 **Severity:** Low (each per-layer test is sound; the composition is established by audit, but a paired test would be defense-in-depth).
 
@@ -300,19 +300,19 @@ The five findings are advisory; none invalidates T-1..T-5. They are surfaced for
 
 ### 7.2 Implementation sites
 
-- **`src/rpc/rpc.cpp:52-58`** — `canonical_for_hmac(method, params)` canonical-serialization helper.
-- **`src/rpc/rpc.cpp:60-70`** — `hmac_sha256_hex(key, message)` HMAC primitive wrapping OpenSSL `HMAC(EVP_sha256(), ...)`.
-- **`src/rpc/rpc.cpp:79-90`** — `RpcServer` constructor; secret hex-decoded into `auth_secret_`.
-- **`src/rpc/rpc.cpp:92-104`** — Startup log emitting only `auth_secret_.size()`.
-- **`src/rpc/rpc.cpp:113-138`** — `auth_tag_verdict` and `verify_auth` (the proof's primary cryptographic-layer object).
-- **`src/rpc/rpc.cpp:142-195`** — `handle_session` (the canonical control flow at the heart of T-3).
-- **`src/rpc/rpc.cpp:172`** — Layer D rate-limit consume call.
-- **`src/rpc/rpc.cpp:176`** — Layer B `json::parse` call.
-- **`src/rpc/rpc.cpp:179`** — Layer E `verify_auth` call (auth gate).
-- **`src/rpc/rpc.cpp:184`** — Dispatch invocation (post-auth).
-- **`src/rpc/rpc.cpp:188-191`** — Exception path; sets `response["error"] = e.what()`.
-- **`src/rpc/rpc.cpp:197-272`** — `dispatch` table (T-3's exhaustive enumeration source).
-- **`src/rpc/rpc.cpp:276-321`** — Client-side `rpc_call` with `DETERM_RPC_AUTH_SECRET` env var support.
+- **`src/rpc/rpc.cpp:40-46`** — `canonical_for_hmac(method, params)` canonical-serialization helper.
+- **`src/rpc/rpc.cpp:48-58`** — `hmac_sha256_hex(key, message)` HMAC primitive wrapping OpenSSL `HMAC(EVP_sha256(), ...)`.
+- **`src/rpc/rpc.cpp:67-78`** — `RpcServer` constructor; secret hex-decoded into `auth_secret_`.
+- **`src/rpc/rpc.cpp:80-92`** — Startup log emitting only `auth_secret_.size()`.
+- **`src/rpc/rpc.cpp:123-148`** — `auth_tag_verdict` and `verify_auth` (the proof's primary cryptographic-layer object).
+- **`src/rpc/rpc.cpp:152-205`** — `handle_session` (the canonical control flow at the heart of T-3).
+- **`src/rpc/rpc.cpp:182`** — Layer D rate-limit consume call.
+- **`src/rpc/rpc.cpp:186`** — Layer B `json::parse` call.
+- **`src/rpc/rpc.cpp:189`** — Layer E `verify_auth` call (auth gate).
+- **`src/rpc/rpc.cpp:194`** — Dispatch invocation (post-auth).
+- **`src/rpc/rpc.cpp:198-201`** — Exception path; sets `response["error"] = e.what()`.
+- **`src/rpc/rpc.cpp:207-282`** — `dispatch` table (T-3's exhaustive enumeration source).
+- **`src/rpc/rpc.cpp:286-331`** — Client-side `rpc_call` with `DETERM_RPC_AUTH_SECRET` env var support.
 - **`src/node/node.cpp:2804-2842`** — `rpc_send` (Layer C entry for `send`).
 - **`src/node/node.cpp:2850-...`** — `rpc_stake` (Layer C entry for `stake`).
 - **`src/node/node.cpp:2884-...`** — `rpc_unstake` (Layer C entry for `unstake`).
@@ -335,7 +335,7 @@ The five findings are advisory; none invalidates T-1..T-5. They are surfaced for
 
 ### 7.4 Tests
 
-- **`tools/test_rpc_hmac_auth.sh`** — 5-assertion regression (Layer E / `RpcAuthHmacSoundness.md`).
+- **`tools/test_rpc_hmac_auth.sh`** — 7-assertion regression (Layer E / `RpcAuthHmacSoundness.md`; step 8 covers S-122).
 - **`tools/test_rpc_rate_limit.sh`** — Layer D RPC integration (4 assertions).
 - **`tools/test_s018_json_validation.sh`** — Layer B (S-018) regression (10 assertions).
 - **`tools/test_anon_address_case.sh`** — Layer C (S-028) regression (6 assertions post-G-2 closure).

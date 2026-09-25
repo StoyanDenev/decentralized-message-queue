@@ -11,7 +11,7 @@
 # for ANY method would then authenticate EVERY method.
 #
 # THE GAP this closes: nothing pins the method-binding at the PRODUCTION source.
-#   * `determ test-rpc-auth-hmac` (src/main.cpp, 26 assertions incl. #14 "wrong
+#   * `determ test-rpc-auth-hmac` (src/main.cpp, 37 assertions incl. #14 "wrong
 #     method -> different tag") tests a LOCAL LAMBDA copy of canonical_for_hmac,
 #     NOT the production function — the production one lives in an anonymous
 #     namespace (rpc.cpp), uncallable from the test, so the two are hand-mirrored

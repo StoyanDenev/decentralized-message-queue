@@ -11,7 +11,7 @@ companion documents — it only composes their guarantees.
 
 The composition has two operational consequences. First, every adversarial
 RPC input is rejected by at least one of the five layers, so the post-Layer-
-E dispatch surface in `RpcServer::dispatch` (`src/rpc/rpc.cpp:197-272`)
+E dispatch surface in `RpcServer::dispatch` (`src/rpc/rpc.cpp:207-282`)
 sees only inputs that passed transport framing (Layer A), JSON structure
 (Layer B), semantic per-method validation (Layer C), per-IP rate budget
 (Layer D), and HMAC authentication (Layer E). Second, even if all five
@@ -42,7 +42,7 @@ underlying T-3's rate-limit composition).
 
 **Setup.** Let `RPC_SURFACE` denote the set of byte strings that arrive on
 a TCP connection accepted by `RpcServer::accept_loop` at
-`src/rpc/rpc.cpp:131-140`. Each request is delimited by a newline and
+`src/rpc/rpc.cpp:141-150`. Each request is delimited by a newline and
 read by `asio::read_until(*socket, buf, '\n', ec)` at line 158.
 
 > **Environment note (doc-consolidation inc.4 drift-repair).** The `asio` RPC socket API quoted in this proof (`asio::read_until`, `asio::streambuf`, `asio::write`, `asio::ip::tcp::socket`) describes the pre-migration RPC server. `asio` is deleted from the tree; `RpcServer` now runs on the native `net::Transport`/`net::EventLoop` seam (IOCP on Windows, epoll on POSIX — see `MinixTacticalProfile.md`). The walk-through and its layered-validation findings are retained as the finding's original context.
@@ -89,18 +89,18 @@ denote the five validation layers below.
   `unstake` (S-023); namespace whitelist for `state_proof`; pagination
   caps for `headers` / `dapp_messages` (256-entry pages); etc.
 - **Layer D (rate limiting).** `RateLimiter::consume(peer_ip)` at
-  `src/rpc/rpc.cpp:172` applies a per-peer-IP token-bucket BEFORE
+  `src/rpc/rpc.cpp:182` applies a per-peer-IP token-bucket BEFORE
   JSON parse + auth. Rejected requests return `{"error":
   "rate_limited"}` and consume `O(log N)` work (S-014).
 - **Layer E (HMAC authentication).** `RpcServer::verify_auth` at
-  `src/rpc/rpc.cpp:127-138` verifies a hex-HMAC-SHA-256 over
+  `src/rpc/rpc.cpp:137-148` verifies a hex-HMAC-SHA-256 over
   `method ‖ "|" ‖ params.dump()` against the server-side `auth_secret_`
   using a constant-time comparison. Missing / wrong-secret returns
   `auth_required` / `auth_failed`. When `auth_secret_` is empty (default
   off for backward-compat), Layer E is a no-op (S-001).
 
 The five layers fire in this canonical order in `handle_session` at
-`src/rpc/rpc.cpp:142-195`:
+`src/rpc/rpc.cpp:152-205`:
 
 1. Layer A: `read_until('\n', …)` reads one bounded line.
 2. Layer D: `rate_limiter_.consume(peer_ip)` — first non-syntactic gate.
@@ -197,7 +197,7 @@ any layer cannot mutate `chain_` state, mempool state (`tx_store_`,
 `tx_by_account_nonce_`), or any operator-visible counter outside the
 per-IP bucket map and the optional log line. Proof: every state mutation
 happens inside `Node::rpc_*` methods invoked from `dispatch` at
-`src/rpc/rpc.cpp:197-272`. `dispatch` is reached only when Layers A, B,
+`src/rpc/rpc.cpp:207-282`. `dispatch` is reached only when Layers A, B,
 D, E all pass — see the control flow in `handle_session` lines 165-187.
 Layer C's semantic rejection is the last gate before mutation; if Layer C
 throws, the throw is caught at line 188 and `chain_` is unchanged.
@@ -348,7 +348,7 @@ Layer D's case) that does not corrupt the next layer's state.
 
 ### 3.1 The RPC entry-point — `RpcServer::handle_session`
 
-`src/rpc/rpc.cpp:142-195` is the primary object of this proof. The
+`src/rpc/rpc.cpp:152-205` is the primary object of this proof. The
 relevant section (Layer ordering):
 
 ```cpp
@@ -455,7 +455,7 @@ defaults for missing scalars and `params.value(key, json::object())`
 silently substituted empty objects.
 
 Post-S-018, structured-payload methods route through hardened from_json
-paths. The RPC dispatch at `src/rpc/rpc.cpp:226-230`:
+paths. The RPC dispatch at `src/rpc/rpc.cpp:236-240`:
 
 ```cpp
 if (method == "submit_tx")
@@ -568,7 +568,7 @@ the key.
 
 ### 3.5 Layer D — rate limiting
 
-`rate_limiter_.consume(peer_ip)` at `src/rpc/rpc.cpp:172`. The
+`rate_limiter_.consume(peer_ip)` at `src/rpc/rpc.cpp:182`. The
 underlying `RateLimiter` is in `include/determ/net/rate_limiter.hpp`
 (see §3 of `S014RateLimiterSoundness.md`). The RPC instance is
 configured at construction time via the `rate_per_sec` /
@@ -577,7 +577,7 @@ zero.
 
 ### 3.6 Layer E — HMAC authentication
 
-`verify_auth(req)` at `src/rpc/rpc.cpp:127-138`. See
+`verify_auth(req)` at `src/rpc/rpc.cpp:137-148`. See
 `RpcAuthHmacSoundness.md` for the full soundness argument. The brief
 form:
 
@@ -742,7 +742,7 @@ recommendation in `docs/SECURITY.md` §S-001.   □
 
 ### Lemma L-6 (Layer ordering preserves correctness under exception)
 
-The `try`/`catch` at `src/rpc/rpc.cpp:165-191` catches `std::exception`
+The `try`/`catch` at `src/rpc/rpc.cpp:175-201` catches `std::exception`
 from any layer's throw. The catch body sets `response["error"] =
 e.what()` and writes the response; no `chain_`-mutating code path
 exists between the catch and the response-write.
@@ -1070,7 +1070,7 @@ could reach `N · M` MB of server memory.
 
 **Recommended mitigation:** add a `max_size` argument to `read_until`
 or wrap the streambuf with a size-bounded variant. Effort: ~5 LOC at
-`src/rpc/rpc.cpp:158`. Could mirror the framing-layer's `kMaxFrameBytes`
+`src/rpc/rpc.cpp:168`. Could mirror the framing-layer's `kMaxFrameBytes`
 cap (16 MB) or a tighter RPC-specific cap (1 MB; legitimate RPC
 requests are well under this).
 
@@ -1085,7 +1085,7 @@ MUST enable the secret.
 **Severity:** Low (documentation-discipline; not a code defect).
 
 **Recommended mitigation:** the existing warning at
-`src/rpc/rpc.cpp:99-103` already fires when external-bind is enabled
+`src/rpc/rpc.cpp:87-91` already fires when external-bind is enabled
 without an auth secret. A complementary improvement would be: refuse to
 start in external-bind mode with empty `auth_secret_` unless an
 explicit `--allow-external-bind-no-auth` flag is passed. Effort:
@@ -1208,7 +1208,7 @@ still drop the tx.
 The five-layer architecture is live in the current `main` branch via
 the union of:
 
-- `src/rpc/rpc.cpp:79-194` — `RpcServer` constructor (lines 79-110)
+- `src/rpc/rpc.cpp:67-204` — `RpcServer` constructor (lines 79-110)
   + `handle_session` (lines 142-195) + the dispatch table (197-272).
 - `include/determ/util/json_validate.hpp` — S-018 helpers (Layer B).
 - `include/determ/net/rate_limiter.hpp` — S-014 token bucket (Layer D).
@@ -1244,12 +1244,12 @@ class the threat model considers.
 
 ### Determ-internal source
 
-- `src/rpc/rpc.cpp:79-110` — `RpcServer` constructor (binds Layer D
+- `src/rpc/rpc.cpp:67-98` — `RpcServer` constructor (binds Layer D
   + Layer E configuration).
-- `src/rpc/rpc.cpp:113-138` — `auth_tag_verdict` and `verify_auth` (Layer E).
-- `src/rpc/rpc.cpp:142-195` — `handle_session` (the proof's primary
+- `src/rpc/rpc.cpp:123-148` — `auth_tag_verdict` and `verify_auth` (Layer E).
+- `src/rpc/rpc.cpp:152-205` — `handle_session` (the proof's primary
   object).
-- `src/rpc/rpc.cpp:197-272` — `dispatch` (Layer C dispatch table).
+- `src/rpc/rpc.cpp:207-282` — `dispatch` (Layer C dispatch table).
 - `include/determ/util/json_validate.hpp` — S-018 helpers (Layer B).
 - `include/determ/net/rate_limiter.hpp` — `RateLimiter` (Layer D).
 - `include/determ/net/messages.hpp:101` — `kMaxFrameBytes`

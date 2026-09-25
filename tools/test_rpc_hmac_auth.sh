@@ -8,6 +8,10 @@
 #   4. Auth enabled: RPC with correct auth via DETERM_RPC_AUTH_SECRET
 #      env var → success.
 #   5. Auth enabled: tampered auth (one-byte flip) → rejected.
+#   6. Client: a malformed-hex secret → clear error.
+#   7. Server: a malformed rpc_auth_secret (odd length; a sscanf-style
+#      "0x" form) → the daemon refuses to start instead of running with
+#      authentication off or under another key (S-122).
 #
 # Single-node SINGLE chain (M=K=1 strong). Run from repo root.
 set -u
@@ -171,6 +175,25 @@ if grep -qi "not valid hex" $T/r7.err 2>/dev/null || grep -qi "not valid hex" $T
 else
   assert false "malformed-hex did NOT yield clear error"
 fi
+
+echo
+echo "=== 8. Malformed rpc_auth_secret on the server → refuses to start (S-122) ==="
+stop_node
+for BAD in "${SECRET:1}" "0x${SECRET:2}"; do
+  python -c "
+import json
+with open('$T/n1/config.json') as f: c = json.load(f)
+c['rpc_auth_secret'] = '$BAD'
+with open('$T/n1/config.json','w') as f: json.dump(c, f, indent=2)
+"
+  timeout 20 $DETERM start --config $T/n1/config.json > $T/n1/log8 2>&1
+  RC8=$?
+  if [ "$RC8" -ne 0 ] && [ "$RC8" -ne 124 ] && grep -q "RPC auth secret" $T/n1/log8; then
+    assert true "server refuses to start with rpc_auth_secret of length ${#BAD} (exit $RC8)"
+  else
+    assert false "server did not refuse a malformed rpc_auth_secret (exit $RC8, see $T/n1/log8)"
+  fi
+done
 
 echo
 echo "=== Test summary ==="

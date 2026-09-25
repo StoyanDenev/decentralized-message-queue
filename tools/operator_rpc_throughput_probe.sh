@@ -59,7 +59,7 @@
 #       boolean and, when the operator supplies them, the operator-asserted
 #       --configured-rate / --configured-burst for the correlation line. With
 #       neither config access nor those flags, the correlation is qualitative.
-#     - the count of `rate_limited` error replies (rpc.cpp:172-174) the probe
+#     - the count of `rate_limited` error replies (rpc.cpp:183-185) the probe
 #       itself triggered IS a direct, honest signal that the limiter engaged
 #       during the window — that is the one piece of limiter behaviour this
 #       tool can observe on the wire, and it is reported explicitly.
@@ -461,7 +461,7 @@ if rate_limited > 0:
         "severity": "INFO",
         "message": f"limiter ENGAGED: {rate_limited}/{requests_sent} probe "
                    f"requests returned rate_limited (S-014 token bucket fired "
-                   f"before dispatch, rpc.cpp:172). This is the one direct "
+                   f"before dispatch, rpc.cpp:183). This is the one direct "
                    f"on-the-wire signal of limiter engagement.",
     })
 if errors > 0:

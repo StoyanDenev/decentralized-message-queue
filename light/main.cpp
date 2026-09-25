@@ -885,8 +885,8 @@ void print_usage() {
         "      the request — so an object with keys in any order yields the\n"
         "      same canonical tag). --secret is the SAME hex secret the\n"
         "      operator sets as rpc_auth_secret / DETERM_RPC_AUTH_SECRET; it is\n"
-        "      HMAC key material, hex-decoded to the raw key bytes (matching\n"
-        "      the server's hex_to_bytes(rpc_auth_secret)). Params default to\n"
+        "      HMAC key material, hex-decoded to the raw key bytes (as the\n"
+        "      server decodes a well-formed rpc_auth_secret). Params default to\n"
         "      `{}` when none of --params-file / --params-string /\n"
         "      --params-stdin is given (a no-param method). With --emit-request\n"
         "      the full request object {method, params, auth} is printed ready\n"
@@ -4510,7 +4510,7 @@ int cmd_submit_tx(int argc, char** argv) {
     try {
         json tx = read_json_file(tx_path);
         // The daemon's submit_tx RPC accepts {"tx": <canonical-tx-json>}
-        // per rpc.cpp:226 params.value("tx", ...). Sign-tx emits the
+        // per rpc.cpp:264 params.value("tx", ...). Sign-tx emits the
         // canonical Transaction shape with `sig` (not `signature`); we
         // wrap it here.
         RpcClient rpc(port);
@@ -4588,7 +4588,7 @@ int cmd_verify_and_submit(int argc, char** argv) {
         auto signed_tx = sign_light_tx(kf, LightTxType::TRANSFER,
                                          canonical_to, amount, fee,
                                          view.next_nonce);
-        // 5. Submit (params shape per rpc.cpp:226 is {"tx": <tx-json>}).
+        // 5. Submit (params shape per rpc.cpp:264 is {"tx": <tx-json>}).
         auto submit_reply = rpc.call("submit_tx", {{"tx", signed_tx}});
         json out = {
             {"verified_at_height", view.height},
@@ -9970,9 +9970,10 @@ int cmd_rpc_auth(int argc, char** argv) {
     //   verify  → MATCH exit 0 / MISMATCH exit 3 (fail-closed).
     //   usage / bad-hex / unparseable-params → exit 1.
     try {
-        // Secret is HMAC key material — hex-decoded to raw bytes, exactly
-        // as the server does (hex_to_bytes(rpc_auth_secret)). A non-hex
-        // secret is a usage error, never a silent empty key.
+        // Secret is HMAC key material — hex-decoded to raw bytes, as the
+        // server decodes a well-formed rpc_auth_secret (from_hex is more
+        // lenient than the server's rpc_auth_key; SECURITY.md S-122). A
+        // non-hex secret is a usage error, never a silent empty key.
         std::vector<uint8_t> key;
         try {
             key = from_hex(secret_hex);

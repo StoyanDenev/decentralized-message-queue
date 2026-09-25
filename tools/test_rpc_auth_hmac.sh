@@ -18,7 +18,7 @@
 #   * tools/test_rpc_hmac_auth.sh — end-to-end RPC HMAC auth on a live
 #     cluster (missing / wrong / correct auth tag)
 #
-# 26 assertions covering:
+# 37 assertions covering:
 #
 #   1-2.  Canonical message is EXACTLY "method|params.dump()" (single
 #         '|' separator, method first)
@@ -41,6 +41,12 @@
 #         client value, including the same short string; a complete tag
 #         is accepted only on an exact match (first/last nibble, one byte
 #         appended or removed, and an empty field are refused)
+#   18.   S-122, the PRODUCTION secret decoder rpc_auth_key (11
+#         assertions): "" is the auth-disabled key, well-formed hex in
+#         either case decodes, odd length, non-hex digits, signs, a 0x
+#         prefix and whitespace throw, and the message omits the secret
+#   Plus two CLI checks: `determ dapp-subscribe` refuses a malformed
+#   DETERM_RPC_AUTH_SECRET ("abc", "0xab") before dialing (S-122 wiring).
 #
 # Run from repo root: bash tools/test_rpc_auth_hmac.sh
 set -u
@@ -50,13 +56,28 @@ source tools/common.sh
 echo "=== RPC HMAC-SHA-256 auth contract (S-001 / v2.16) ==="
 OUT=$($DETERM test-rpc-auth-hmac 2>&1)
 echo "$OUT"
+FAILED=0
+echo "$OUT" | tail -3 | grep -q "PASS: rpc-auth-hmac all assertions" || FAILED=1
 
-if echo "$OUT" | tail -3 | grep -q "PASS: rpc-auth-hmac all assertions"; then
-  echo ""
+# S-122 wiring, offline: dapp-subscribe decodes DETERM_RPC_AUTH_SECRET with the
+# production decoder before it dials, so a malformed secret is refused up front
+# (the lenient decoder it used to carry accepted both of these and dialed).
+for BAD in abc 0xab; do
+  SUB=$(DETERM_RPC_AUTH_SECRET="$BAD" timeout 20 $DETERM dapp-subscribe --domain probe --rpc-port 1 2>&1)
+  RC=$?
+  if [ "$RC" -eq 1 ] && echo "$SUB" | grep -q "is not valid hex"; then
+    echo "  PASS: dapp-subscribe refuses DETERM_RPC_AUTH_SECRET=$BAD before dialing (S-122)"
+  else
+    echo "  FAIL: dapp-subscribe did not refuse DETERM_RPC_AUTH_SECRET=$BAD (exit $RC): $SUB"
+    FAILED=1
+  fi
+done
+
+echo ""
+if [ "$FAILED" -eq 0 ]; then
   echo "  PASS: rpc-auth-hmac unit test"
   exit 0
 else
-  echo ""
   echo "  FAIL: rpc-auth-hmac had assertion failures"
   exit 1
 fi

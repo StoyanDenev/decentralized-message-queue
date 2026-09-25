@@ -8279,3 +8279,54 @@ length or non-hex) decodes to an empty key and silently disables authentication 
 
 **Verification.** `ci_local.sh` default on this tree: build, FAST 341/0 (the wrapper
 count is unchanged; `test-rpc-auth-hmac` grew from 16 to 26 assertions) and 17 guards.
+
+## 2026-09-25 — S-122 found and closed: a malformed RPC secret stops the daemon
+
+**Problem.** The S-118 review found that the server decoded `rpc_auth_secret` with a
+`sscanf("%02x")` helper that returned an empty key for an odd length or a non-hex pair. An
+empty key means authentication is off, so a secret pasted one character short left the RPC
+unauthenticated while `status` reported `rpc_hmac_auth: true` (it tests the configured
+string). The same helper decoded sign, `0x` and whitespace forms to a different key.
+
+**Change.** `determ::rpc::rpc_auth_key` accepts only "" (authentication disabled) or an even
+number of hex digits and throws `std::invalid_argument` otherwise, with messages that never
+contain the secret. The `RpcServer` constructor, `rpc_call` and `determ dapp-subscribe`
+(which kept its own copy of the lenient decoder) use it; the old helper is deleted. A
+malformed secret now stops `determ start` with `[determ] FATAL` (exit 1), and the clients
+keep their existing "not valid hex" errors. `status` is truthful without change:
+a non-empty configured secret now means authentication is on. Registered as S-122
+(Medium, mitigated).
+
+**Gate.** `determ test-rpc-auth-hmac` §14 (FAST) calls the production decoder with eleven
+assertions, including that the error message does not contain the secret; mutants
+accepting an odd length or decoding any character turn it red. The same FAST wrapper runs
+`determ dapp-subscribe` with a malformed `DETERM_RPC_AUTH_SECRET` (`abc`, `0xab`) and
+requires the refusal before any dial, which the old copied decoder did not give.
+`tools/test_rpc_hmac_auth.sh` step 8 (live, not FAST; run for this increment with an
+explicit `DETERM_BIN`) asserts the daemon refuses an odd-length and a `0x`-form secret;
+mutants that swallow the error in the constructor or in `rpc_call` turn steps 8 and 7 red.
+Residual: the shared `from_hex` (`include/determ/types.hpp`) parses each pair with
+`std::stoul` and accepts the same sign, prefix and whitespace forms and a non-hex second
+digit; the wallet and light `rpc-auth` tools use it only to compute a client tag, and its
+other callers are not reviewed here. The daemon binds the RPC port and constructs the node
+before it decodes the secret, so the refusal follows node initialization; an earlier check
+in `determ start` would leave the constructor's use untested, so it is not added.
+
+**Documents.** Deleting the helper moved most of `rpc.cpp`. The RPC-authentication
+documents were re-anchored to the exact current lines: RpcAuthHmacSoundness.md,
+F2RPCAuthEnvComposition.md and S001RpcAuthSoundness.md (bare line numbers included), the
+two RPC TLA+ models' comments, the operator probes' comments and their CLI-REFERENCE rows,
+and the light client's comments. Every other `rpc.cpp:N` citation in the non-archive
+Markdown was mapped through this diff, so it points at the code it pointed at before. A
+symbol check over the RPC citations still flags 36, mostly in documents about other RPC
+methods (the stake, supply and receipt proofs, the S-014 analyses) that were already stale,
+plus lines naming several functions; two are historical records kept as written (the
+ledger's original S-001 text is not rewritten either, nor is the struck observation in
+RpcIngressGateAudit.md or two executed-mutant records in ProofClaimGateTraceability.md).
+`test_doc_citation_bounds` checks bounds, not content; re-anchoring the rest is a separate
+documentation increment. Comments and the light client's help text that named the
+deleted helper now name `rpc_auth_key`, with the light client's weaker decoder stated.
+
+**Verification.** `ci_local.sh` default on this tree: build, FAST 341/0 and 17 guards;
+`ci_local.sh --tla` for the two edited TLA+ models' comments; `tools/test_rpc_hmac_auth.sh`
+run against the same build with an explicit `DETERM_BIN`: 7/7.

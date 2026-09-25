@@ -226,7 +226,7 @@ The integration test surface is sufficient to confirm A-V1 (single-IP flood) def
 - `include/determ/net/rate_limiter.hpp:1-152` — `RateLimiter` helper (the primary object; T-1..T-5 of this proof all cite this file).
 - `include/determ/net/rate_limiter.hpp:95-103` — F-1 amortized eviction trigger (T-3 of this proof).
 - `include/determ/net/rate_limiter.hpp:128-143` — `sweep_idle_locked` (T-3 mechanism).
-- `src/rpc/rpc.cpp:172-175` — RPC consume call site.
+- `src/rpc/rpc.cpp:182-185` — RPC consume call site.
 - `src/net/gossip.cpp:148-155` — gossip consume call site + HELLO exemption (T-4 of this proof).
 - `src/net/peer.cpp:90-97` — S-022 per-MsgType body cap enforcement (T-5 of this proof; `S022WireFormatCaps.md` T-1).
 - `include/determ/net/messages.hpp:181-201` — `make_hello` body shape (T-4 of this proof).

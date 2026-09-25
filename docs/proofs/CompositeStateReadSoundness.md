@@ -333,7 +333,7 @@ Per-theorem citation table for an auditor walking from theorem to code.
 | CR-4 | composite length check | `src/node/node.cpp:3341-3349` | `m` = 4B / `p` = 12B body width enforced before leaf lookup. |
 | CR-4 | `Chain::state_proof` | `src/chain/chain.cpp:435-462` | `leaf_count = leaves.size()` (l.456) from the same tree as the root. |
 | CR-1 | `Chain::compute_state_root` | `src/chain/chain.cpp:413-415` | `merkle_root(build_state_leaves())` — the root the committee transitively signs. |
-| CR-E | state_proof RPC dispatch | `src/rpc/rpc.cpp:235-238` | `method == "state_proof"` → `rpc_state_proof(namespace, key)`. |
+| CR-E | state_proof RPC dispatch | `src/rpc/rpc.cpp:245-248` | `method == "state_proof"` → `rpc_state_proof(namespace, key)`. |
 | CR-E | `read_account_trustless` (template) | `light/trustless_read.cpp:439-599` | The composite read skeleton; `m:`/`p:` differ by namespace + composite key construction. |
 
 **Tests** (the composite reads share the light-client + Merkle + composite-namespace test surface):
@@ -369,7 +369,7 @@ Per-theorem citation table for an auditor walking from theorem to code.
 - `src/chain/chain.cpp:435-462` — `Chain::state_proof` (`leaf_count` at l.456; `nullopt` for absent at l.449).
 - `src/chain/chain.cpp:413-415` — `Chain::compute_state_root`.
 - `src/node/node.cpp:3287-3378` — `Node::rpc_state_proof` (`i|m|p` composite at l.3330-3353; length check l.3341-3349; single envelope l.3367-3377).
-- `src/rpc/rpc.cpp:235-238` — `state_proof` RPC dispatch.
+- `src/rpc/rpc.cpp:245-248` — `state_proof` RPC dispatch.
 - `include/determ/chain/chain.hpp:328-332` — `MergePartnerInfo` + `MergeStateMap`.
 - `include/determ/chain/chain.hpp:384-386, 623` — `pending_param_changes_` view + field.
 - `src/crypto/merkle.cpp:113-141` — `merkle_verify`.

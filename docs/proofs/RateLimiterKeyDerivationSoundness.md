@@ -24,7 +24,7 @@ For this claim to follow from `S014RateLimiterSoundness.md` T-1, the key-derivat
 
 There are exactly two call sites that derive a key and call `consume`:
 
-1. **RPC path** at `src/rpc/rpc.cpp:142-153` (`RpcServer::handle_session`). The key is `socket->remote_endpoint().address().to_string()` — the bare address string with **no port appended** — cached once per session, with an `"unknown"` fallback on the `remote_endpoint()` throw path.
+1. **RPC path** at `src/rpc/rpc.cpp:152-163` (`RpcServer::handle_session`). The key is `socket->remote_endpoint().address().to_string()` — the bare address string with **no port appended** — cached once per session, with an `"unknown"` fallback on the `remote_endpoint()` throw path.
 
 2. **Gossip path** at `src/net/gossip.cpp:148-154` (`GossipNet::handle_message`). The key is `peer->address()` with everything after the last `:` stripped. `Peer::address()` is `remote_endpoint().address().to_string() + ":" + to_string(remote_endpoint().port())` (`src/net/peer.cpp:11-12`), so the strip is intended to recover the bare address from the `address:port` form.
 
@@ -77,7 +77,7 @@ The adversary explicitly does **not** include: an on-host attacker who can read 
 
 ### 3.1 RPC key derivation
 
-Per `src/rpc/rpc.cpp:142-153` (`RpcServer::handle_session`):
+Per `src/rpc/rpc.cpp:152-163` (`RpcServer::handle_session`):
 
 ```cpp
 void RpcServer::handle_session(std::shared_ptr<asio::ip::tcp::socket> socket) {
@@ -146,7 +146,7 @@ The residual real concern is narrower and is the subject of T-4: a malformed or 
 
 ### 3.4 The rate-limit gate fires before auth and before parse
 
-Per `src/rpc/rpc.cpp:166-187`, the RPC control flow is: `consume(peer_ip)` (line 172) → `json::parse` (line 176) → `verify_auth` (line 179) → `dispatch` (line 184). The rate-limit gate is the **first** gate; a mis-derived key that splits an attacker's traffic would let the attacker reach `parse` and `auth` more often — but `auth` (`RpcAuthHmacSoundness.md` T-1) is the *cryptographic* gate, and no rate-limit key error weakens it. So even the worst-case key-splitting (which we prove cannot help the attacker anyway) cannot bypass authentication; it can at most cost the server extra parse work, bounded by the framing-layer body cap (`S022WireFormatCaps.md`).
+Per `src/rpc/rpc.cpp:176-197`, the RPC control flow is: `consume(peer_ip)` (line 172) → `json::parse` (line 176) → `verify_auth` (line 179) → `dispatch` (line 184). The rate-limit gate is the **first** gate; a mis-derived key that splits an attacker's traffic would let the attacker reach `parse` and `auth` more often — but `auth` (`RpcAuthHmacSoundness.md` T-1) is the *cryptographic* gate, and no rate-limit key error weakens it. So even the worst-case key-splitting (which we prove cannot help the attacker anyway) cannot bypass authentication; it can at most cost the server extra parse work, bounded by the framing-layer body cap (`S022WireFormatCaps.md`).
 
 ---
 
@@ -172,7 +172,7 @@ Fix a host `h` with a single source address `A_h`. Every connection from `h` car
 
 ### Lemma L-5 (`"unknown"` fallback is reachable only on a torn-down socket)
 
-The `"unknown"` key arises from `remote_endpoint()` throwing. `asio::ip::tcp::socket::remote_endpoint()` throws (`asio::system_error`) only when the socket is not connected — i.e., the peer has already disconnected (RST/FIN observed) or the socket is in an error state. On the RPC path, the throw is caught at session start (`src/rpc/rpc.cpp:148-153`): if it throws, `peer_ip = "unknown"` and the session proceeds, but a socket whose `remote_endpoint()` already throws will fail the subsequent `read_until` (the connection is gone), so the session reads zero lines and `consume("unknown")` is never reached in practice. On the gossip path, `address_` is captured in the Peer constructor (`src/net/peer.cpp:8-14`) **at accept/connect time**, when the socket is freshly connected and `remote_endpoint()` succeeds; the `"unknown"` fallback there fires only if the socket died between accept and constructor entry, in which case the Peer is promptly garbage-collected (its reads fail immediately) and contributes no `consume` calls.
+The `"unknown"` key arises from `remote_endpoint()` throwing. `asio::ip::tcp::socket::remote_endpoint()` throws (`asio::system_error`) only when the socket is not connected — i.e., the peer has already disconnected (RST/FIN observed) or the socket is in an error state. On the RPC path, the throw is caught at session start (`src/rpc/rpc.cpp:158-163`): if it throws, `peer_ip = "unknown"` and the session proceeds, but a socket whose `remote_endpoint()` already throws will fail the subsequent `read_until` (the connection is gone), so the session reads zero lines and `consume("unknown")` is never reached in practice. On the gossip path, `address_` is captured in the Peer constructor (`src/net/peer.cpp:8-14`) **at accept/connect time**, when the socket is freshly connected and `remote_endpoint()` succeeds; the `"unknown"` fallback there fires only if the socket died between accept and constructor entry, in which case the Peer is promptly garbage-collected (its reads fail immediately) and contributes no `consume` calls.
 
 Therefore `"unknown"` is not an adversary-selectable key: the adversary cannot *cause* `remote_endpoint()` to throw at the exact instant that still admits application-layer traffic. The throw and the ability to send a metered message are mutually exclusive in the post-handshake window. □
 
@@ -200,7 +200,7 @@ The composition with S-026 is that the count of *simultaneously live* connection
 
 ### Theorem T-3 (Exception-path `"unknown"` bucket creates no amplification)
 
-**Statement.** The `"unknown"` fallback key (RPC `src/rpc/rpc.cpp:152`; gossip `src/net/peer.cpp:13`) does not give any host a fresh bucket it could exploit, and does not let an attacker deny service to legitimate traffic.
+**Statement.** The `"unknown"` fallback key (RPC `src/rpc/rpc.cpp:162`; gossip `src/net/peer.cpp:13`) does not give any host a fresh bucket it could exploit, and does not let an attacker deny service to legitimate traffic.
 
 **Proof.** By L-5, the `"unknown"` key is reachable only on a socket whose `remote_endpoint()` throws, which is a torn-down or never-connected socket that cannot subsequently deliver a metered application-layer message. So in the reachable execution space, `consume("unknown")` is effectively never called with a live message behind it; the `"unknown"` bucket sees ~zero traffic. Even in the degenerate hypothetical where many torn-down sockets all hit `"unknown"`, by L-6 they coalesce into one bucket (tightening, not loosening, the limit), and that bucket meters a key that no *legitimate* live host derives (a legitimate host's `remote_endpoint()` succeeds and yields its real address). Therefore the `"unknown"` bucket is isolated from legitimate traffic — it cannot starve a real host's bucket (different key), and it cannot grant an attacker more than one shared bucket. No amplification; no cross-bucket denial. ∎
 
@@ -279,8 +279,8 @@ The three findings are advisory; none invalidates T-1..T-5. They are surfaced so
 
 **Shipped (S-014 closure, current `main`).** The key derivation is part of the S-014 rate-limiter closure already in `main`:
 
-- `src/rpc/rpc.cpp:142-153` — RPC `peer_ip` derivation (bare address, `"unknown"` fallback).
-- `src/rpc/rpc.cpp:172` — RPC `consume(peer_ip)` gate (before parse + auth).
+- `src/rpc/rpc.cpp:152-163` — RPC `peer_ip` derivation (bare address, `"unknown"` fallback).
+- `src/rpc/rpc.cpp:182` — RPC `consume(peer_ip)` gate (before parse + auth).
 - `src/net/gossip.cpp:148-154` — gossip `key_gossip` derivation (port strip) + `consume` gate.
 - `src/net/peer.cpp:8-14` — `Peer::address()` = `addr_str(A) + ":" + port` (the gossip key's source).
 - `include/determ/net/rate_limiter.hpp` — the `RateLimiter` the keys feed into.
@@ -302,8 +302,8 @@ This proof adds **no source change**; it formalizes the soundness of the key-der
 
 ### 9.2 Implementation sites
 
-- **`src/rpc/rpc.cpp:142-153`** — `key_rpc` derivation (`peer_ip`).
-- **`src/rpc/rpc.cpp:166-187`** — RPC gate ordering (rate-limit → parse → auth → dispatch).
+- **`src/rpc/rpc.cpp:152-163`** — `key_rpc` derivation (`peer_ip`).
+- **`src/rpc/rpc.cpp:176-197`** — RPC gate ordering (rate-limit → parse → auth → dispatch).
 - **`src/net/gossip.cpp:148-154`** — `key_gossip` derivation + gate.
 - **`src/net/peer.cpp:8-14`** — `Peer::address()` = `addr_str(A) + ":" + port`.
 - **`include/determ/net/rate_limiter.hpp:86-117`** — `RateLimiter::consume` (the keyed bucket).

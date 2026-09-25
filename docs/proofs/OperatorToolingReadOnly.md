@@ -51,39 +51,39 @@ not a static-analysis CI gate; §6 F-2 records the lint that would automate it.
 ### §2.1 The daemon RPC dispatch table
 
 Every RPC method the daemon serves is dispatched by a single function,
-`RpcServer::dispatch`, at `src/rpc/rpc.cpp:197-272`. There is exactly one
+`RpcServer::dispatch`, at `src/rpc/rpc.cpp:207-282`. There is exactly one
 dispatch point: every `Node::rpc_*` handler is reached only through this
 function (this single-entry property is the bedrock of
 `S001RpcAuthSoundness.md` T-3). The complete method set, classified, is:
 
 | RPC method | Handler | Dispatch line | Class |
 |---|---|---|---|
-| `status` | `Node::rpc_status` | `rpc.cpp:201` | **READ** |
-| `peers` | `Node::rpc_peers` | `rpc.cpp:202` | **READ** |
-| `register` | `Node::rpc_register` | `rpc.cpp:203` | **MUTATING** |
-| `balance` | `Node::rpc_balance` | `rpc.cpp:204-205` | **READ** |
-| `send` | `Node::rpc_send` | `rpc.cpp:206-211` | **MUTATING** |
-| `stake` | `Node::rpc_stake` | `rpc.cpp:212-216` | **MUTATING** |
-| `unstake` | `Node::rpc_unstake` | `rpc.cpp:217-221` | **MUTATING** |
-| `nonce` | `Node::rpc_nonce` | `rpc.cpp:222-223` | **READ** |
-| `stake_info` | `Node::rpc_stake_info` | `rpc.cpp:224-225` | **READ** |
-| `submit_tx` | `Node::rpc_submit_tx` | `rpc.cpp:226-227` | **MUTATING** |
-| `submit_equivocation` | `Node::rpc_submit_equivocation` | `rpc.cpp:228-230` | **MUTATING** |
-| `snapshot` | `Node::rpc_snapshot` | `rpc.cpp:231-232` | **READ** |
-| `state_root` | `Node::rpc_state_root` | `rpc.cpp:233-234` | **READ** |
-| `state_proof` | `Node::rpc_state_proof` | `rpc.cpp:235-238` | **READ** |
-| `dapp_info` | `Node::rpc_dapp_info` | `rpc.cpp:240-241` | **READ** |
-| `dapp_list` | `Node::rpc_dapp_list` | `rpc.cpp:242-245` | **READ** |
-| `dapp_messages` | `Node::rpc_dapp_messages` | `rpc.cpp:246-251` | **READ** |
-| `block` | `Node::rpc_block` | `rpc.cpp:252-253` | **READ** |
-| `headers` | `Node::rpc_headers` | `rpc.cpp:254-256` | **READ** |
-| `chain_summary` | `Node::rpc_chain_summary` | `rpc.cpp:257-258` | **READ** |
-| `validators` | `Node::rpc_validators` | `rpc.cpp:259-260` | **READ** |
-| `committee` | `Node::rpc_committee` | `rpc.cpp:261-262` | **READ** |
-| `account` | `Node::rpc_account` | `rpc.cpp:263-264` | **READ** |
-| `tx` | `Node::rpc_tx` | `rpc.cpp:265-266` | **READ** |
-| `pending_params` | `Node::rpc_pending_params` | `rpc.cpp:267-268` | **READ** |
-| `abort_records` | `Node::rpc_abort_records` | `rpc.cpp:269-270` | **READ** |
+| `status` | `Node::rpc_status` | `rpc.cpp:211` | **READ** |
+| `peers` | `Node::rpc_peers` | `rpc.cpp:212` | **READ** |
+| `register` | `Node::rpc_register` | `rpc.cpp:213` | **MUTATING** |
+| `balance` | `Node::rpc_balance` | `rpc.cpp:214-215` | **READ** |
+| `send` | `Node::rpc_send` | `rpc.cpp:216-221` | **MUTATING** |
+| `stake` | `Node::rpc_stake` | `rpc.cpp:222-226` | **MUTATING** |
+| `unstake` | `Node::rpc_unstake` | `rpc.cpp:227-231` | **MUTATING** |
+| `nonce` | `Node::rpc_nonce` | `rpc.cpp:232-233` | **READ** |
+| `stake_info` | `Node::rpc_stake_info` | `rpc.cpp:234-235` | **READ** |
+| `submit_tx` | `Node::rpc_submit_tx` | `rpc.cpp:236-237` | **MUTATING** |
+| `submit_equivocation` | `Node::rpc_submit_equivocation` | `rpc.cpp:238-240` | **MUTATING** |
+| `snapshot` | `Node::rpc_snapshot` | `rpc.cpp:241-242` | **READ** |
+| `state_root` | `Node::rpc_state_root` | `rpc.cpp:243-244` | **READ** |
+| `state_proof` | `Node::rpc_state_proof` | `rpc.cpp:245-248` | **READ** |
+| `dapp_info` | `Node::rpc_dapp_info` | `rpc.cpp:250-251` | **READ** |
+| `dapp_list` | `Node::rpc_dapp_list` | `rpc.cpp:252-255` | **READ** |
+| `dapp_messages` | `Node::rpc_dapp_messages` | `rpc.cpp:256-261` | **READ** |
+| `block` | `Node::rpc_block` | `rpc.cpp:262-263` | **READ** |
+| `headers` | `Node::rpc_headers` | `rpc.cpp:264-266` | **READ** |
+| `chain_summary` | `Node::rpc_chain_summary` | `rpc.cpp:267-268` | **READ** |
+| `validators` | `Node::rpc_validators` | `rpc.cpp:269-270` | **READ** |
+| `committee` | `Node::rpc_committee` | `rpc.cpp:271-272` | **READ** |
+| `account` | `Node::rpc_account` | `rpc.cpp:273-274` | **READ** |
+| `tx` | `Node::rpc_tx` | `rpc.cpp:275-276` | **READ** |
+| `pending_params` | `Node::rpc_pending_params` | `rpc.cpp:277-278` | **READ** |
+| `abort_records` | `Node::rpc_abort_records` | `rpc.cpp:279-280` | **READ** |
 
 **26 methods total: 6 MUTATING, 20 READ.**
 
@@ -112,8 +112,8 @@ into `tx_store_`, and calls `gossip_.broadcast(net::make_transaction(tx))`.
 broadcast shape; `rpc_submit_tx` admits an externally-signed tx (including
 `PARAM_CHANGE`, `DAPP_REGISTER`, `DAPP_CALL`, `TRANSFER`) into the mempool; and
 `rpc_submit_equivocation` admits an `EquivocationEvent` driving the FA6 evidence record at
-apply time. Behind the S-001 HMAC gate (`rpc.cpp:179`, before `dispatch` at
-`rpc.cpp:184`), these are the only methods an unauthenticated caller cannot
+apply time. Behind the S-001 HMAC gate (`rpc.cpp:189`, before `dispatch` at
+`rpc.cpp:194`), these are the only methods an unauthenticated caller cannot
 reach.
 
 ### §2.3 Definition (read-only)
@@ -434,7 +434,7 @@ from operator input. This is the per-script generalization of
 
 **Note on `snapshot create`.** This is the only subcommand in the family that
 sounds write-like. It is not: it maps to the READ `snapshot` RPC
-(`rpc.cpp:231-232`), which serializes the daemon's *current* in-memory state
+(`rpc.cpp:241-242`), which serializes the daemon's *current* in-memory state
 and returns it to the caller. It neither appends a block nor mutates
 `chain_`. The resulting snapshot blob is written to an operator-chosen *local*
 path (§5), never to the daemon's data dir.
@@ -505,7 +505,7 @@ risk.
 `operator_mempool_diagnostic.sh` and `operator_mempool_inspector.sh` invoke
 `determ mempool --json`, but `mempool` is **neither** a registered CLI
 subcommand in `src/main.cpp`'s dispatcher **nor** a method in the
-`rpc.cpp:197-272` dispatch table. Today the call resolves to an "unknown
+`rpc.cpp:207-282` dispatch table. Today the call resolves to an "unknown
 subcommand" (or, if it ever reaches the wire, a "method not found" JSON-RPC
 error), and both scripts detect this and degrade gracefully — e.g.
 `operator_mempool_diagnostic.sh:150` tests for a `"pending"` field and, absent
@@ -607,7 +607,7 @@ present and the daemon is down; the gate simply cannot portably prove it.)
   except when the daemon also gates reads.
 - **Surveyed scripts:** all 91 `tools/operator_*.sh` files enumerated in §3
   (plus `tools/operator_receipt_flow.sh`, E4 R40, pending).
-- **Daemon dispatch:** `src/rpc/rpc.cpp:197-272` (the single RPC dispatch
+- **Daemon dispatch:** `src/rpc/rpc.cpp:207-282` (the single RPC dispatch
   point); `src/node/node.cpp:3338-3375` (`rpc_register`, representative
   mutating handler); `src/main.cpp` CLI subcommand bodies cited in §2.4–§2.5.
 

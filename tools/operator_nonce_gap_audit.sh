@@ -58,7 +58,7 @@
 #   - block    RPC  → full Block JSON incl. `transactions` array. Reached
 #                     via `determ block-info <index> --json`
 #                     (src/main.cpp::cmd_block_info → rpc_call(... "block"
-#                     {index})). Dispatch: src/rpc/rpc.cpp:252-253.
+#                     {index})). Dispatch: src/rpc/rpc.cpp:305-306.
 #     Each element of transactions[] is Transaction::to_json
 #     (src/chain/block.cpp:36-48) with fields:
 #         type (int), from (string), to (string), amount (u64),

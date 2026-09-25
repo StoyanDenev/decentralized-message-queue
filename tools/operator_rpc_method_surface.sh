@@ -4,13 +4,13 @@
 #
 # The operator question this answers — and that no existing tool answers:
 #
-#   "The determ RPC server's dispatch() (src/rpc/rpc.cpp:197-272) routes a
+#   "The determ RPC server's dispatch() (src/rpc/rpc.cpp:234-325) routes a
 #    FIXED set of methods, and that set MIXES read-only queries (status,
 #    balance, validators, committee, ...) WITH state-MUTATING calls (send,
 #    stake, unstake, register, submit_tx, submit_equivocation). There is no
 #    per-method ACL — the ONLY thing standing between an anonymous caller
 #    and a tx-creating RPC is the single global HMAC gate (verify_auth,
-#    src/rpc/rpc.cpp:112). So: on THIS running node, is that mutating
+#    src/rpc/rpc.cpp:137). So: on THIS running node, is that mutating
 #    surface actually gated, or can an unauthenticated caller reach
 #    `send` / `submit_tx`?"
 #
@@ -32,7 +32,7 @@
 #
 # ── SAFETY: why this is strictly READ-ONLY ───────────────────────────────────
 #
-#   The server checks auth BEFORE it dispatches (src/rpc/rpc.cpp:179-184):
+#   The server checks auth BEFORE it dispatches (src/rpc/rpc.cpp:190-221):
 #
 #       std::string auth_err = verify_auth(req);
 #       if (!auth_err.empty()) { ... error ... }   // ← returns here
@@ -68,7 +68,7 @@
 #   NOT observable over RPC (reported from the source-pinned dispatch() table,
 #   NOT claimed to be read off the wire):
 #     - the method ROSTER itself. dispatch() has no "list methods" RPC; an
-#       unknown method just throws "Unknown method: X" (src/rpc/rpc.cpp:271).
+#       unknown method just throws "Unknown method: X" (src/rpc/rpc.cpp:324).
 #       The read/mutating classification below is therefore a STATIC baseline
 #       compiled from src/rpc/rpc.cpp at the cited lines, surfaced for the
 #       operator, and (for the mutating subset under ENFORCED auth) confirmed
@@ -84,14 +84,14 @@
 #
 #   MUTATING (take state_mutex_ unique_lock and/or build+broadcast a tx):
 #     register, send, stake, unstake, submit_tx, submit_equivocation
-#       (src/rpc/rpc.cpp:203,206,212,217,226,228 → handlers in
+#       (src/rpc/rpc.cpp:240,243,249,254,263,265 → handlers in
 #        src/node/node.cpp: rpc_register/ rpc_send/ rpc_stake/ rpc_unstake/
 #        rpc_submit_tx/ rpc_submit_equivocation)
 #   READ-ONLY (queries; shared_lock or lock-free):
 #     status, peers, balance, nonce, stake_info, snapshot, state_root,
 #     state_proof, dapp_info, dapp_list, dapp_messages, block, headers,
 #     chain_summary, validators, committee, account, tx, pending_params,
-#     abort_records, scan_enotes   (src/rpc/rpc.cpp:201..270)
+#     abort_records, scan_enotes   (src/rpc/rpc.cpp:238..323)
 #
 # ── Findings / severity ──────────────────────────────────────────────────────
 #
@@ -132,7 +132,7 @@ methods (send, stake, unstake, register, submit_tx, submit_equivocation) are
 gated behind the S-001 HMAC auth gate. Strictly read-only: the only wire
 traffic is an unauthenticated `status` probe plus — ONLY when auth is
 ENFORCED — unauthenticated mutating-method calls that are guaranteed to be
-rejected at the auth gate BEFORE dispatch runs (src/rpc/rpc.cpp:179-184), so
+rejected at the auth gate BEFORE dispatch runs (src/rpc/rpc.cpp:190-221), so
 no mutation is ever triggered. When auth is OPEN the tool sends NO mutating
 method at all (it would execute) and reports the posture from the
 source-pinned dispatch() table instead.
@@ -241,7 +241,7 @@ timeout        = float(sys.argv[4])
 anomalies_only = sys.argv[5] == "1"
 json_out       = sys.argv[6] == "1"
 
-# ── Source-pinned dispatch() method table (src/rpc/rpc.cpp:197-272) ──────────
+# ── Source-pinned dispatch() method table (src/rpc/rpc.cpp:234-325) ──────────
 # Classification is by handler behaviour confirmed in src/node/node.cpp:
 #   MUTATING  → takes std::unique_lock<state_mutex_> and/or builds+broadcasts
 #               a tx (rpc_register/ rpc_send/ rpc_stake/ rpc_unstake/
@@ -364,7 +364,7 @@ if posture == "RATE_LIMITED":
 elif posture == "ENFORCED":
     # Auth gate present. Confirm it covers the MUTATING subset (not just
     # status) by sending each mutating method WITHOUT an auth field. Because
-    # verify_auth runs BEFORE dispatch (src/rpc/rpc.cpp:179-184), an
+    # verify_auth runs BEFORE dispatch (src/rpc/rpc.cpp:190-221), an
     # auth_required reply proves the handler is NOT reached — no mutation.
     all_gated = True
     for m in MUTATING:

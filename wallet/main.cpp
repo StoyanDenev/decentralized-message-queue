@@ -24327,7 +24327,7 @@ int cmd_rpc_auth(int argc, char** argv) {
     if (!verify_hex.empty() && !request_file.empty())
         return emit_err("--verify and --request are mutually exclusive");
 
-    // ── Decode the secret. Mirrors src/rpc/rpc.cpp's hex_to_bytes(): the wire
+    // ── Decode the secret. As in src/rpc/rpc.cpp's rpc_auth_key(): the wire
     //    secret is hex, the HMAC key is its raw bytes. Reject odd-length /
     //    non-hex up front so the failure surfaces here, not on the daemon.
     std::vector<uint8_t> key;

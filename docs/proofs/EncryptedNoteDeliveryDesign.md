@@ -235,7 +235,7 @@ A wallet pulls candidate `(commitment, ciphertext)` pairs from a full node's `sc
 | §5.2 gate `test-ctx-enote` (21 assertions) + wrapper + FAST regex | `src/main.cpp:42738`, `tools/test_ctx_enote.sh`, `tools/run_all.sh:108` |
 | **§5.3 scan** — `scan_enotes(chain, from, to, cap)` free fn + `EnoteHit` | `include/determ/chain/enote_scan.hpp:43`, `:29` |
 | §5.3 `scan_enotes` RPC (range clamp + work-bounded `limit+1` cap + `truncated`) | `src/node/node.cpp:4546`, `include/determ/node/node.hpp:312` |
-| §5.3 RPC dispatch (`method == "scan_enotes"`) | `src/rpc/rpc.cpp:259` |
+| §5.3 RPC dispatch (`method == "scan_enotes"`) | `src/rpc/rpc.cpp:269` |
 | §5.3 gate `test-scan-enotes` (9 assertions) + wrapper + FAST regex | `src/main.cpp:42983`, `tools/test_scan_enotes.sh`, `tools/run_all.sh:108` |
 | **§5.4 shared base** `determ_notekey_from_ikm` (msg build + hash_to_scalar + compress + secure-zero) | `src/crypto/notekey/notekey.c`, `include/determ/crypto/notekey/notekey.h` |
 | §5.4 1a MODERN `determ_notekey_modern_derive` (DST `determ-notekey-modern-v1`, note-seed IKM) | `src/crypto/notekey/modern/notekey_modern.c`, `.../modern/notekey_modern.h` |

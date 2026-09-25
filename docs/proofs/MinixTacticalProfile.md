@@ -190,7 +190,7 @@ the subscriber path in `src/node/node.cpp` established the surface a
   `asio::write` with `SO_SNDTIMEO` via `native_handle()` (`node.cpp:3326-3337`);
   the kill-on-overflow hook (SS-3) **closes the socket from another thread to
   break an in-flight blocking write** — a load-bearing liveness mechanism (FB71).
-- **CLI blocking clients** (`rpc.cpp:306-351`, `main.cpp` headers/snapshot/raw
+- **CLI blocking clients** (`rpc.cpp:316-363`, `main.cpp` headers/snapshot/raw
   clients): private io_contexts, fully synchronous — portable to a trivial
   sync-socket helper independently, but on the "cut asio" checklist.
 
@@ -411,7 +411,7 @@ the confirm-before-swapping question. **ONE site requires byte-exact canonical
 JSON serialization across implementations:**
 
 1. **RPC HMAC** over `method+"|"+params.dump()` computed independently by the
-   server ([rpc.cpp:52-57](../../src/rpc/rpc.cpp)) and by wallet/light clients —
+   server ([rpc.cpp:40-45](../../src/rpc/rpc.cpp)) and by wallet/light clients —
    a mixed-implementation fleet must dump byte-identically (pinned by
    `test-rpc-auth-hmac`, which explicitly guards an ordered_json/bump swap).
 

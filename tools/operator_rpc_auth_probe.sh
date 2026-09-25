@@ -24,12 +24,12 @@
 #   request per line — exactly what rpc::rpc_call emits at
 #   src/rpc/rpc.cpp). It deliberately sends a `status` request with NO
 #   `auth` field. The determ CLI can't express this (rpc_call always
-#   attaches an HMAC when a secret is present — src/rpc/rpc.cpp:297), so
+#   attaches an HMAC when a secret is present — src/rpc/rpc.cpp:356), so
 #   the probe drives the socket itself, the same python-driver pattern
 #   used by operator_peer_topology.sh.
 #
 #   The server's reply discriminates the posture (RpcServer::verify_auth,
-#   src/rpc/rpc.cpp:112):
+#   src/rpc/rpc.cpp:137):
 #
 #     ENFORCED   reply error == "auth_required: missing 'auth' field"
 #                The server has a non-empty rpc_auth_secret and rejected
@@ -42,12 +42,12 @@
 #                loopback-only node is a documented, common dev/consortium
 #                posture (INFO); OPEN combined with a non-loopback bind is
 #                the S-001 danger case the server itself warns about at
-#                startup (src/rpc/rpc.cpp:98) → CRITICAL.
+#                startup (src/rpc/rpc.cpp:90) → CRITICAL.
 #
 #     RATE_LIMITED  reply error == "rate_limited"
 #                The S-014 token bucket consumed this probe before auth
 #                was even evaluated (rate-limit fires before auth —
-#                src/rpc/rpc.cpp:172). The probe can't determine the auth
+#                src/rpc/rpc.cpp:183). The probe can't determine the auth
 #                posture under throttle; reported as UNKNOWN (not a
 #                finding — re-run when the bucket has refilled). This
 #                interplay is exactly the S-001/S-014 ordering documented
@@ -72,7 +72,7 @@
 #
 #   The controls require Python's hmac/hashlib (stdlib — no new dep). The
 #   HMAC pre-image is canonical_for_hmac(method, params) =
-#   method + "|" + params.dump() (src/rpc/rpc.cpp:52); for `status` params
+#   method + "|" + params.dump() (src/rpc/rpc.cpp:40); for `status` params
 #   is {} so the pre-image is exactly "status|{}". The probe reproduces
 #   that byte-for-byte so a correctly-configured secret authenticates.
 #
@@ -191,8 +191,8 @@ if [ -z "$HOST" ]; then
   echo "operator_rpc_auth_probe: --host must not be empty" >&2
   exit 1
 fi
-# Validate secret as even-length hex early (matches rpc_call's hex_to_bytes
-# rejection at src/rpc/rpc.cpp:299). Empty = controls skipped.
+# Validate secret as even-length hex early (matches rpc_auth_key's
+# rejection, src/rpc/rpc.cpp:101-121). Empty = controls skipped.
 if [ -n "$SECRET" ]; then
   case "$SECRET" in *[!0-9a-fA-F]*)
     echo "operator_rpc_auth_probe: --secret must be hex (0-9a-fA-F), got non-hex characters" >&2

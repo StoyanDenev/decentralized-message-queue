@@ -19,11 +19,11 @@ The `determ::net::RateLimiter` instance is shared by two protocol surfaces (RPC 
 
 `R` is accessed from a set of **caller threads** `{T_1, T_2, …, T_N}` where `N := std::thread::hardware_concurrency()` (the asio worker-pool size). Each `T_i` may, at any time, call:
 
-1. `R.consume(key)` — the hot path; entered from RPC `handle_session` at `src/rpc/rpc.cpp:172` or from gossip `handle_message` at `src/net/gossip.cpp:154`.
+1. `R.consume(key)` — the hot path; entered from RPC `handle_session` at `src/rpc/rpc.cpp:182` or from gossip `handle_message` at `src/net/gossip.cpp:154`.
 2. `R.bucket_count()` — diagnostic; entered from tests + operator monitoring.
 3. `R.sweep_idle()` — operator-tunable explicit sweep; entered from tests + future operator RPC.
 
-Calls to `R.configure(…)` and `R.configure_eviction(…)` are made once during node startup (`src/rpc/rpc.cpp:91` for RPC; `src/net/gossip.cpp:22-28` for gossip) BEFORE any worker thread is spawned by `Node::start` (`src/node/node.cpp:586-588`), so they are not in scope for the concurrent-access argument. The non-const scalar mutators `rate_per_sec_`, `burst_`, `eviction_threshold_sec_`, `sweep_interval_sec_` are therefore initialized-then-read-only during the operational window of the limiter; the const accessors (`enabled()`, `rate_per_sec()`, `burst()`, `eviction_threshold_sec()`, `sweep_interval_sec()`) read these fields without taking `mu_`.
+Calls to `R.configure(…)` and `R.configure_eviction(…)` are made once during node startup (`src/rpc/rpc.cpp:79` for RPC; `src/net/gossip.cpp:22-28` for gossip) BEFORE any worker thread is spawned by `Node::start` (`src/node/node.cpp:586-588`), so they are not in scope for the concurrent-access argument. The non-const scalar mutators `rate_per_sec_`, `burst_`, `eviction_threshold_sec_`, `sweep_interval_sec_` are therefore initialized-then-read-only during the operational window of the limiter; the const accessors (`enabled()`, `rate_per_sec()`, `burst()`, `eviction_threshold_sec()`, `sweep_interval_sec()`) read these fields without taking `mu_`.
 
 **Theorem T-1 (Mutual Exclusion).** Every read or write of `buckets_`, `next_sweep_at_`, or any `Bucket::tokens` / `Bucket::last` field that occurs on the hot paths (`consume`, `bucket_count`, `sweep_idle`) is sequenced under `mu_`. The `std::lock_guard<std::mutex>` contract (ISO/IEC 14882:2017 §33.4.3.2 [thread.lock.guard]) guarantees mutual exclusion of all such accesses. No data race on `R`'s mutable state is possible under the C++ memory model.
 
@@ -69,7 +69,7 @@ for (unsigned i = 0; i < n; ++i)
 
 spawns `n` worker threads (typically 4-16 on commodity hardware; up to 64+ on server hardware). All async completion handlers — including the RPC `handle_session` lambdas and the gossip `handle_message` lambdas — are dispatched into this single io_context's queue, then picked up by whichever worker is next idle.
 
-Neither call site uses an `asio::strand` to serialize. The RPC accept loop at `src/rpc/rpc.cpp:135-139` does `asio::post(io_, [this, socket] { handle_session(socket); });` with no strand wrapping; the gossip `Peer::read_body` callback at `src/net/peer.cpp:75-98` similarly hands off to `on_msg_` without serialization. So a single node may have:
+Neither call site uses an `asio::strand` to serialize. The RPC accept loop at `src/rpc/rpc.cpp:145-149` does `asio::post(io_, [this, socket] { handle_session(socket); });` with no strand wrapping; the gossip `Peer::read_body` callback at `src/net/peer.cpp:75-98` similarly hands off to `on_msg_` without serialization. So a single node may have:
 
 - `T_1` running `handle_session` for RPC peer A, computing `rate_limiter_.consume("198.51.100.10")` against the RPC `RateLimiter`.
 - `T_2` running `handle_session` for RPC peer B, computing `rate_limiter_.consume("203.0.113.5")` against the same RPC `RateLimiter`.
@@ -193,7 +193,7 @@ If a future hot-reconfigure path is ever added (the operator changes `rate_per_s
 
 ### 3.6 Call-site dispatch model
 
-RPC `handle_session` at `src/rpc/rpc.cpp:135-139`:
+RPC `handle_session` at `src/rpc/rpc.cpp:145-149`:
 
 ```cpp
 void RpcServer::accept_loop() {
@@ -250,7 +250,7 @@ No nested lock acquisition occurs. There is exactly one mutex (`mu_`) in `RateLi
 
 Deadlock involving `R` would require some caller up the stack to hold a different mutex `M` and try to acquire `mu_` while another thread holds `mu_` and tries to acquire `M`. Inspection of the callers of `consume`:
 
-- `RpcServer::handle_session` (`src/rpc/rpc.cpp:142-195`): the only mutex acquired in scope before `rate_limiter_.consume` is none — the function reads from the socket, then calls consume. No second mutex held.
+- `RpcServer::handle_session` (`src/rpc/rpc.cpp:152-205`): the only mutex acquired in scope before `rate_limiter_.consume` is none — the function reads from the socket, then calls consume. No second mutex held.
 - `GossipNet::handle_message` (`src/net/gossip.cpp:139-...`): similarly, no second mutex held before the consume call. The function is invoked from the asio peer's completion handler with no outer lock.
 
 Therefore no deadlock is possible at the `RateLimiter` layer, and the call-site audit confirms no deadlock is possible at the broader call-graph layer either.   □
@@ -444,7 +444,7 @@ The four gaps are advisory; none invalidate T-1..T-6. They are surfaced for comp
 **Shipped (post-F-1 closure).** The `RateLimiter` class with single-mutex covering + amortized sweep is live in the current `main` branch:
 
 - `include/determ/net/rate_limiter.hpp:36-152` — header-only implementation; the proof's primary object.
-- `src/rpc/rpc.cpp:172` — RPC consume call site.
+- `src/rpc/rpc.cpp:182` — RPC consume call site.
 - `src/net/gossip.cpp:154` — gossip consume call site.
 - `src/node/node.cpp:586-588` — io_context worker-thread pool spawn (`hardware_concurrency()` threads).
 
@@ -477,7 +477,7 @@ The concurrency analysis was added in the current review pass as the concurrency
 ### Determ-internal references
 
 - `include/determ/net/rate_limiter.hpp:36-152` — `RateLimiter` class (the proof's primary object).
-- `src/rpc/rpc.cpp:142-195` — `RpcServer::handle_session` (RPC consume call site + dispatch model).
+- `src/rpc/rpc.cpp:152-205` — `RpcServer::handle_session` (RPC consume call site + dispatch model).
 - `src/net/gossip.cpp:139-205` — `GossipNet::handle_message` (gossip consume call site + dispatch model).
 - `src/net/peer.cpp:75-98` — `Peer::read_body` (the asio completion handler that dispatches into `handle_message` on whichever worker thread pulled the read completion).
 - `src/node/node.cpp:586-588` — io_context worker-thread pool spawn.

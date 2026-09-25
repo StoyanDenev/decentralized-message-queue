@@ -7067,15 +7067,14 @@ int main(int argc, char** argv) {
         bool auth_enabled = false;
         if (const char* env = std::getenv("DETERM_RPC_AUTH_SECRET");
             env && *env) {
-            std::string sh = env;
-            for (size_t i = 0; i + 1 < sh.size(); i += 2) {
-                unsigned b;
-                if (std::sscanf(sh.c_str() + i, "%02x", &b) != 1) {
-                    std::cerr << "dapp-subscribe: DETERM_RPC_AUTH_SECRET "
-                                 "is not valid hex\n";
-                    return 1;
-                }
-                auth_key.push_back(static_cast<uint8_t>(b));
+            // S-122: the server's strict decoder, so an odd length or a
+            // sign/0x/whitespace form is refused, not decoded to another key.
+            try {
+                auth_key = determ::rpc::rpc_auth_key(env);
+            } catch (const std::invalid_argument&) {
+                std::cerr << "dapp-subscribe: DETERM_RPC_AUTH_SECRET "
+                             "is not valid hex\n";
+                return 1;
             }
             auth_enabled = true;
         }
@@ -10198,9 +10197,10 @@ pre_chain.append(b3);
     // S-001 / v2.16 RPC HMAC-SHA-256 authentication contract. The
     // production verifier (RpcServer::verify_auth) and client signer
     // (rpc_call) both live in src/rpc/rpc.cpp behind a live transport
-    // + Node, so they cannot be exercised in-process; only the verdict
-    // they apply, determ::rpc::auth_tag_verdict, is called directly (§13,
-    // S-118). This test re-implements the SAME auth-field algebra from rpc.cpp —
+    // + Node, so they cannot be exercised in-process; the verdict and the
+    // secret decoder they apply, determ::rpc::auth_tag_verdict (§13, S-118)
+    // and determ::rpc::rpc_auth_key (§14, S-122), are called directly. This
+    // test re-implements the SAME auth-field algebra from rpc.cpp —
     //
     //   canonical_for_hmac(method, params) = method + "|" + params.dump()
     //   auth_field = hex(HMAC-SHA-256(secret, canonical))
@@ -10408,8 +10408,8 @@ pre_chain.append(b3);
 
         // 12. Auth-disabled contract: an empty secret means auth is
         //     OFF (verify_auth returns "" / pass). Pin the convention
-        //     that hex_to_bytes("") yields an empty key so the server
-        //     can detect the disabled state.
+        //     that an empty secret yields an empty key so the server
+        //     can detect the disabled state (production decoder: §14).
         {
             check(from_hex("").empty(),
                   "empty secret hex decodes to empty key (auth-disabled signal)");
@@ -10449,6 +10449,46 @@ pre_chain.append(b3);
                   "production verdict refuses the tag missing its last byte");
             check(rpcns::auth_tag_verdict(tag, "") == "auth_failed",
                   "production verdict refuses an empty auth field against a real tag");
+        }
+
+        // 14. S-122: the PRODUCTION secret decoder (determ::rpc::rpc_auth_key,
+        //     used by the RpcServer constructor and rpc_call). "" is the only
+        //     way to disable authentication; a well-formed secret decodes to
+        //     its bytes in either case; every malformed string throws instead
+        //     of decoding to an empty key (authentication silently off) or to
+        //     a different key (sscanf's sign, "0x" and whitespace forms).
+        {
+            namespace rpcns = determ::rpc;
+            auto rejects = [&](const std::string& s) {
+                try { (void)rpcns::rpc_auth_key(s); return false; }
+                catch (const std::invalid_argument&) { return true; }
+            };
+            check(rpcns::rpc_auth_key("").empty(),
+                  "S-122: an empty secret is the auth-disabled key");
+            check(rpcns::rpc_auth_key(secret_hex) == secret,
+                  "S-122: a well-formed secret decodes to its bytes");
+            check(rpcns::rpc_auth_key("ABcdEf") == std::vector<uint8_t>{0xab, 0xcd, 0xef},
+                  "S-122: upper- and lower-case hex digits both decode");
+            check(rejects("abc"), "S-122: an odd number of digits throws");
+            check(rejects(secret_hex.substr(1)), "S-122: a secret missing one digit throws");
+            check(rejects("zz"), "S-122: non-hex characters throw");
+            check(rejects("g0") && rejects("0g"), "S-122: a non-hex high or low digit throws");
+            check(rejects("-1ab") && rejects("+fab"), "S-122: sign characters throw");
+            check(rejects("0xab"), "S-122: a 0x prefix throws");
+            check(rejects(" a1b") && rejects("abcd\n"), "S-122: whitespace throws");
+            {
+                // Both throws: the non-hex one ("0x" form) and the odd-length one.
+                const std::string body = secret_hex.substr(2);
+                bool clean = true;
+                for (const std::string& bad : {"0x" + body, body + "a"}) {
+                    std::string msg;
+                    try { (void)rpcns::rpc_auth_key(bad); }
+                    catch (const std::invalid_argument& e) { msg = e.what(); }
+                    clean = clean && !msg.empty()
+                                  && msg.find(body.substr(0, 8)) == std::string::npos;
+                }
+                check(clean, "S-122: neither error message contains the secret");
+            }
         }
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")
