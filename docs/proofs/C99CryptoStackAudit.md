@@ -34,6 +34,11 @@ blockchain-sized data, and a uniform stack-wide secret-zeroization gap.
 > predate the fix. The streaming-refactor alternative noted for §3.3/§3.14 (drop
 > the input-sized heap buffers entirely) and the broader CAVP/RFC test vectors of
 > §5.3 remain open as future hardening, not correctness gaps.
+>
+> **2026-09-25:** the streaming refactor landed for HMAC-SHA-256 and, through it,
+> HKDF (§3.5, §3.6) and PBKDF2 (§3.9): no heap buffer and no allocation-failure path
+> remain there.
+> HMAC-SHA-512 (§3.3) and the AEAD (§3.14) still allocate.
 
 ---
 

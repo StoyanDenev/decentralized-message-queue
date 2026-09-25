@@ -27,6 +27,16 @@ Caller-owned-workspace migration, complete memory safety and compiler/target
 side-channel qualification remain separate obligations. These fixes do not
 admit the hosted library to the freestanding target.
 
+**Heap-free SHA-256 MAC and KDFs (2026-09-25).** HMAC-SHA-256 now streams on
+the SHA-256 engine (`determ_hmac_sha256_init`/`update`/`final`), and HKDF and
+PBKDF2 are built on it, so none of the three allocates. The HMAC cannot fail;
+HKDF fails only on its RFC output bound and PBKDF2 only on zero iterations or
+its RFC bound, before writing. PBKDF2 keys the HMAC once per password.
+Outputs are unchanged: RFC 4231, 5869 and 7914 vectors in
+`test-c99-crypto-bounds` and the OpenSSL cross-check in `test-sha2-c99`.
+HMAC-SHA-512 still copies into a heap buffer. Removing allocation does not
+admit these files to the target; the other admission obligations stand.
+
 **PQ/identity planning extension (2026-09-25).**
 [ADR-008](../decisions/ADR-008-Regulatory-Compliance-and-C99-Rewrite.md) and
 [C99-MINIX-PORT §14](../C99-MINIX-PORT.md#14-local-audit-regulatory-alignment-and-target-qualification-2026-09-25)

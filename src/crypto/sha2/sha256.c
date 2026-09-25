@@ -79,6 +79,9 @@ void determ_sha256_init(determ_sha256_ctx *ctx) {
 }
 
 void determ_sha256_update(determ_sha256_ctx *ctx, const uint8_t *data, size_t len) {
+    /* An empty update is a no-op, so `data` may be NULL: never form NULL + 0
+     * or pass it to memcpy (both undefined in C99). */
+    if (len == 0) return;
     ctx->total += len;
     /* Top up a pending partial block first. */
     if (ctx->buflen) {

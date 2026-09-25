@@ -48,11 +48,11 @@ std::string canonical_for_hmac(const std::string& method, const json& params) {
 std::string hmac_sha256_hex(const std::vector<uint8_t>& key,
                               const std::string& message) {
     // §3.15 swap: C99 HMAC-SHA256, validated byte-equal vs OpenSSL by
-    // `determ-cryptotest test-sha2-c99`. The result is "" when the HMAC
-    // fails and a truncated string when bytes_to_hex's stream cannot
-    // allocate; either WOULD equal a matching client `auth` field, so every
-    // verifier must refuse a tag that is not 64 characters, as
-    // auth_tag_verdict does (S-118).
+    // `determ-cryptotest test-sha2-c99`. It streams and cannot fail, so the
+    // "" branch is defensive; bytes_to_hex's stream can still return a
+    // truncated string when it cannot allocate. Either WOULD equal a matching
+    // client `auth` field, so every verifier must refuse a tag that is not 64
+    // characters, as auth_tag_verdict does (S-118).
     unsigned char hmac[32];
     if (determ_hmac_sha256(key.data(), key.size(),
                            reinterpret_cast<const unsigned char*>(message.data()),

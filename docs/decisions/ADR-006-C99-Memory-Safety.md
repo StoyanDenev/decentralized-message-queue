@@ -51,11 +51,14 @@ record below identifies which defenses are present in this working tree.
 | M7 | Mesh/reactor/HTTP socket writes lack the K2 driver's per-socket/per-call SIGPIPE defense; HTTP ignores nonblocking-setup failure. | SIGPIPE is a process-termination protection gap, not memory corruption. Remote timing through the stock HTTP path was not established. Publishing a blocking socket after setup failure violates the event-loop contract. |
 | M8 | Eight crypto C files and `src/dapp/d5draw.c` use heap allocation; hosted network/storage/RPC use libc/POSIX. P-256 lazily initializes writable global constants; large crypto/ledger stack objects need an actual stack budget. | Target-admission blockers. Single-owner current execution does not demonstrate a concurrent race; parallel shards, callbacks, interrupts and DMA need explicit ownership/synchronization. These blockers are not removed by fixing M1–M7. |
 
-The eight heap-using crypto files are `argon2/argon2id.c`, `ed25519/ed25519.c`,
+At the audit the eight heap-using crypto files were `argon2/argon2id.c`, `ed25519/ed25519.c`,
 `p256/p256.c`, `pedersen/balance.c`, `sha2/hmac.c`, `sha2/hkdf.c`, `sha2/pbkdf2.c`
 and `chacha20/chacha20_poly1305.c`, all beneath `src/crypto/`. Ed25519 uses its
 bounded stack path for the current short C99 transfer preimage, but retains a
-heap fallback for larger messages. Network peers, reactor slots, HTTP clients,
+heap fallback for larger messages. Since 2026-09-25 HMAC-SHA-256 streams on the
+SHA-256 engine and HKDF and PBKDF2 use it, so `hkdf.c` and `pbkdf2.c` no longer
+allocate and `hmac.c` does so only for HMAC-SHA-512: six of the eight remain
+(DECISION-LOG "Heap-free HMAC-SHA-256, HKDF and PBKDF2"). Network peers, reactor slots, HTTP clients,
 consensus state and pending-ledger entries already use bounded storage; there is
 no dynamically allocated peer object to replace with another arena.
 

@@ -51,38 +51,55 @@ void determ_sha256_init(determ_sha256_ctx *ctx);
 void determ_sha256_update(determ_sha256_ctx *ctx, const uint8_t *data, size_t len);
 void determ_sha256_final(determ_sha256_ctx *ctx, uint8_t out[32]);
 
+/* Incremental HMAC-SHA-256 (RFC 2104) on the streaming engine above: key once,
+ * absorb the message in any number of updates, finish once. No heap and no
+ * failure path. `key`/`data` may be NULL when their length is 0. The ctx holds
+ * key-derived state; final wipes it, and a ctx is single-use, but a copy taken
+ * after init (or after any update) finishes independently: PBKDF2 keys once
+ * per password that way. A ctx or copy abandoned before final still holds that
+ * state: wipe it with determ_secure_zero. `out` may alias bytes already
+ * absorbed. */
+typedef struct {
+    determ_sha256_ctx inner;   /* has absorbed K0 ^ ipad, then the message */
+    determ_sha256_ctx outer;   /* has absorbed K0 ^ opad */
+} determ_hmac_sha256_ctx;
+
+void determ_hmac_sha256_init(determ_hmac_sha256_ctx *ctx,
+                             const uint8_t *key, size_t keylen);
+void determ_hmac_sha256_update(determ_hmac_sha256_ctx *ctx,
+                               const uint8_t *data, size_t len);
+void determ_hmac_sha256_final(determ_hmac_sha256_ctx *ctx, uint8_t out[32]);
+
 /* One-shot SHA-512. `out` must point to at least 64 bytes. */
 void determ_sha512(const uint8_t *data, size_t len, uint8_t out[64]);
 
 /* HMAC (RFC 2104) keyed by SHA-256 / SHA-512. `out` = 32 / 64 bytes. `key`/`msg`
- * may be NULL when their length is 0. Returns 0 on success, -1 on a memory-
- * allocation failure or a `block+msglen` size_t overflow (in which case `out` is
- * left unwritten; a long key never enters size arithmetic — `keylen > block`
- * hashes the key into the fixed-size k0 block). Secret-bearing intermediates are zeroized before
- * return. (The int return is backward source-compatible: existing statement-call
- * sites that ignore it still compile and behave identically for valid inputs.)
- * `out` may alias `msg`: the message is consumed before `out` is written, and
- * PBKDF2's U_j = HMAC(P, U_{j-1}) relies on it. */
+ * may be NULL when their length is 0. Secret-bearing intermediates are zeroized
+ * before return. HMAC-SHA-256 is the streaming form above: it does not allocate
+ * and always returns 0. HMAC-SHA-512 returns -1 on a memory-allocation failure
+ * or a `block+msglen` size_t overflow (in which case `out` is left unwritten; a
+ * long key never enters size arithmetic — `keylen > block` hashes the key into
+ * the fixed-size k0 block), 0 otherwise. (The int return is kept for source
+ * compatibility.) `out` may alias `msg`: the message is consumed before `out`
+ * is written. */
 int determ_hmac_sha256(const uint8_t *key, size_t keylen,
                        const uint8_t *msg, size_t msglen, uint8_t out[32]);
 int determ_hmac_sha512(const uint8_t *key, size_t keylen,
                        const uint8_t *msg, size_t msglen, uint8_t out[64]);
 
-/* HKDF-SHA-256 (RFC 5869): extract-then-expand. `salt`/`info` may be NULL when
- * their length is 0 (a NULL/zero salt is treated as HashLen zero bytes per the
- * RFC). Returns 0 on success, -1 on a length bound/overflow, allocation failure,
- * or HMAC failure. On failure output may contain a partial result and must not
- * be used as a derived key. Secret scratch is wiped on internal failure. */
+/* HKDF-SHA-256 (RFC 5869): extract-then-expand. `salt`/`ikm`/`info` may be NULL
+ * when their length is 0 (an empty salt is HashLen zero bytes per the RFC).
+ * Returns -1, with `out` untouched, only when outlen > 255 * 32 (the RFC's
+ * bound); 0 otherwise. Does not allocate. Secret scratch is wiped. */
 int determ_hkdf_sha256(const uint8_t *salt, size_t saltlen,
                        const uint8_t *ikm,  size_t ikmlen,
                        const uint8_t *info, size_t infolen,
                        uint8_t *out, size_t outlen);
 
-/* PBKDF2-HMAC-SHA-256 (RFC 8018 / PKCS #5 v2.1). `iters` must be >= 1. `pw`/`salt`
- * may be NULL when their length is 0. Returns 0 on success, -1 on zero iters,
- * an unrepresentable/RFC-forbidden length, allocation failure or HMAC failure.
- * On failure output may contain a partial result and must not be used as a key.
- * Secret scratch is wiped on internal failure. */
+/* PBKDF2-HMAC-SHA-256 (RFC 8018 / PKCS #5 v2.1). `pw`/`salt` may be NULL when
+ * their length is 0. Returns -1, with `out` untouched, only for zero `iters` or
+ * outlen > (2^32 - 1) * 32 (RFC 8018 section 5.2 step 1); 0 otherwise (outlen 0
+ * included). Does not allocate. Secret scratch is wiped. */
 int determ_pbkdf2_hmac_sha256(const uint8_t *pw,   size_t pwlen,
                               const uint8_t *salt, size_t saltlen,
                               uint32_t iters, uint8_t *out, size_t outlen);

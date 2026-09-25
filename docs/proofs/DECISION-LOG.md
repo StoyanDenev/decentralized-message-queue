@@ -8330,3 +8330,50 @@ deleted helper now name `rpc_auth_key`, with the light client's weaker decoder s
 **Verification.** `ci_local.sh` default on this tree: build, FAST 341/0 and 17 guards;
 `ci_local.sh --tla` for the two edited TLA+ models' comments; `tools/test_rpc_hmac_auth.sh`
 run against the same build with an explicit `DETERM_BIN`: 7/7.
+
+## 2026-09-25 — Heap-free HMAC-SHA-256, HKDF and PBKDF2 (§14.2 step B)
+
+**Problem.** HMAC-SHA-256 copied key block and message into a heap buffer, so it could
+fail (S-118's trigger) and allocated per call; HKDF and PBKDF2 each built a further
+heap buffer and had to propagate those failures. The freestanding target admits no heap
+(ADR-006 M8 listed all three files).
+
+**Change.** `determ_hmac_sha256_init`/`update`/`final` stream the message through the
+existing SHA-256 engine; the one-shot `determ_hmac_sha256` is that sequence and always
+returns 0. HKDF and PBKDF2 feed their inputs to it directly: no buffer and no
+allocation. HKDF's only `-1` is its RFC output bound and PBKDF2's are zero iterations and
+its RFC bound, each returned before `out` is written. PBKDF2
+keys the HMAC once and finishes a copy per block and iteration. An empty
+`determ_sha256_update` is now a no-op, so a NULL pointer with length 0 is never passed
+to `memcpy` or offset. The header documents the contracts; the C++ wrappers' messages no
+longer mention allocation. HMAC-SHA-512 keeps its heap buffer until SHA-512 streams.
+Outputs are unchanged.
+
+**Gate.** `test-c99-crypto-bounds` (C99 gates, GCC, Clang and ASan+UBSan): RFC 4231 cases 2
+and 6, the message split at every position with an empty NULL update between, an
+independent copy of a keyed context, an aliased output; RFC 5869 A.1–A.3 (A.3: the empty
+salt); RFC 7914 PBKDF2 including 80,000 iterations; both length bounds refuse without
+writing; the 64- and 65-byte key edge and HKDF's last permitted block; the context is
+all zero after final; zero allocations across all of it (`hmac.c` and `sha256.c` are now
+built for this test with the allocator hooked, as the KDFs already were). The mutation
+runner's HKDF/PBKDF2 failure-propagation cases no longer have code to mutate and are
+replaced by nine cases on the new logic (long key and the 64-byte key edge, an
+allocation on the HMAC path, HKDF bound, chaining, counter and counter width, PBKDF2 zero
+iterations and keyed copy), all killed; removing the empty-update guard is
+caught by UBSan in the sanitizer gate. `test-sha2-c99` keeps the OpenSSL cross-check.
+
+**Documents.** SECURITY.md's target-admission row and ADR-006 now say six crypto files
+allocate; CRYPTO-C99-SPEC.md and C99CryptoStackAudit.md record the streaming form; the
+S-118 row, RpcAuthHmacSoundness.md and the `rpc.cpp` comment now say the HMAC cannot fail,
+so only the hex encoding's truncation reaches the verdict's length check.
+
+**Review.** An independent review checked 751 cases against Python's `hmac`/`hashlib`
+(split updates, copied contexts, aliased output and key), secret wiping and every caller:
+none depends on a removed failure path or overflow guard. It found that the heap-free
+claim had no gate for `hmac.c` itself (a `malloc` added there survived), two surviving
+boundary mutants (key length `>=` 64, a 7-bit HKDF counter) and stale text; each is fixed
+above.
+
+**Verification.** On this tree: `ci_local.sh --c99` with GCC and with Clang, `--c99-sanitize`
+(ASan + UBSan), the default mode (build, FAST 341/0, 17 guards) and `--c99-mutants`
+(211/211 rejected after successful builds).

@@ -75,7 +75,7 @@ The protocol surface is:
   1. If `auth_secret_` is empty (auth disabled), accept (line 138). This preserves the no-auth path for single-tenant boxes.
   2. If the request lacks `"auth"` or it's not a string, return `"auth_required: missing 'auth' field"` (lines 139-141).
   3. Recompute `expected = hex(HMAC(K, canonical(method, params)))` (lines 142-145).
-  4. Return `auth_tag_verdict(expected, got)` (line 147; body lines 123-135): a computed tag that is not 64 characters — empty when the HMAC failed, truncated when its hex encoding could not allocate — is refused (S-118); otherwise a constant-time compare of `expected` vs `got`. Mismatch → `"auth_failed"`.
+  4. Return `auth_tag_verdict(expected, got)` (line 147; body lines 123-135): a computed tag that is not 64 characters — truncated when its hex encoding could not allocate, or empty on the defensive HMAC-failure branch the streaming HMAC no longer reaches — is refused (S-118); otherwise a constant-time compare of `expected` vs `got`. Mismatch → `"auth_failed"`.
 
 The canonicalization step relies on nlohmann::json's deterministic `dump()` (compact mode, sorted keys for `json::object`). Both client and server parse the same `params` object — the client builds it locally, dumps; the server receives the line, parses, then re-dumps via the same library. The parse-then-dump round trip on the server reproduces the client's pre-send bytes because nlohmann's `parse + dump(compact)` is a canonical-form fixpoint for objects with string keys.
 
@@ -143,7 +143,7 @@ std::string hmac_sha256_hex(const std::vector<uint8_t>& key,
 }
 ```
 
-`determ_hmac_sha256` (`src/crypto/sha2/hmac.c`) implements RFC 2104 with SHA-256 and is validated byte-equal against OpenSSL by `determ-cryptotest test-sha2-c99`. On success the 32-byte MAC is hex-encoded by `bytes_to_hex` (lines 19-25) to 64 characters. The helper returns an empty string when the HMAC fails (an allocation failure), and `bytes_to_hex`'s stream returns a truncated string when it cannot allocate. Before S-118 was fixed, `verify_auth` accepted a client `auth` equal to such a string; `auth_tag_verdict` now refuses every computed tag that is not 64 characters, so an incomplete computation never authenticates.
+`determ_hmac_sha256` (`src/crypto/sha2/hmac.c`) implements RFC 2104 with SHA-256 and is validated byte-equal against OpenSSL by `determ-cryptotest test-sha2-c99`. The 32-byte MAC is hex-encoded by `bytes_to_hex` (lines 19-25) to 64 characters. Since 2026-09-25 the HMAC streams and cannot fail, so the helper's empty-string branch is defensive only; `bytes_to_hex`'s stream still returns a truncated string when it cannot allocate. Before S-118 was fixed, `verify_auth` accepted a client `auth` equal to such a string; `auth_tag_verdict` now refuses every computed tag that is not 64 characters, so an incomplete computation never authenticates.
 
 The canonical-serialization helper at `src/rpc/rpc.cpp:40-46`:
 
@@ -200,7 +200,7 @@ The pinning regression at `tools/test_rpc_hmac_auth.sh` (assertions 1-5) exercis
 
 The comparison in `auth_tag_verdict` at `src/rpc/rpc.cpp:123-135` consists of two phases:
 
-1. **Length pre-checks** (lines 127 and 129). `if (expected.size() != 64) return "auth_failed";` refuses a computed tag that is not complete — empty when the HMAC failed, truncated when its hex encoding could not allocate (S-118) — so `expected.size() == 64` whenever the comparison runs; whether the computation completed depends on allocation, not on `K`. `if (got.size() != expected.size()) return "auth_failed";` then compares the length of `got`, a function of the adversary's input only, with that constant. It reveals only "the attacker sent a string that is not 64 bytes," which is no information about `K` (the attacker already knew the length they sent).
+1. **Length pre-checks** (lines 127 and 129). `if (expected.size() != 64) return "auth_failed";` refuses a computed tag that is not complete — truncated when its hex encoding could not allocate, or empty on the defensive HMAC-failure branch (S-118) — so `expected.size() == 64` whenever the comparison runs; whether the computation completed depends on allocation, not on `K`. `if (got.size() != expected.size()) return "auth_failed";` then compares the length of `got`, a function of the adversary's input only, with that constant. It reveals only "the attacker sent a string that is not 64 bytes," which is no information about `K` (the attacker already knew the length they sent).
 
 2. **Constant-time XOR-OR loop** (lines 130-134):
 

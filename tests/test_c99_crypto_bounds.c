@@ -109,76 +109,128 @@ static void equals_hex(const uint8_t *p, size_t n, const char *hex) {
         CHECK(p[i] == (uint8_t)((hex_nibble(hex[2u*i]) << 4) | hex_nibble(hex[2u*i+1u])));
 }
 
+static void hmac_stream_tests(void) {
+    static const char msg[] = "what do ya want for nothing?";  /* RFC 4231 case 2 */
+    static const char big[] = "Test Using Larger Than Block-Size Key - Hash Key First";
+    determ_sha256_ctx sc;
+    determ_hmac_sha256_ctx hc, copy;
+    uint8_t a[32], b[32], buf[32], longkey[131], edge[65];
+    size_t i;
+    /* hmac.c and sha256.c are built with the allocator hooked (CMake
+     * c99-crypto-heapfree-object): any allocation on these paths asserts. */
+    reset(); forbid_alloc = 1;
+    /* An empty update is a no-op, NULL data included, even mid-block. */
+    determ_sha256_init(&sc);
+    determ_sha256_update(&sc, (const uint8_t *)"abcde", 5u);
+    determ_sha256_update(&sc, NULL, 0u);
+    determ_sha256_final(&sc, a);
+    determ_sha256((const uint8_t *)"abcde", 5u, b);
+    CHECK(memcmp(a, b, 32u) == 0);
+    /* The one-shot HMAC is the streaming form and cannot fail. */
+    CHECK(determ_hmac_sha256((const uint8_t *)"Jefe", 4u, (const uint8_t *)msg, 28u, a) == 0);
+    equals_hex(a, 32u, "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+    /* Any split of the message, with an empty update between, gives the same MAC. */
+    for (i = 0; i <= 28u; ++i) {
+        determ_hmac_sha256_init(&hc, (const uint8_t *)"Jefe", 4u);
+        determ_hmac_sha256_update(&hc, (const uint8_t *)msg, i);
+        determ_hmac_sha256_update(&hc, NULL, 0u);
+        determ_hmac_sha256_update(&hc, (const uint8_t *)msg + i, 28u - i);
+        determ_hmac_sha256_final(&hc, b);
+        CHECK(memcmp(a, b, 32u) == 0);
+    }
+    /* A copy of a keyed context finishes independently of the original. */
+    determ_hmac_sha256_init(&hc, (const uint8_t *)"Jefe", 4u);
+    copy = hc;
+    determ_hmac_sha256_update(&copy, (const uint8_t *)msg, 28u);
+    determ_hmac_sha256_final(&copy, b);
+    CHECK(memcmp(a, b, 32u) == 0);
+    determ_hmac_sha256_update(&hc, (const uint8_t *)msg, 28u);
+    determ_hmac_sha256_final(&hc, b);
+    CHECK(memcmp(a, b, 32u) == 0);
+    /* final wipes the context: it holds key-derived chaining state. */
+    for (i = 0; i < sizeof hc; ++i) CHECK(((const uint8_t *)&hc)[i] == 0u);
+    /* `out` may alias the message. */
+    memcpy(buf, msg, 28u);
+    CHECK(determ_hmac_sha256((const uint8_t *)"Jefe", 4u, buf, 28u, buf) == 0);
+    CHECK(memcmp(a, buf, 32u) == 0);
+    /* RFC 4231 case 6: a key longer than the block is hashed first. */
+    memset(longkey, 0xaa, sizeof longkey);
+    CHECK(determ_hmac_sha256(longkey, sizeof longkey, (const uint8_t *)big, 54u, a) == 0);
+    equals_hex(a, 32u, "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
+    /* The block-size edge: a 64-byte key is padded, a 65-byte key is hashed. */
+    for (i = 0; i < sizeof edge; ++i) edge[i] = (uint8_t)i;
+    CHECK(determ_hmac_sha256(edge, 64u, (const uint8_t *)msg, 28u, a) == 0);
+    equals_hex(a, 32u, "5431cc41830bee7889a6b5d04b33877387ea9b8170759f4dca4323cfb5725508");
+    CHECK(determ_hmac_sha256(edge, 65u, (const uint8_t *)msg, 28u, a) == 0);
+    equals_hex(a, 32u, "b8510ec6c86f16d7c86061bd02266a93ffa7add59683bd03dc645ba1f238c38c");
+    CHECK(hmac_calls == 0u && alloc_calls == 0u);
+}
+
 static void kdf_tests(void) {
+    static uint8_t wide[8161];
     uint8_t ikm[22], salt[13], info[10], out[64];
+    uint8_t s2[80], k2[80], i2[80], o2[82];
     unsigned i;
     memset(ikm, 0x0b, sizeof ikm);
     for (i = 0; i < sizeof salt; ++i) salt[i] = (uint8_t)i;
     for (i = 0; i < sizeof info; ++i) info[i] = (uint8_t)(0xf0u + i);
-    reset();
+    for (i = 0; i < 80u; ++i) {
+        k2[i] = (uint8_t)i; s2[i] = (uint8_t)(0x60u + i); i2[i] = (uint8_t)(0xb0u + i);
+    }
+    /* HKDF streams through the HMAC: no allocation and no one-shot HMAC call
+     * on any path below. */
+    reset(); forbid_alloc = 1;
     CHECK(determ_hkdf_sha256(salt, sizeof salt, ikm, sizeof ikm,
-                             info, sizeof info, out, 42u) == 0);
+                             info, sizeof info, out, 42u) == 0);        /* RFC 5869 A.1 */
     equals_hex(out, 42u, "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865");
-    CHECK(hmac_calls == 3u && live_allocs == 0u);
     /* The copy adapter is live: a toolchain that re-enabled fortified-header
      * substitution would route copies around it and silently weaken this gate. */
     CHECK(memcpy_calls > 0u);
-    /* Both extract branches and both expansion iterations fail closed. */
-    for (i = 1u; i <= 3u; ++i) {
-        reset(); fail_hmac_at = i; memset(out, 0xa5, sizeof out);
-        CHECK(determ_hkdf_sha256(salt, sizeof salt, ikm, sizeof ikm,
-                                 info, sizeof info, out, 42u) == -1);
-        CHECK(hmac_calls == i && live_allocs == 0u);
-        if (i <= 2u) sentinel(out, sizeof out);
-        else sentinel(out + 32u, sizeof out - 32u);
-    }
-    reset(); fail_hmac_at = 1u; memset(out, 0xa5, sizeof out);
-    CHECK(determ_hkdf_sha256(NULL, 0u, ikm, sizeof ikm, NULL, 0u, out, 32u) == -1);
-    CHECK(hmac_calls == 1u && alloc_calls == 0u); sentinel(out, sizeof out);
-    reset(); fail_alloc_at = 1u;
-    CHECK(determ_hkdf_sha256(salt, sizeof salt, ikm, sizeof ikm, info, sizeof info, out, 42u) == -1);
-    CHECK(live_allocs == 0u);
-    reset(); forbid_alloc = 1;
-    CHECK(determ_hkdf_sha256(salt, sizeof salt, ikm, sizeof ikm, info, SIZE_MAX, out, 32u) == -1);
-    CHECK(hmac_calls == 0u);
+    /* A.3: empty salt and info; the empty HMAC key equals HashLen zero bytes. */
+    CHECK(determ_hkdf_sha256(NULL, 0u, ikm, sizeof ikm, NULL, 0u, out, 42u) == 0);
+    equals_hex(out, 42u, "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8");
+    /* A.2: 80-byte salt, IKM and info over three output blocks. */
+    CHECK(determ_hkdf_sha256(s2, 80u, k2, 80u, i2, 80u, o2, 82u) == 0);
+    equals_hex(o2, 82u, "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71cc30c58179ec3e87c14c01d5c1f3434f1d87");
+    /* RFC 5869's bound: 255 blocks are allowed; one byte more is refused
+     * before anything is written. */
+    memset(wide, 0xa5, sizeof wide);
+    CHECK(determ_hkdf_sha256(salt, sizeof salt, ikm, sizeof ikm,
+                             info, sizeof info, wide, 8161u) == -1);
+    sentinel(wide, sizeof wide);
+    CHECK(determ_hkdf_sha256(salt, sizeof salt, ikm, sizeof ikm,
+                             info, sizeof info, wide, 8160u) == 0);
+    CHECK(wide[8160] == 0xa5u);
+    /* Block 255 (counter byte 0xff) is the last one the RFC allows. */
+    equals_hex(wide + 8128, 32u, "76a3f78bcffe95fecf91923c22ad6ee64d48a6d1b981d7e523d5c0f22154ee88");
+    CHECK(alloc_calls == 0u && hmac_calls == 0u);
 
-    /* RFC 7914 §11, vector 1: two blocks verify counter values 1 and 2. */
-    reset();
+    /* PBKDF2, RFC 7914 section 11: counter values 1 and 2, then 80,000
+     * iterations through the copied keyed context. */
+    reset(); forbid_alloc = 1;
     CHECK(determ_pbkdf2_hmac_sha256((const uint8_t *)"passwd", 6u,
                                    (const uint8_t *)"salt", 4u, 1u, out, 64u) == 0);
     equals_hex(out, 64u, "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783");
-    CHECK(hmac_calls == 2u);
-    reset(); memset(out, 0xa5, sizeof out);
+    memset(out, 0xa5, sizeof out);
     CHECK(determ_pbkdf2_hmac_sha256((const uint8_t *)"passwd", 6u,
                                    (const uint8_t *)"salt", 4u, 1u, out, 33u) == 0);
     equals_hex(out, 33u, "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc49");
-    CHECK(hmac_calls == 2u); sentinel(out + 33u, sizeof out - 33u);
-    /* Includes initial U1, subsequent Uj, and the following output block. */
-    for (i = 1u; i <= 4u; ++i) {
-        reset(); fail_hmac_at = i; memset(out, 0xa5, sizeof out);
-        CHECK(determ_pbkdf2_hmac_sha256((const uint8_t *)"pw", 2u,
-                                       salt, sizeof salt, 2u, out, sizeof out) == -1);
-        CHECK(hmac_calls == i && live_allocs == 0u && free_calls == 1u);
-        if (i <= 2u) sentinel(out, sizeof out);
-        else sentinel(out + 32u, sizeof out - 32u);
-    }
-    reset(); fail_alloc_at = 1u;
-    CHECK(determ_pbkdf2_hmac_sha256(ikm, sizeof ikm, salt, sizeof salt, 1u, out, 32u) == -1);
-    CHECK(hmac_calls == 0u && live_allocs == 0u);
-    reset(); forbid_alloc = 1;
-    CHECK(determ_pbkdf2_hmac_sha256(ikm, sizeof ikm, salt, SIZE_MAX, 1u, out, 32u) == -1);
-    CHECK(hmac_calls == 0u);
+    sentinel(out + 33u, sizeof out - 33u);
+    CHECK(determ_pbkdf2_hmac_sha256((const uint8_t *)"Password", 8u,
+                                   (const uint8_t *)"NaCl", 4u, 80000u, out, 64u) == 0);
+    equals_hex(out, 64u, "4ddcd8f60b98be21830cee5ef22701f9641a4418d04c0414aeff08876b34ab56a1d425a1225833549adb841b51c9b3176a272bdebba1d078478f62b397f33c8d");
+    /* Refusals write nothing: zero iterations, and (64-bit) dkLen one byte
+     * past RFC 8018's (2^32 - 1) * 32 bound. */
+    memset(out, 0xa5, sizeof out);
+    CHECK(determ_pbkdf2_hmac_sha256(ikm, sizeof ikm, salt, sizeof salt, 0u, out, 32u) == -1);
 #if SIZE_MAX > UINT32_MAX
     CHECK(determ_pbkdf2_hmac_sha256(ikm, sizeof ikm, salt, sizeof salt, 1u,
                                    out, (size_t)UINT32_MAX * 32u + 1u) == -1);
-#else
-    /* No huge output is touched: inject failure in the first HMAC. A wrapped
-     * ceil at outlen==SIZE_MAX would incorrectly report success without it. */
-    reset(); fail_hmac_at = 1u;
-    CHECK(determ_pbkdf2_hmac_sha256(ikm, sizeof ikm, salt, sizeof salt, 1u,
-                                   out, SIZE_MAX) == -1);
-    CHECK(hmac_calls == 1u);
 #endif
+    CHECK(determ_pbkdf2_hmac_sha256(ikm, sizeof ikm, salt, sizeof salt, 0u, out, 0u) == -1);
+    CHECK(determ_pbkdf2_hmac_sha256(ikm, sizeof ikm, salt, sizeof salt, 1u, out, 0u) == 0);
+    sentinel(out, sizeof out);
+    CHECK(alloc_calls == 0u && hmac_calls == 0u);
 }
 
 static void preflight_tests(void) {
@@ -237,7 +289,7 @@ static void preflight_tests(void) {
     CHECK(determ_argon2id(out, 32u, &byte, 1u, input, 8u, 1u, 4194304u, 1u) == -1);
     CHECK(alloc_calls == 0u);
 #else
-    puts("NOTE: native 32-bit Argon2 allocation and PBKDF2 ceil boundary paths not exercised");
+    puts("NOTE: native 32-bit Argon2 allocation path not exercised");
 #endif
     /* Nonempty valid paths remain admitted; existing algorithm-vector gates
      * remain the authority for P-256/Argon2 cryptographic byte correctness. */
@@ -389,6 +441,7 @@ static void opaque_known_answer(void) {
 }
 
 int main(void) {
+    hmac_stream_tests();
     kdf_tests();
     preflight_tests();
     opaque_tests();

@@ -85,7 +85,7 @@ inline std::array<uint8_t, 32> hmac_sha256(std::span<const uint8_t> key,
     std::array<uint8_t, 32> out;
     detail::require(determ_hmac_sha256(detail::ptr(key), key.size(),
                                        detail::ptr(msg), msg.size(), out.data()),
-                    "hmac_sha256 failed (allocation or size overflow)");
+                    "hmac_sha256 failed");
     return out;
 }
 inline std::array<uint8_t, 64> hmac_sha512(std::span<const uint8_t> key,
@@ -106,7 +106,7 @@ inline Bytes hkdf_sha256(std::span<const uint8_t> salt,
                                        detail::ptr(ikm), ikm.size(),
                                        detail::ptr(info), info.size(),
                                        out.data(), outlen),
-                    "hkdf_sha256 failed (outlen > 8160 or allocation)");
+                    "hkdf_sha256 failed (outlen > 8160)");
     return out;
 }
 
@@ -117,7 +117,7 @@ inline Bytes pbkdf2_hmac_sha256(std::span<const uint8_t> password,
     detail::require(determ_pbkdf2_hmac_sha256(detail::ptr(password), password.size(),
                                               detail::ptr(salt), salt.size(),
                                               iterations, out.data(), dklen),
-                    "pbkdf2_hmac_sha256 failed (iters == 0 or allocation)");
+                    "pbkdf2_hmac_sha256 failed (iters == 0 or dkLen too long)");
     return out;
 }
 

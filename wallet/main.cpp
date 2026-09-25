@@ -8707,7 +8707,7 @@ int cmd_selftest_committee_quorum(int, char**) {
 //        -> nullopt regardless; that edge is pinned on the deserialize side by D5.)
 //     C4 Kdf::PBKDF2 pbkdf2_iters==0                                  -> nullopt, NO throw
 //        Falsifies envelope.cpp:150: determ_pbkdf2_hmac_sha256 returns -1 on
-//        iters==0 (pbkdf2.c:22) -> derive_key_pbkdf2 throws; the guard converts
+//        iters==0 (pbkdf2.c:23) -> derive_key_pbkdf2 throws; the guard converts
 //        it to nullopt.
 //
 //   Positive controls P1 (DWE2) / P2 (DWE1) prove the negatives are meaningful —
