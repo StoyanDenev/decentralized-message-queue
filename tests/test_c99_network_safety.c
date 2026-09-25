@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
@@ -70,9 +71,9 @@ static void *network_checked_memmove(void *dst, const void *src, size_t len) {
 
 /* Registration failure injection for the included sources only; the event loop
  * itself is the real library object. */
-static int fail_loop_add;
+static int fail_loop_add, failed_add_fd = -1;
 static int injected_loop_add(net_event_loop_t *loop, int fd, uint32_t events, void *user_data) {
-    if (fail_loop_add) return -1;
+    if (fail_loop_add) { failed_add_fd = fd; return -1; }
     return net_event_loop_add(loop, fd, events, user_data);
 }
 
@@ -208,7 +209,6 @@ static void test_reactor_capacity(void) {
     int pair[2];
     uint8_t data[2] = {1, 2};
     static uint8_t oversized[REACTOR_BUFFER_CAPACITY + 1U];
-    uint8_t probe;
     CHECK(reactor_init(&reactor) == 0);
     tcp_pair(pair);
     CHECK(reactor_register_client(&reactor, pair[0], NULL, NULL, NULL) == 0);
@@ -216,8 +216,12 @@ static void test_reactor_capacity(void) {
      * the API bound must reject it before any byte is written. */
     CHECK(reactor_send(&reactor, pair[0], oversized, sizeof(oversized)) < 0);
     CHECK(reactor.slots[0].tx_len == 0);
-    CHECK(recv(pair[1], &probe, 1, MSG_DONTWAIT) < 0 &&
-          (errno == EAGAIN || errno == EWOULDBLOCK));
+    {
+        /* Nothing reached the peer (poll(2) is portable; MSG_DONTWAIT is not). */
+        struct pollfd nothing;
+        nothing.fd = pair[1]; nothing.events = POLLIN; nothing.revents = 0;
+        CHECK(poll(&nothing, 1, 50) == 0);
+    }
     reactor.slots[0].tx_len = REACTOR_BUFFER_CAPACITY - 1U;
     CHECK(reactor_send(&reactor, pair[0], data, 2) < 0);
     CHECK(reactor_send(&reactor, pair[0], data, SIZE_MAX) < 0);
@@ -351,11 +355,26 @@ static void count_disconnect(peer_mesh_t *m, int index, void *user) {
  * disconnect for an index the caller never received. */
 static void test_mesh_connect_failure(void) {
     int fd = start_mesh();
+    /* The lowest free descriptor is the one the failing connect will take:
+     * after the failure it must be closed again, not leaked. */
+    int probe = open("/dev/null", O_RDONLY);
+    CHECK(probe >= 0);
+    close(probe);
     mesh.config.on_disconnect = count_disconnect;
     disconnect_calls = 0;
     fail_loop_add = 1;
+    failed_add_fd = -1;
     CHECK(peer_mesh_connect(&mesh, "127.0.0.1", mesh_port) < 0);
     fail_loop_add = 0;
+    CHECK(failed_add_fd == probe); /* the probe named the connect's descriptor */
+    CHECK(disconnect_calls == 0);
+    CHECK(fcntl(probe, F_GETFD) < 0 && errno == EBADF);
+    /* An unparsable address fails after socket(): that descriptor is closed too. */
+    probe = open("/dev/null", O_RDONLY);
+    CHECK(probe >= 0);
+    close(probe);
+    CHECK(peer_mesh_connect(&mesh, "not-an-address", mesh_port) == -4);
+    CHECK(fcntl(probe, F_GETFD) < 0 && errno == EBADF);
     CHECK(disconnect_calls == 0);
     for (unsigned i = 0; i < PEER_MESH_MAX_PEERS; i++) {
         CHECK(mesh.peers[i].state == PEER_STATE_FREE);

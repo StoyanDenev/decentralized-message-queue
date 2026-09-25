@@ -314,6 +314,40 @@ MUTANTS = [
      'static void release_unpublished_peer(peer_mesh_t *mesh, int slot) {\n',
      'static void release_unpublished_peer(peer_mesh_t *mesh, int slot) {\n'
      '    if (mesh) { peer_mesh_disconnect(mesh, slot); return; } /* mutant: announce */\n'),
+    ('mesh-connect-failure-close',
+     'test-c99-network-safety',
+     'src/net/peer_mesh.c',
+     '        net_event_loop_del(&mesh->loop, peer->fd);\n'
+     '        close(peer->fd);\n'
+     '        peer->fd = -1;\n'
+     '    }\n'
+     '    peer->state = PEER_STATE_FREE;\n'
+     '    peer->registration = 0;\n'
+     '}\n'
+     '\n'
+     'int peer_mesh_connect(',
+     '        net_event_loop_del(&mesh->loop, peer->fd);\n'
+     '        peer->fd = -1; /* mutant: descriptor leaked */\n'
+     '    }\n'
+     '    peer->state = PEER_STATE_FREE;\n'
+     '    peer->registration = 0;\n'
+     '}\n'
+     '\n'
+     'int peer_mesh_connect('),
+    ('mesh-connect-bad-address-close',
+     'test-c99-network-safety',
+     'src/net/peer_mesh.c',
+     '    if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) {\n'
+     '        close(fd);\n'
+     '        return -4;',
+     '    if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) {\n'
+     '        return -4; /* mutant: descriptor leaked */'),
+    ('crypto-opaque-null-key-untouched',
+     'test-c99-crypto-bounds',
+     'src/crypto/dsso/opaque3dh.c',
+     '    /* C2-h: a NULL-argument rejection leaves every output untouched,\n',
+     '    if (t && server_mac_ok) *server_mac_ok = 0; /* mutant: reset before key checks */\n'
+     '    /* C2-h: a NULL-argument rejection leaves every output untouched,\n'),
     ('k2-contributor-connect-preconditions',
      'test-c99-network-safety',
      'src/net/k2_net.c',
@@ -788,8 +822,9 @@ ASSERTION_MARKERS = {
 # skipped there rather than counted.
 #  - reactor-read-write-incarnation: kqueue reports READ and WRITE as separate
 #    events, so the combined-event path it breaks does not arise.
-#  - reactor-flush-sigpipe: kqueue hosts also set SO_NOSIGPIPE at registration,
-#    so a plain send() cannot raise SIGPIPE there.
+#  - reactor-flush-sigpipe: on kqueue, EVFILT_WRITE after a local SHUT_WR carries
+#    EV_EOF, so reactor_step closes the slot before the flush path runs (and
+#    macOS also sets SO_NOSIGPIPE at registration).
 EPOLL_ONLY = ("loop-epoll-edge-triggered", "reactor-read-write-incarnation",
               "reactor-flush-sigpipe")
 # epoll ADD already rejects a duplicate FD (EEXIST); kqueue EV_ADD replaces it.

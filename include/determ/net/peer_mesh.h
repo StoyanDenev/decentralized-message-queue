@@ -133,6 +133,11 @@ struct peer_mesh {
  * Callbacks may disconnect/reconnect peers; envelope/payload pointers are
  * borrowed for the callback only and must not be retained across any operation
  * changing peers.
+ * A negative return from peer_mesh_connect leaves no slot claimed and makes no
+ * on_disconnect call. on_disconnect can name any slot released before its HELLO
+ * arrived: inbound (index never published: setup or send failure, EOF or
+ * garbage, peer_mesh_close) or outbound (a returned index whose connection
+ * fails or is closed first).
  * Every outbound connect and every accepted inbound connection consumes one
  * registration generation before any HELLO. The counter is refused rather than
  * wrapped at UINTPTR_MAX >> 8: on a 32-bit host an unauthenticated peer can

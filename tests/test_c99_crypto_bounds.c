@@ -303,6 +303,23 @@ static void opaque_tests(void) {
     CHECK(determ_opaque3dh_client(NULL, sk_c, esk_c, epk_s, smac, got_epk,
                                  out_key, out_mac, &mac_ok) == -1);
     CHECK(mac_ok == 99);
+    {   /* The C++ gate's cases: each missing static key, transcript present. */
+        determ_opaque3dh_transcript missing = t;
+        missing.server_public_key = NULL; mac_ok = 7;
+        memset(got_epk, 0xa5, sizeof got_epk); memset(out_key, 0xa5, sizeof out_key);
+        memset(out_mac, 0xa5, sizeof out_mac);
+        CHECK(determ_opaque3dh_client(&missing, sk_c, esk_c, epk_s, smac, got_epk,
+                                     out_key, out_mac, &mac_ok) == -1);
+        CHECK(mac_ok == 7);
+        sentinel(got_epk, sizeof got_epk); sentinel(out_key, sizeof out_key);
+        sentinel(out_mac, sizeof out_mac);
+        missing = t; missing.client_public_key = NULL; mac_ok = 7;
+        CHECK(determ_opaque3dh_client(&missing, sk_c, esk_c, epk_s, smac, got_epk,
+                                     out_key, out_mac, &mac_ok) == -1);
+        CHECK(mac_ok == 7);
+        sentinel(got_epk, sizeof got_epk); sentinel(out_key, sizeof out_key);
+        sentinel(out_mac, sizeof out_mac);
+    }
     /* A mismatched tag still completes with mac_ok=0: existing API semantics. */
     reset(); smac[0] ^= 1u;
     CHECK(determ_opaque3dh_client(&t, sk_c, esk_c, epk_s, smac, got_epk,

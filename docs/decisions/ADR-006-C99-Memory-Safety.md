@@ -278,6 +278,15 @@ both the baseline and independent implementations. Resolved before commit:
   read/write stale-event case now waits for delivery before stepping, and the
   failed-init test puts a probe on descriptor 0 so that a stray `close(0)` is seen.
 
+A final-diff review of these resolutions found nothing blocking and two test
+gaps, closed in the following commit: a failed connect now has to close its
+descriptor on both release paths, and C2-h is also checked with each static key
+missing while the transcript is present. Three more cases kill the regressions
+(`mesh-connect-failure-close`, `mesh-connect-bad-address-close`,
+`crypto-opaque-null-key-untouched`); `peer_mesh.h` states which releases call
+`on_disconnect`, and the "nothing reached the peer" check uses `poll(2)` instead
+of the less portable `MSG_DONTWAIT`.
+
 **Recorded, not fixed** (pre-existing unless stated; each needs its own increment
 and review):
 

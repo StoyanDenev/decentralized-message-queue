@@ -643,15 +643,17 @@ static void test_rpc_numeric_and_output_bounds(void) {
 /* get_block must return the requested height, not the default block 0, and must
  * refuse a non-numeric height token (review 2026-09-25). */
 static void test_rpc_get_block_selects_height(void) {
-    char dir[] = "/tmp/determ-rpc-height-XXXXXX";
+    /* A fixed path cleaned before use, like the neighbouring store test: a
+     * failing (or mutated) run leaves nothing new behind on the next run. */
+    const char *dir = "/tmp/test_http_rpc_height_store";
     char rm_cmd[96];
     static const uint8_t p0[] = "block-zero", p1[] = "block-one";
     uint8_t h0[32], h1[32];
     block_store_t store;
     rpc_context_t ctx;
     char response[4096];
-    TEST_ASSERT(mkdtemp(dir) != NULL);
     TEST_ASSERT(snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf %s", dir) < (int)sizeof(rm_cmd));
+    TEST_ASSERT(system(rm_cmd) == 0);
     TEST_ASSERT(block_store_open(&store, dir) == 0);
     memset(h0, 0x10, sizeof(h0));
     memset(h1, 0x11, sizeof(h1));
