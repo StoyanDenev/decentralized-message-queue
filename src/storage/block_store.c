@@ -106,6 +106,10 @@ block_store_status_t block_store_open(block_store_t *store, const char *base_dir
 
     struct stat st;
     if (stat(store->manifest_path, &st) != 0) {
+        /* R1-01: only a manifest that does not exist starts a new store. Any
+         * other failure (EIO, ESTALE, ELOOP, EACCES, ...) says nothing about
+         * absence, and publishing a height-0 manifest could replace one. */
+        if (errno != ENOENT) return BLOCK_STORE_ERR_IO;
         /* Manifest doesn't exist: initialize brand new store */
         uint8_t zero_hash[32] = {0};
         block_store_status_t rc = write_manifest_atomic(store, 0, zero_hash);
@@ -185,6 +189,9 @@ block_store_status_t block_store_append_block(block_store_t *store,
     if (!store || !store->open || !hash || !block_frame || frame_len == 0) {
         return BLOCK_STORE_ERR_INVALID_ARG;
     }
+    /* R1-02: open refuses a manifest with an all-zero head hash above height
+     * 0, so such a hash must not be written in the first place. */
+    if (is_all_zero(hash, 32)) return BLOCK_STORE_ERR_INVALID_ARG;
     if (height != store->current_height) {
         return BLOCK_STORE_ERR_HEIGHT_MISMATCH;
     }

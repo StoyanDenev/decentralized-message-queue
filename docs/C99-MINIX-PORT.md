@@ -47,7 +47,7 @@ It is a separate experiment built around the proposed K=2 design (ADR-004): a lo
 two-party commit/reveal attempt (FB74, `K2_VDF_Soundness.md`), a repeated-work
 evaluator, a bounded pending inbox, an in-memory transfer ledger and POSIX
 networking/RPC. It builds as strict ISO C99 (`determ_c99_strict` in CMake; GCC and
-Clang), and CI runs 26 targets with each compiler, again under ASan + UBSan with GCC
+Clang), and CI runs 27 targets with each compiler, again under ASan + UBSan with GCC
 (crypto library included), plus an isolated mutation gate (`tools/ci_local.sh --c99` /
 `--c99-sanitize` / `--c99-mutants`). Against this plan it stands at:
 

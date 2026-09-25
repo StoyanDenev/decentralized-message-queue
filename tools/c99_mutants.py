@@ -701,6 +701,11 @@ MUTANTS = [
     ("store-unvouched-hash", "test-block-store", "src/storage/block_store.c",
      "height >= store->indexed_count ||\n        !store->index[height].hash_known) {",
      "height >= store->indexed_count) {"),
+    # ADR-006 R1-01/R1-02 (test-c99-storage-safety injects the stat failures).
+    ("store-stat-enoent-only", "test-c99-storage-safety", "src/storage/block_store.c",
+     "        if (errno != ENOENT) return BLOCK_STORE_ERR_IO;\n", ""),
+    ("store-append-zero-hash", "test-c99-storage-safety", "src/storage/block_store.c",
+     "    if (is_all_zero(hash, 32)) return BLOCK_STORE_ERR_INVALID_ARG;\n", ""),
     ("ledger-nonce-gap", "test-ledger-state", "src/ledger/state.c",
      "sender_nonce == UINT64_MAX || tx_nonce != sender_nonce + 1",
      "sender_nonce == UINT64_MAX || tx_nonce <= sender_nonce"),
@@ -836,6 +841,7 @@ ASSERTION_MARKERS = {
     "test-c99-http-safety": "ASSERTION FAILED:",
     "test-http-rpc": "ASSERTION FAILED:",
     "test-c99-network-safety": "NETWORK_SAFETY_ASSERT:",
+    "test-c99-storage-safety": "C99-STORAGE-SAFETY ASSERTION FAILED",
 }
 
 
@@ -855,6 +861,7 @@ KQUEUE_ONLY = ("loop-kqueue-write-kept", "reactor-duplicate-registration")
 
 # The targets tools/ci_c99.sh lists in C99_UNIX (POSIX transport only).
 POSIX_TARGETS = ("test-c99-network-safety", "test-c99-http-safety", "test-dsf-k2-duel", "test-k2-net-rpc", "test-peer-mesh", "test-block-store",
+                 "test-c99-storage-safety",
                  "test-http-rpc", "test-ledger-state", "fuzz-ledger", "test-triple-entry-ledger",
                  "test-rpc-shard-routing", "test-rpc-pending-transfer", "determ-node")
 

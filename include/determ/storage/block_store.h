@@ -71,13 +71,17 @@ typedef struct {
 /*
  * Open or initialize a block store at base_dir.
  * If the manifest exists, checks it and the block files below its height as
- * described above. Otherwise creates the directory if needed and writes an
- * initial DMF1 (height 0, zero head).
+ * described above. If stat() reports that it does not exist (ENOENT), creates
+ * the directory if needed and writes an initial DMF1 (height 0, zero head).
+ * Any other stat() failure returns BLOCK_STORE_ERR_IO and writes no manifest:
+ * an unreadable manifest is never replaced by a fresh one.
  */
 block_store_status_t block_store_open(block_store_t *store, const char *base_dir);
 
 /*
- * Append the block at height == current height:
+ * Append the block at height == current height. An all-zero hash is refused
+ * with BLOCK_STORE_ERR_INVALID_ARG before any file is written (open treats a
+ * zero head hash above height 0 as a corrupt manifest). Otherwise:
  * 1. Writes <base_dir>/<height>.blk with 'DBK1' header and fsyncs it.
  * 2. Replaces the manifest with height + 1 and hash (see above).
  * 3. Updates the in-memory head and index.

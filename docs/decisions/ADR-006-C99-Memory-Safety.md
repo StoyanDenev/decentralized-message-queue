@@ -391,9 +391,9 @@ rationale in its report; the ledger rows carry the full account.
 | R3-02 | CONFIRMED | Medium | `src/net/peer.cpp` → `binary_codec.cpp` | Frames are decoded before HELLO and the rate limit. A 16 MB SNAPSHOT_RESPONSE rebuilds a full chain state and is then dropped (no handler); CHAIN_RESPONSE is consumed, but its decode also precedes admission. The snapshot residual was noted on 2026-09-16. | S-119 |
 | R4-02 | CONFIRMED | Medium (latent) | `src/crypto/dsso/opaque3dh.c` `hash_preamble` | The OPAQUE transcript is not injective: `cred_request` and `cred_response` carry no length, so a split view (with a different client nonce) still yields `server_mac_ok = 1`. Tests are the only callers. | S-120 |
 | R2-01 | CONFIRMED | Medium | `dapps/dsso/dsso_pid.c` subject material | The pseudonym hashes the escaped JSON token, so two spellings of one PAN bind two accounts. | S-121 |
-| R1-01 | CONFIRMED | Medium | `src/storage/block_store.c` `block_store_open` | Any `stat()` failure other than ENOENT re-initializes the manifest at height 0, losing the head. | SECURITY.md C99 table |
+| R1-01 | CONFIRMED; FIXED 2026-09-25 | Medium | `src/storage/block_store.c` `block_store_open` | Any `stat()` failure other than ENOENT re-initializes the manifest at height 0, losing the head. | SECURITY.md C99 table |
 | R3-01 | CONFIRMED (recorded 2026-09-16, not fixed) | Info on 64-bit, High on ILP32 | `binary_codec.cpp:843`; `block.cpp:1666,1723,1812` | Additive `off + len > total` checks wrap with 32-bit `size_t`; the HEADERS decoder already uses the subtractive form. A port requirement. | here |
-| R1-02 | CONFIRMED | Low | `block_store.c` append | Append accepts an all-zero head hash that open rejects. | here |
+| R1-02 | CONFIRMED; FIXED 2026-09-25 | Low | `block_store.c` append | Append accepts an all-zero head hash that open rejects. | here |
 | R1-03 | CONFIRMED | Low | `src/determ_node.c` | Port options go through `atoi` and wrap or disable services; unknown options are ignored. | here |
 | R1-04 | CONFIRMED | Low | `src/net/event_loop.c` stub | The unsupported-platform stub ignores timeouts (a spin) and uses fd 0; it does not compile under the strict flags. | SECURITY.md (fd 0) |
 | R2-02 | CONFIRMED | Low | `dsso_pid.c:626,631` | `now - iat` overflows (undefined) for `iat = INT64_MIN`, bypassing the age check. | here |

@@ -8408,3 +8408,43 @@ Clang at -O2/-O3; Clang's sanitizer probe reported NOT VERIFIED, as designed).
 **Verification.** `ci_local.sh --docs-only` (17 guards) and `--freestanding-examples` (GCC
 and Clang at -O2/-O3, each with 6 mutants rejected; the local Clang lacks a sanitizer
 runtime) on this tree.
+
+## 2026-09-25 — C99 block store: only ENOENT starts a new store; no zero head hash (R1-01, R1-02)
+
+**Problem.** `block_store_open` treated any `stat()` failure on `manifest.bin` as
+absence and atomically wrote a height-0 manifest, so a transient EIO, an ESTALE on a
+network mount or an ELOOP made the store forget its head; an append at height 0 then
+replaced `0.blk` (review R1-01, reproduced with an injected EIO). `block_store_append_block`
+accepted an all-zero hash, which open then refuses as a corrupt manifest (R1-02).
+Environmental errors only; no remote trigger, and no remote append caller in
+`determ-node`.
+
+**Change.** Open returns `BLOCK_STORE_ERR_IO`, writing no manifest, unless `stat()` reports
+ENOENT. Append refuses an all-zero hash with `BLOCK_STORE_ERR_INVALID_ARG` before creating
+the block file. The header states both contracts. No format change.
+
+**Gate.** `test-c99-storage-safety` (new, POSIX C99 target) compiles the real
+`block_store.c` with a `stat()` interceptor: for every errno from 1 to 255 except ENOENT,
+injected into the manifest's `stat()`, open fails with the manifest bytes unchanged (the
+interceptor is counted, so the gate cannot pass without firing) and the store then reopens
+at its height and head; a zero hash at height 0 and at height 2 leaves no block file and an
+unchanged manifest, while the nearly-zero hashes `00..01` and `01 00..00` are accepted and
+reopen as the head. The mutation cases `store-stat-enoent-only` and
+`store-append-zero-hash` remove each fix and are killed with the assertion marker.
+
+**Review.** An independent review confirmed both fixes, the interceptor (all four `stat`
+calls redirected with GCC and Clang, -O0 to -O3, ASan+UBSan and 64-bit file offsets; a
+non-GNU `#define stat stat64` would break the build rather than pass) and the integration.
+It found that a zero-check limited to heights above 0, an over-rejecting check on one byte,
+and an ERR_IO limited to the five errno values tested first would all have survived; the
+test above now kills them. Still open, recorded rather than fixed: the rule relies on
+`stat()`'s errno, so a wrong ENOENT (a concurrent initializer, R1-10, or a misreporting
+network filesystem) still lets the init path's `rename(2)` replace an existing manifest;
+publishing it with `link(2)` (EEXIST → `ERR_IO`) would enforce it at the write. ENOENT
+beside existing block files also still starts a new store (whether that should be
+`CORRUPT_MANIFEST` is a design decision), and the rename/directory-fsync recovery contract
+in SECURITY.md's storage row stands.
+
+**Verification.** On this tree: `ci_local.sh --c99` with GCC and with Clang (27 targets),
+`--c99-sanitize`, the four storage mutation cases (4/4 rejected) and `--docs-only`. The full
+mutation gate and the default mode run on the session's final tree.

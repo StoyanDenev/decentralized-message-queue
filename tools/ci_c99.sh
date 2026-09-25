@@ -14,7 +14,7 @@ C99_PORTABLE=(test-k2-duel test-k2-duel-fallback test-dda test-qpc-clock-overflo
               test-ed25519-bounded test-pending-transfer test-stake-quorum
               test-c99-crypto-bounds test-c99-codec-bounds)
 C99_UNIX=(test-dsf-k2-duel test-k2-net-rpc test-peer-mesh test-c99-network-safety test-block-store
-          test-http-rpc test-c99-http-safety test-ledger-state fuzz-ledger
+          test-c99-storage-safety test-http-rpc test-c99-http-safety test-ledger-state fuzz-ledger
           test-triple-entry-ledger test-rpc-shard-routing test-rpc-pending-transfer determ-node)
 C99_IS_UNIX=1
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) C99_IS_UNIX=0 ;; esac
@@ -61,7 +61,7 @@ fi
 for target in "${C99_TESTS[@]}"; do
   case "$target" in
     test-k2-duel|test-k2-duel-fallback|test-dda|test-qpc-clock-overflow|test-binary-codec|fuzzer-parser|test-dsf-k2-recovery|test-shard-routing|test-ed25519-bounded|test-pending-transfer|test-stake-quorum|test-c99-crypto-bounds|test-c99-codec-bounds) ;;
-    test-dsf-k2-duel|test-k2-net-rpc|test-peer-mesh|test-c99-network-safety|test-block-store|test-http-rpc|test-c99-http-safety|test-ledger-state|fuzz-ledger|test-triple-entry-ledger|test-rpc-shard-routing|test-rpc-pending-transfer|determ-node)
+    test-dsf-k2-duel|test-k2-net-rpc|test-peer-mesh|test-c99-network-safety|test-block-store|test-c99-storage-safety|test-http-rpc|test-c99-http-safety|test-ledger-state|fuzz-ledger|test-triple-entry-ledger|test-rpc-shard-routing|test-rpc-pending-transfer|determ-node)
       [ "$C99_IS_UNIX" -eq 1 ] || {
         echo "FAIL: requested target $target requires POSIX transport"; return 1; } ;;
     *) echo "FAIL: unsupported C99 target: $target"; return 1 ;;

@@ -20,6 +20,7 @@ src/net/k2_net.c	c99-product	REVIEWED	b4364dddb25fd5799fc9bae4f96e5bcc0ce80042	A
 include/determ/net/k2_net.h	c99-product	REVIEWED	e0c102fc63f1df8030f04a2a747fffe0cc235b68	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
 tests/test_c99_codec_bounds.c	tests	REVIEWED	829ef0a5728a5632ac89ae783f6e31519aefb0e9	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
 tests/test_c99_crypto_bounds.c	tests	REVIEWED	33242e066152a05180c8abe5275c52999888dfd9	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths; heap-free HMAC-SHA-256/HKDF/PBKDF2 change reviewed 2026-09-25
+tests/test_c99_storage_safety.c	tests	REVIEWED	98a5b9a202789c0dcf63d77e17dc31ad94a12c62	R1-01/R1-02 storage gate with its independent pre-commit review, 2026-09-25: interceptor soundness, assertions at the store boundary, cleanup
 tests/test_c99_http_safety.c	tests	REVIEWED	5f98c2be3daa7fbc2a3ead03bfae8c91334f06e2	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
 tests/test_c99_network_safety.c	tests	REVIEWED	8561fc256e2a21df03a7dfb717c49dab3adbdc9b	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
 tests/test_http_rpc.c	tests	REVIEWED	b3c9f5bffa10a3d00bf6ab949b93d4011306e1fd	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
@@ -32,8 +33,8 @@ docs/examples/freestanding_core.c	c99-example	REVIEWED	b5913b5e48d0988ba08b03ceb
 docs/examples/freestanding_core.h	c99-example	REVIEWED	873963ca576699574e311acb52c0f2227b50c112	freestanding foundation example review, 2026-09-24 (C99-MINIX-PORT 11)
 tests/test_freestanding_example.c	tests	REVIEWED	d41a1bc50376f3ffb20d2012a7ae56f452da6bec	freestanding foundation example review, 2026-09-24 (C99-MINIX-PORT 11)
 tools/test_freestanding_examples.py	tests	REVIEWED	b14f1a0f6cf43526850f0a38fea0ed852cbe4ac6	freestanding foundation example review, 2026-09-24 (C99-MINIX-PORT 11)
-src/storage/block_store.c	c99-product	REVIEWED	00470719184e47d81513eeeb27bfcb5d7c9b697e	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
-include/determ/storage/block_store.h	c99-product	REVIEWED	bc0fc13b972791fd64031f22cc69017808f1a6f6	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+src/storage/block_store.c	c99-product	REVIEWED	82e358083a379bf48bbc02ab52d38aa103b174b5	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work; R1-01/R1-02 fix reviewed 2026-09-25
+include/determ/storage/block_store.h	c99-product	REVIEWED	9a1be3609a472e1124afb9fb7ba7b6cd655f3a34	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work; R1-01/R1-02 fix reviewed 2026-09-25
 src/ledger/state.c	c99-product	REVIEWED	693bb6df2a8770880ba1f7a0646c080d0fb9fe6d	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
 include/determ/ledger/state.h	c99-product	REVIEWED	8de5525e4054fb14c461c0c9abbc6dda2ebe4de4	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
 src/ledger/pending_transfer.c	c99-product	REVIEWED	f768b6d6cd772026d1249b463b91ff34cbcae8ab	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
@@ -195,8 +196,8 @@ src/chain/chain.cpp	cpp-reference	PARTIAL	92caa20886e824519788ed3a9d4821d3b36945
 src/chain/genesis.cpp	cpp-reference	PARTIAL	7490b37d20cc0f850cca3e36411cd392a97496be	R3: DGC1 decode, encode and validate only
 src/main.cpp	cpp-reference	PARTIAL	8351471f023b95796e7376413f74457f5a998fec	R4: crypto calls of the production commands account, send_anon, genesis and verify-pq-tx only; the rest (mostly test subcommands) pending; re-pinned 2026-09-25 after the reviewed S-118 and S-122 changes (test-rpc-auth-hmac sections 13-14, dapp-subscribe secret decoding), all outside this scope
 dapps/dsso/authn_selftest.c	tests	PARTIAL	0a7ef478fa84e10dd7978b623d09820d4b0f0166	R2: helpers and F-arms only (test code)
-tools/c99_mutants.py	tooling	PARTIAL	6b283d541822bbb0156c70b26bb67ad7cc17c5f0	ADR-006 pre-commit and final-diff reviews: the mutation cases and runner changes the audit added; pre-existing cases not re-reviewed; heap-free HMAC-SHA-256/HKDF/PBKDF2 change reviewed 2026-09-25
-tools/ci_c99.sh	tooling	PARTIAL	5ebe0df4c264b0de79d4fba08417ec204b74b10b	ADR-006 pre-commit review: the C99 target lists the audit changed; the rest of the script not re-reviewed
+tools/c99_mutants.py	tooling	PARTIAL	9c9f50baecb3d561b44f9f87fb68d7eba3d815bd	ADR-006 pre-commit and final-diff reviews: the mutation cases and runner changes the audit added; pre-existing cases not re-reviewed; heap-free HMAC-SHA-256/HKDF/PBKDF2 change reviewed 2026-09-25; the heap-free HMAC and R1-01/R1-02 cases reviewed 2026-09-25
+tools/ci_c99.sh	tooling	PARTIAL	2d52d072a9b7970e31b728361e670c6e76c9d7f7	ADR-006 pre-commit review: the C99 target lists the audit changed; the rest of the script not re-reviewed; test-c99-storage-safety added and reviewed 2026-09-25
 dapps/dsso/dsso_pid_vectors.h	dapps	DATA	-	generated PID vectors: producer tools/gen_dsso_pid_vectors.py; consumer dsso_selftest_pid.c
 third_party/*	vendored	PENDING	-	vendored nlohmann/json (SHA-256 pinned); not target code, but it parses RPC input before authentication (ADR-006 7); D2 step 2 deletes it
 LICENSES/*	legal	EXCLUDED	-	license text; no target behaviour

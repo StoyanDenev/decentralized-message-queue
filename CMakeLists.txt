@@ -862,6 +862,12 @@ if(UNIX)
     determ_c99_strict(test-${c99_test})
   endforeach()
   target_compile_definitions(test-rpc-pending-transfer PRIVATE DETERM_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
+  # ADR-006 R1-01/R1-02: the real block_store.c compiled into the test with a
+  # stat() interceptor, so it links the codec rather than the node core.
+  add_executable(test-c99-storage-safety tests/test_c99_storage_safety.c
+    src/wire/binary_codec.c)
+  target_include_directories(test-c99-storage-safety PRIVATE include src)
+  determ_c99_strict(test-c99-storage-safety)
   add_executable(determ-node src/determ_node.c)
   target_link_libraries(determ-node PRIVATE determ-c99-node-core)
   determ_c99_strict(determ-node)
