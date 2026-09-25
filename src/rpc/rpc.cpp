@@ -59,11 +59,12 @@ std::string canonical_for_hmac(const std::string& method, const json& params) {
 
 std::string hmac_sha256_hex(const std::vector<uint8_t>& key,
                               const std::string& message) {
-    // §3.15 swap: C99 HMAC-SHA256 (validated byte-equal vs OpenSSL by
-    // `determ test-sha2-c99`; the test-rpc-auth-hmac self-test keeps an
-    // OpenSSL mirror as the independent oracle). On the (alloc-failure-only)
-    // error path return "" — never matches any client MAC, so auth
-    // fails CLOSED.
+    // §3.15 swap: C99 HMAC-SHA256, validated byte-equal vs OpenSSL by
+    // `determ-cryptotest test-sha2-c99`. The result is "" when the HMAC
+    // fails and a truncated string when bytes_to_hex's stream cannot
+    // allocate; either WOULD equal a matching client `auth` field, so every
+    // verifier must refuse a tag that is not 64 characters, as
+    // auth_tag_verdict does (S-118).
     unsigned char hmac[32];
     if (determ_hmac_sha256(key.data(), key.size(),
                            reinterpret_cast<const unsigned char*>(message.data()),
@@ -109,6 +110,20 @@ RpcServer::RpcServer(net::Transport& transport, net::EventLoop& loop,
     std::cout << "\n";
 }
 
+std::string auth_tag_verdict(const std::string& expected, const std::string& got) {
+    // S-118: only a complete tag (hex of the 32-byte MAC) can authenticate.
+    // An empty or truncated `expected` means the tag was not computed, and
+    // comparing it would accept a client that sent the same short string.
+    if (expected.size() != 64) return "auth_failed";
+    // Constant-time compare to avoid timing side-channels.
+    if (got.size() != expected.size()) return "auth_failed";
+    int diff = 0;
+    for (size_t i = 0; i < expected.size(); ++i) {
+        diff |= (expected[i] ^ got[i]);
+    }
+    return (diff == 0) ? "" : "auth_failed";
+}
+
 std::string RpcServer::verify_auth(const json& req) const {
     if (auth_secret_.empty()) return ""; // Auth disabled, pass.
     if (!req.contains("auth") || !req["auth"].is_string()) {
@@ -119,13 +134,7 @@ std::string RpcServer::verify_auth(const json& req) const {
     std::string expected = hmac_sha256_hex(auth_secret_,
                                               canonical_for_hmac(method, params));
     std::string got = req.value("auth", std::string{});
-    // Constant-time compare to avoid timing side-channels.
-    if (expected.size() != got.size()) return "auth_failed";
-    int diff = 0;
-    for (size_t i = 0; i < expected.size(); ++i) {
-        diff |= (expected[i] ^ got[i]);
-    }
-    return (diff == 0) ? "" : "auth_failed";
+    return auth_tag_verdict(expected, got);
 }
 
 void RpcServer::start() { accept_loop(); }

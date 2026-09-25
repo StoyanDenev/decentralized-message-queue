@@ -92,7 +92,7 @@ src/net/iocp_transport.cpp	cpp-reference	REVIEWED	e00d923529b3d9c070d075c68fc410
 src/net/iocp_event_loop.cpp	cpp-reference	REVIEWED	b867dc1914a75377d5485251b5d6577eb9f047a4	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
 src/net/iocp_detail.hpp	cpp-reference	REVIEWED	c6552b52613a7c598297c88584186b7c3c7a891b	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
 src/net/virtual_transport.cpp	cpp-reference	REVIEWED	4ab6b35ced00d61b6f967f2654365573b86378ba	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
-src/rpc/rpc.cpp	cpp-reference	REVIEWED	26d95265bb7c1aa5c390b6c5daa213fda1a996a4	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+src/rpc/rpc.cpp	cpp-reference	REVIEWED	2a20b39ca629ee0d737237a36ff1a85a9c8cc059	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work; S-118 change reviewed 2026-09-25
 include/determ/net/transport.hpp	cpp-reference	REVIEWED	79eb6b6b393f19f668d706a06edb3d2b6db5aa09	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
 include/determ/crypto.h	crypto	REVIEWED	64c485bfdd27fa683ff6c2b87e03dcfbedbc7060	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
 include/determ/crypto.hpp	crypto	REVIEWED	3babebba9e08826adee54dcd4034e364de8ebedf	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
@@ -193,7 +193,7 @@ src/crypto/x25519/x25519.c	crypto	REVIEWED	9ad0c022e3b922570bf0c614af27029b37df7
 src/chain/block.cpp	cpp-reference	PARTIAL	902834d6720df21296b876847d438014e67b3ab3	R3: frame codecs only (Block, Transaction, claims and witness encode/decode); apply and consensus bodies pending
 src/chain/chain.cpp	cpp-reference	PARTIAL	92caa20886e824519788ed3a9d4821d3b3694533	R3: decode_state/encode_state, load and manifest decode only; apply and replay pending
 src/chain/genesis.cpp	cpp-reference	PARTIAL	7490b37d20cc0f850cca3e36411cd392a97496be	R3: DGC1 decode, encode and validate only
-src/main.cpp	cpp-reference	PARTIAL	10d5badf8d3944273ea0e923f473672f3885cb2b	R4: crypto calls of the production commands account, send_anon, genesis and verify-pq-tx only; the rest (mostly test subcommands) pending
+src/main.cpp	cpp-reference	PARTIAL	bc8b368f828c00404ef5c7cb6f317b7829a2d62b	R4: crypto calls of the production commands account, send_anon, genesis and verify-pq-tx only; the rest (mostly test subcommands) pending; re-pinned 2026-09-25 after test-rpc-auth-hmac §13 (outside this scope)
 dapps/dsso/authn_selftest.c	tests	PARTIAL	0a7ef478fa84e10dd7978b623d09820d4b0f0166	R2: helpers and F-arms only (test code)
 tools/c99_mutants.py	tooling	PARTIAL	7447e85c3dc8e9d5b4cf6e5a7ec51bc53ae562c1	ADR-006 pre-commit and final-diff reviews: the mutation cases and runner changes the audit added; pre-existing cases not re-reviewed
 tools/ci_c99.sh	tooling	PARTIAL	5ebe0df4c264b0de79d4fba08417ec204b74b10b	ADR-006 pre-commit review: the C99 target lists the audit changed; the rest of the script not re-reviewed

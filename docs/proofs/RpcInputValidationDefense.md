@@ -93,7 +93,7 @@ denote the five validation layers below.
   JSON parse + auth. Rejected requests return `{"error":
   "rate_limited"}` and consume `O(log N)` work (S-014).
 - **Layer E (HMAC authentication).** `RpcServer::verify_auth` at
-  `src/rpc/rpc.cpp:112-129` verifies a hex-HMAC-SHA-256 over
+  `src/rpc/rpc.cpp:127-138` verifies a hex-HMAC-SHA-256 over
   `method ‖ "|" ‖ params.dump()` against the server-side `auth_secret_`
   using a constant-time comparison. Missing / wrong-secret returns
   `auth_required` / `auth_failed`. When `auth_secret_` is empty (default
@@ -577,7 +577,7 @@ zero.
 
 ### 3.6 Layer E — HMAC authentication
 
-`verify_auth(req)` at `src/rpc/rpc.cpp:112-129`. See
+`verify_auth(req)` at `src/rpc/rpc.cpp:127-138`. See
 `RpcAuthHmacSoundness.md` for the full soundness argument. The brief
 form:
 
@@ -1246,7 +1246,7 @@ class the threat model considers.
 
 - `src/rpc/rpc.cpp:79-110` — `RpcServer` constructor (binds Layer D
   + Layer E configuration).
-- `src/rpc/rpc.cpp:112-129` — `verify_auth` (Layer E).
+- `src/rpc/rpc.cpp:113-138` — `auth_tag_verdict` and `verify_auth` (Layer E).
 - `src/rpc/rpc.cpp:142-195` — `handle_session` (the proof's primary
   object).
 - `src/rpc/rpc.cpp:197-272` — `dispatch` (Layer C dispatch table).

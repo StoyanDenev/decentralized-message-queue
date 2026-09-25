@@ -10,7 +10,7 @@ The proof is a short cryptographic argument followed by an audit of `src/rpc/rpc
 
 ## 1. Theorem statements
 
-**Setup.** Let `K ∈ {0,1}*` denote the server's `auth_secret_` field — a byte string produced by `hex_to_bytes(rpc_auth_secret)` at server construction (`src/rpc/rpc.cpp:90`). Let `S := |K|` be the key length in bytes. Operator policy in `docs/SECURITY.md` §3 + `docs/CLI-REFERENCE.md` §17 fixes the recommended generation as `openssl rand -hex 32`, so the canonical key length is `S = 32` bytes (256 bits of entropy). Let `HMAC : ({0,1}*) × ({0,1}*) → {0,1}²⁵⁶` denote HMAC-SHA-256 per RFC 2104 + FIPS 198, instantiated by OpenSSL `HMAC(EVP_sha256(), ...)` at `src/rpc/rpc.cpp:60-70`. Let `canonical(method, params) := method ‖ "|" ‖ params.dump()` denote the canonical request serialization (`src/rpc/rpc.cpp:52-58`), where `params.dump()` is nlohmann-json's deterministic compact-mode dump (sorted keys for objects per the library spec, used by both client and server so the parse-then-dump round trip on the server reproduces the client's pre-send bytes).
+**Setup.** Let `K ∈ {0,1}*` denote the server's `auth_secret_` field — a byte string produced by `hex_to_bytes(rpc_auth_secret)` at server construction (`src/rpc/rpc.cpp:91`). Let `S := |K|` be the key length in bytes. Operator policy in `docs/SECURITY.md` §3 + `docs/CLI-REFERENCE.md` §17 fixes the recommended generation as `openssl rand -hex 32`, so the canonical key length is `S = 32` bytes (256 bits of entropy). Let `HMAC : ({0,1}*) × ({0,1}*) → {0,1}²⁵⁶` denote HMAC-SHA-256 per RFC 2104 + FIPS 198, instantiated by the C99 `determ_hmac_sha256` (`src/crypto/sha2/hmac.c`) through `hmac_sha256_hex` at `src/rpc/rpc.cpp:60-74`. Let `canonical(method, params) := method ‖ "|" ‖ params.dump()` denote the canonical request serialization (`src/rpc/rpc.cpp:52-58`), where `params.dump()` is nlohmann-json's deterministic compact-mode dump (sorted keys for objects per the library spec, used by both client and server so the parse-then-dump round trip on the server reproduces the client's pre-send bytes).
 
 A request triple `(method, params, auth)` is **valid** iff:
 
@@ -18,7 +18,7 @@ A request triple `(method, params, auth)` is **valid** iff:
 auth = hex(HMAC(K, canonical(method, params)))
 ```
 
-and the constant-time loop at `src/rpc/rpc.cpp:122-128` returns `diff == 0`.
+and `auth_tag_verdict` (`src/rpc/rpc.cpp:113-125`, applied by `verify_auth`) accepts it: the computed tag is complete (64 characters, S-118), `auth` has the same length, and the constant-time loop returns `diff == 0`.
 
 **Theorem T-1 (Authentication soundness).** Under:
 
@@ -36,9 +36,9 @@ per single forgery attempt, where `q` is the number of HMACs the adversary has o
 
 **Theorem T-2 (Replay analysis / known limitation).** The `auth` field is a deterministic function of `(K, method, params)` only — it carries no nonce, no timestamp, no sequence number. An adversary `A` who eavesdrops a single valid triple `(method, params, auth)` from the wire (e.g., over an unencrypted localhost socket the adversary co-tenants on, or a non-TLS reverse-proxy hop) can replay the same triple indefinitely against the same server, and `verify_auth` will accept every replay. The protocol does NOT defend against replay in v2.16. The closure documents this as a **known limitation** scoped out of S-001's primary "unauthenticated requests" surface; the recommended mitigation (per-request nonce or timestamp + sliding-window-acceptance) is a follow-on, tracked in `docs/SECURITY.md` §3 S-001's threat-model matrix under "Replay of authenticated requests by MITM: NOT addressed in v2.16."
 
-**Theorem T-3 (Constant-time comparison).** The `verify_auth` HMAC compare at `src/rpc/rpc.cpp:122-128` is constant-time: every byte of `expected` is XOR-OR'd into a single accumulator `diff` over a fixed-length loop, with no early `return`/`break`/`continue` inside the loop body. The early `expected.size() != got.size()` check at line 123 is a length comparison only, and `expected.size()` is the fixed constant `64` (the hex-encoded length of HMAC-SHA-256 output), so the length comparison reveals no information about `K`. T-3 is verified by inspection (this document §4 L-3).
+**Theorem T-3 (Constant-time comparison).** The HMAC compare in `auth_tag_verdict` (`src/rpc/rpc.cpp:113-125`, applied by `verify_auth`) is constant-time: every byte of `expected` is XOR-OR'd into a single accumulator `diff` over a fixed-length loop, with no early `return`/`break`/`continue` inside the loop body. The two early checks (lines 117 and 119) compare lengths only: a computed tag that is not 64 characters is refused outright (S-118), so `expected.size()` is the constant `64` whenever the comparison runs, and the check on `got.size()` reveals no information about `K`. T-3 is verified by inspection (this document §4 L-3).
 
-**Theorem T-4 (Secret confidentiality at the implementation surface).** The `auth_secret_` field is never written to any log, error response, or wire message by `src/rpc/rpc.cpp`. The startup log at `src/rpc/rpc.cpp:95-97` emits the secret's *length in bytes* (`auth_secret_.size()`) but never the secret value. The `verify_auth` error returns (lines 115, 128) are fixed string constants (`"auth_required: missing 'auth' field"`, `"auth_failed"`) with no dependence on `K`, `expected`, or any per-key data. T-4 is verified by inspection (this document §4 L-4).
+**Theorem T-4 (Secret confidentiality at the implementation surface).** The `auth_secret_` field is never written to any log, error response, or wire message by `src/rpc/rpc.cpp`. The startup log at `src/rpc/rpc.cpp:96-98` emits the secret's *length in bytes* (`auth_secret_.size()`) but never the secret value. The error returns of `verify_auth` and `auth_tag_verdict` (lines 130; 117, 119, 124) are fixed string constants (`"auth_required: missing 'auth' field"`, `"auth_failed"`) with no dependence on `K`, `expected`, or any per-key data. T-4 is verified by inspection (this document §4 L-4).
 
 A configuration-surface caveat is registered in §6: `Config::to_json` (`src/node/node.cpp:30`) persists `rpc_auth_secret` in plaintext to the operator's config JSON. This is outside the RPC server's scope and is documented as a finding, not a defect of the HMAC scheme itself.
 
@@ -72,10 +72,10 @@ The protocol surface is:
 
 - Client computes `auth = hex(HMAC(K, method ‖ "|" ‖ params.dump()))` and sends `{"method": ..., "params": ..., "auth": ...}` over a TCP connection (loopback by default per S-001's localhost-only mitigation; or externally if the operator opted out and set the secret).
 - Server, on receiving a line, parses JSON, calls `verify_auth(req)`:
-  1. If `auth_secret_` is empty (auth disabled), accept (line 113). This preserves the no-auth path for single-tenant boxes.
-  2. If the request lacks `"auth"` or it's not a string, return `"auth_required: missing 'auth' field"` (lines 114-116).
-  3. Recompute `expected = hex(HMAC(K, canonical(method, params)))` (lines 117-120).
-  4. Constant-time compare `expected` vs `got` (lines 122-128). Mismatch → `"auth_failed"`.
+  1. If `auth_secret_` is empty (auth disabled), accept (line 128). This preserves the no-auth path for single-tenant boxes.
+  2. If the request lacks `"auth"` or it's not a string, return `"auth_required: missing 'auth' field"` (lines 129-131).
+  3. Recompute `expected = hex(HMAC(K, canonical(method, params)))` (lines 132-135).
+  4. Return `auth_tag_verdict(expected, got)` (line 137; body lines 113-125): a computed tag that is not 64 characters — empty when the HMAC failed, truncated when its hex encoding could not allocate — is refused (S-118); otherwise a constant-time compare of `expected` vs `got`. Mismatch → `"auth_failed"`.
 
 The canonicalization step relies on nlohmann::json's deterministic `dump()` (compact mode, sorted keys for `json::object`). Both client and server parse the same `params` object — the client builds it locally, dumps; the server receives the line, parses, then re-dumps via the same library. The parse-then-dump round trip on the server reproduces the client's pre-send bytes because nlohmann's `parse + dump(compact)` is a canonical-form fixpoint for objects with string keys.
 
@@ -83,7 +83,7 @@ The canonicalization step relies on nlohmann::json's deterministic `dump()` (com
 
 S-001 originally documented two adversaries:
 
-1. **Network-reachable unauthenticated RPC.** Closed by Option 1 (localhost-only default at `src/rpc/rpc.cpp:79-89`).
+1. **Network-reachable unauthenticated RPC.** Closed by Option 1 (localhost-only default at `src/rpc/rpc.cpp:83-91`).
 2. **Cross-tenant on the same host** (e.g., another user on a shared box with localhost access to the RPC port). Closed by Option 3 (HMAC RPC auth — this proof's subject).
 
 S-001's threat-model matrix in `docs/SECURITY.md` §3 explicitly carries Option 3's status:
@@ -102,46 +102,48 @@ T-2 below formalizes this residual.
 
 ## 3. Implementation citation
 
-The proof's primary object — `RpcServer::verify_auth` — at `src/rpc/rpc.cpp:112-129`:
+The proof's primary object — `RpcServer::verify_auth` at `src/rpc/rpc.cpp:127-138` and the verdict it returns, `auth_tag_verdict` at `src/rpc/rpc.cpp:113-125` (declared in `include/determ/rpc/rpc.hpp:70-75`):
 
 ```cpp
+std::string auth_tag_verdict(const std::string& expected, const std::string& got) {
+    if (expected.size() != 64) return "auth_failed";                        // line 117 (S-118)
+    if (got.size() != expected.size()) return "auth_failed";                // line 119
+    int diff = 0;                                                           // line 120
+    for (size_t i = 0; i < expected.size(); ++i) {                          // line 121
+        diff |= (expected[i] ^ got[i]);                                     // line 122
+    }                                                                       // line 123
+    return (diff == 0) ? "" : "auth_failed";                                // line 124
+}
+
 std::string RpcServer::verify_auth(const json& req) const {
-    if (auth_secret_.empty()) return ""; // Auth disabled, pass.            // line 113
-    if (!req.contains("auth") || !req["auth"].is_string()) {                // line 114
-        return "auth_required: missing 'auth' field";                       // line 115
+    if (auth_secret_.empty()) return ""; // Auth disabled, pass.            // line 128
+    if (!req.contains("auth") || !req["auth"].is_string()) {                // line 129
+        return "auth_required: missing 'auth' field";                       // line 130
     }
-    std::string method = req.value("method", "");                           // line 117
-    auto params = req.value("params", json::object());                      // line 118
-    std::string expected = hmac_sha256_hex(auth_secret_,                    // line 119
+    std::string method = req.value("method", "");                           // line 132
+    auto params = req.value("params", json::object());                      // line 133
+    std::string expected = hmac_sha256_hex(auth_secret_,                    // line 134
                                               canonical_for_hmac(method, params));
-    std::string got = req.value("auth", std::string{});                     // line 121
-    // Constant-time compare to avoid timing side-channels.
-    if (expected.size() != got.size()) return "auth_failed";                // line 123
-    int diff = 0;                                                           // line 124
-    for (size_t i = 0; i < expected.size(); ++i) {                          // line 125
-        diff |= (expected[i] ^ got[i]);                                     // line 126
-    }                                                                       // line 127
-    return (diff == 0) ? "" : "auth_failed";                                // line 128
+    std::string got = req.value("auth", std::string{});                     // line 136
+    return auth_tag_verdict(expected, got);                                 // line 137
 }
 ```
 
-The underlying HMAC primitive at `src/rpc/rpc.cpp:60-70`:
+The underlying HMAC primitive at `src/rpc/rpc.cpp:60-74`:
 
 ```cpp
 std::string hmac_sha256_hex(const std::vector<uint8_t>& key,
                               const std::string& message) {
     unsigned char hmac[32];
-    unsigned int  hmac_len = 0;
-    HMAC(EVP_sha256(),
-         key.data(),  static_cast<int>(key.size()),
-         reinterpret_cast<const unsigned char*>(message.data()),
-         message.size(),
-         hmac, &hmac_len);
-    return bytes_to_hex(hmac, hmac_len);
+    if (determ_hmac_sha256(key.data(), key.size(),
+                           reinterpret_cast<const unsigned char*>(message.data()),
+                           message.size(), hmac) != 0)
+        return {};
+    return bytes_to_hex(hmac, 32);
 }
 ```
 
-OpenSSL's `HMAC(EVP_sha256(), ...)` implements RFC 2104 with SHA-256 backing. The output is exactly 32 bytes (256 bits), hex-encoded by `bytes_to_hex` (lines 31-37) to produce a 64-character hex string.
+`determ_hmac_sha256` (`src/crypto/sha2/hmac.c`) implements RFC 2104 with SHA-256 and is validated byte-equal against OpenSSL by `determ-cryptotest test-sha2-c99`. On success the 32-byte MAC is hex-encoded by `bytes_to_hex` (lines 31-37) to 64 characters. The helper returns an empty string when the HMAC fails (an allocation failure), and `bytes_to_hex`'s stream returns a truncated string when it cannot allocate. Before S-118 was fixed, `verify_auth` accepted a client `auth` equal to such a string; `auth_tag_verdict` now refuses every computed tag that is not 64 characters, so an incomplete computation never authenticates.
 
 The canonical-serialization helper at `src/rpc/rpc.cpp:52-58`:
 
@@ -151,7 +153,7 @@ std::string canonical_for_hmac(const std::string& method, const json& params) {
 }
 ```
 
-The constructor accepts a hex-encoded secret and converts to bytes (`src/rpc/rpc.cpp:86-94`; the `asio::io_context&` parameter shown in earlier revisions of this doc was replaced by the minix `net::Transport&`/`net::EventLoop&` seam in the net::Transport slice B migration — the HMAC contract below is unaffected, since auth verification never touched the transport type):
+The constructor accepts a hex-encoded secret and converts to bytes (`src/rpc/rpc.cpp:83-91`; the `asio::io_context&` parameter shown in earlier revisions of this doc was replaced by the minix `net::Transport&`/`net::EventLoop&` seam in the net::Transport slice B migration — the HMAC contract below is unaffected, since auth verification never touched the transport type):
 
 ```cpp
 RpcServer::RpcServer(net::Transport& transport, net::EventLoop& loop,
@@ -167,9 +169,9 @@ RpcServer::RpcServer(net::Transport& transport, net::EventLoop& loop,
 }
 ```
 
-The startup log at `src/rpc/rpc.cpp:96-108` emits only the length (`auth_secret_.size()`) — never the value.
+The startup log at `src/rpc/rpc.cpp:93-110` emits only the length (`auth_secret_.size()`) — never the value.
 
-The dispatch ordering at `src/rpc/rpc.cpp:161-209` (inside `handle_session`) runs rate-limit *before* parse, then auth *after* parse-but-before-dispatch (necessary because computing the expected HMAC requires the parsed `method` and `params`). The ordering is documented inline as a deliberate choice: rate-limited callers should not even reveal whether their auth was valid.
+The dispatch ordering at `src/rpc/rpc.cpp:151-222` (inside `handle_session`) runs rate-limit *before* parse, then auth *after* parse-but-before-dispatch (necessary because computing the expected HMAC requires the parsed `method` and `params`). The ordering is documented inline as a deliberate choice: rate-limited callers should not even reveal whether their auth was valid.
 
 ---
 
@@ -196,11 +198,11 @@ The pinning regression at `tools/test_rpc_hmac_auth.sh` (assertions 1-5) exercis
 
 ### Lemma L-3 (`verify_auth` HMAC compare is constant-time)
 
-The comparison at `src/rpc/rpc.cpp:122-128` consists of two phases:
+The comparison in `auth_tag_verdict` at `src/rpc/rpc.cpp:113-125` consists of two phases:
 
-1. **Length pre-check** (line 123): `if (expected.size() != got.size()) return "auth_failed";`. The `expected.size()` is a function of `hmac_sha256_hex`'s output, which is always exactly 64 bytes (the hex encoding of HMAC-SHA-256's 32-byte output). It does NOT depend on `K`. The `got.size()` is a function of the adversary's input only — the attacker controls it. The length check therefore reveals only "the attacker sent a non-64-byte hex string," which is no information about `K` (the attacker already knew the length they sent).
+1. **Length pre-checks** (lines 117 and 119). `if (expected.size() != 64) return "auth_failed";` refuses a computed tag that is not complete — empty when the HMAC failed, truncated when its hex encoding could not allocate (S-118) — so `expected.size() == 64` whenever the comparison runs; whether the computation completed depends on allocation, not on `K`. `if (got.size() != expected.size()) return "auth_failed";` then compares the length of `got`, a function of the adversary's input only, with that constant. It reveals only "the attacker sent a string that is not 64 bytes," which is no information about `K` (the attacker already knew the length they sent).
 
-2. **Constant-time XOR-OR loop** (lines 124-128):
+2. **Constant-time XOR-OR loop** (lines 120-124):
 
 ```cpp
 int diff = 0;
@@ -222,19 +224,19 @@ Audit of `src/rpc/rpc.cpp` for any flow of `auth_secret_` to an output sink:
 
 | Sink | Reference | Behavior |
 |---|---|---|
-| `std::cout` startup log | `src/rpc/rpc.cpp:96-97` | Logs `auth_secret_.size()` (length in bytes), not the value. |
-| `std::cout` external-bind warning | `src/rpc/rpc.cpp:101-103` | Static text; no secret reference. |
-| `verify_auth` error return — missing auth | `src/rpc/rpc.cpp:115` | Static string `"auth_required: missing 'auth' field"`. |
-| `verify_auth` error return — wrong auth | `src/rpc/rpc.cpp:128` | Static string `"auth_failed"`. |
-| `expected` HMAC value | `src/rpc/rpc.cpp:119-120` | Computed locally, compared to `got`, never written. |
-| `handle_session` exception path | `src/rpc/rpc.cpp:188-191` | Echoes `e.what()` from a parse failure; not derived from `auth_secret_` (the auth check happens AFTER successful parse). |
-| Response envelope | `src/rpc/rpc.cpp:192-193` | `response.dump() + "\n"`; the response has only `"result"` + `"error"` fields, neither populated from `auth_secret_`. |
+| `std::cout` startup log | `src/rpc/rpc.cpp:96-98` | Logs `auth_secret_.size()` (length in bytes), not the value. |
+| `std::cout` external-bind warning | `src/rpc/rpc.cpp:100-104` | Static text; no secret reference. |
+| `verify_auth` error return — missing auth | `src/rpc/rpc.cpp:130` | Static string `"auth_required: missing 'auth' field"`. |
+| `verify_auth` error return — wrong or incomplete tag | `src/rpc/rpc.cpp:117, 119, 124` (`auth_tag_verdict`) | Static string `"auth_failed"`. |
+| `expected` HMAC value | `src/rpc/rpc.cpp:134-135` | Computed locally, compared to `got`, never written. |
+| `handle_session` exception path | `src/rpc/rpc.cpp:215-218` | Echoes `e.what()` from a parse failure; not derived from `auth_secret_` (the auth check happens AFTER successful parse). |
+| Response envelope | `src/rpc/rpc.cpp:219-220` | `response.dump() + "\n"`; the response has only `"result"` + `"error"` fields, neither populated from `auth_secret_`. |
 
 No flow leaks `auth_secret_` to any stdout/stderr/network sink. The startup-log length disclosure is a deliberate operational signal ("HMAC auth enabled, N-byte secret") that confirms to the operator the secret was parsed correctly — this is the standard pattern for cryptographic-key-loaded logs (libsodium, openssl, libssh all do similar), and revealing only the length leaks no information about the key value (assuming the operator chose the recommended 32-byte length, which is also the documented best practice).
 
-The `dispatch` method at `src/rpc/rpc.cpp:197-272` doesn't touch `auth_secret_` at all — it only reads `method` and `params` from the parsed request.
+The `dispatch` method at `src/rpc/rpc.cpp:224-315` doesn't touch `auth_secret_` at all — it only reads `method` and `params` from the parsed request.
 
-The `rpc_call` client at `src/rpc/rpc.cpp:276-321` reads the secret from either the explicit argument or `DETERM_RPC_AUTH_SECRET` env var (line 294), computes the HMAC, and embeds it in the request. The secret itself is never written to any output (and the request payload carries only the HMAC, not the secret).   □
+The `rpc_call` client at `src/rpc/rpc.cpp:319-355` reads the secret from either the explicit argument or `DETERM_RPC_AUTH_SECRET` env var (line 333), computes the HMAC, and embeds it in the request. The secret itself is never written to any output (and the request payload carries only the HMAC, not the secret).   □
 
 ### Lemma L-5 (HMAC-SHA-256 q-query forgery bound)
 
@@ -260,9 +262,9 @@ $$
 \Pr[\text{forgery accepted}] \;\leq\; 2^{-256} + 2^{-128} + q^2 / 2^{256} \;\leq\; 2^{-128} + \mathrm{negl}(\lambda).
 $$
 
-By the `verify_auth` flow at `src/rpc/rpc.cpp:112-129` + L-2 (canonical serialization is a function), the server's computed `expected` is exactly `HMAC(K, canonical(method*, params*))`. By L-3 (constant-time compare), the comparison reveals only `diff == 0` vs `diff ≠ 0`, with no per-byte leakage. The server therefore accepts iff `auth* = HMAC(K, canonical(method*, params*))`, which by the above bound happens with probability ≤ negligible. The 2⁻²⁵⁶ bound stated in the theorem is the single-query case (q = 0); the q² / 2^256 q-query term is the more pessimistic bound for an attacker who has eavesdropped substantial traffic.   ∎
+By the `verify_auth` flow at `src/rpc/rpc.cpp:127-138` + L-2 (canonical serialization is a function), a computed `expected` that `auth_tag_verdict` compares is exactly `hex(HMAC(K, canonical(method*, params*)))`; an incomplete one is refused before any comparison (S-118). By L-3 (constant-time compare), the comparison reveals only `diff == 0` vs `diff ≠ 0`, with no per-byte leakage. The server therefore accepts iff `auth* = HMAC(K, canonical(method*, params*))`, which by the above bound happens with probability ≤ negligible. The 2⁻²⁵⁶ bound stated in the theorem is the single-query case (q = 0); the q² / 2^256 q-query term is the more pessimistic bound for an attacker who has eavesdropped substantial traffic.   ∎
 
-**Proof of T-2 (Replay analysis).** Inspect `verify_auth` at `src/rpc/rpc.cpp:112-129`. The function's accept condition is purely:
+**Proof of T-2 (Replay analysis).** Inspect `verify_auth` at `src/rpc/rpc.cpp:127-138` and `auth_tag_verdict` at `src/rpc/rpc.cpp:113-125`. The function's accept condition is purely:
 
 ```
 auth == hex(HMAC(K, method ‖ "|" ‖ params.dump()))
@@ -288,7 +290,7 @@ This is a known limitation explicitly scoped out of v2.16 per S-001's closure na
 
 The timestamp option is simpler (no per-client state required) but requires loosely synchronized clocks (acceptable given V14 already requires the same loose synchrony for block timestamps). Either option closes the replay surface at the cost of one extra field in the request envelope and ~10 LOC in `verify_auth`. The implementation is straightforward; the proof would extend the canonical-bytes definition to `canonical(method, params, nonce_or_ts)` and re-derive T-1 with the same PRF reduction.   ∎
 
-**Proof of T-3 (Constant-time comparison).** Direct from L-3. The XOR-OR loop at `src/rpc/rpc.cpp:124-127` executes a fixed 64 iterations with no early exit; the per-iteration body is `diff |= (expected[i] ^ got[i])` which has no branch dependence on `expected[i]` or `got[i]`. The aggregate accumulator `diff` is then tested once at line 128 — a single conditional whose information content is "all 64 bytes matched vs. ≥ 1 mismatch," not per-byte.
+**Proof of T-3 (Constant-time comparison).** Direct from L-3. The XOR-OR loop at `src/rpc/rpc.cpp:120-123` executes a fixed 64 iterations with no early exit; the per-iteration body is `diff |= (expected[i] ^ got[i])` which has no branch dependence on `expected[i]` or `got[i]`. The aggregate accumulator `diff` is then tested once at line 124 — a single conditional whose information content is "all 64 bytes matched vs. ≥ 1 mismatch," not per-byte.
 
 The audit conclusion: **T-3 PASSES**. The implementation is constant-time. No finding is registered in §6 for the core compare; a minor defense-in-depth recommendation (compiler-attribute hardening) is noted as advisory only.   ∎
 
@@ -320,7 +322,7 @@ The v2.16 HMAC scheme is designed against the following adversary families:
 
 **(c) Replay attacker.** Captures one legitimate triple, replays verbatim. Threat: re-executing privileged operations (e.g., `submit_tx` debiting the operator's domain) by replaying a captured RPC. **NOT defended in v2.16 (T-2).** Documented as a known limitation; mitigated operationally by S-001 Option 1 (localhost-only default, limiting the wire-eavesdropping surface to co-tenants on the same host).
 
-**(d) Side-channel attacker (timing).** Measures response latency to extract per-byte information about `K`. Threat: incrementally recovering `K` byte-by-byte over many forge attempts. **Defended (T-3).** The constant-time XOR-OR loop at `src/rpc/rpc.cpp:124-127` reveals no per-byte timing information.
+**(d) Side-channel attacker (timing).** Measures response latency to extract per-byte information about `K`. Threat: incrementally recovering `K` byte-by-byte over many forge attempts. **Defended (T-3).** The constant-time XOR-OR loop at `src/rpc/rpc.cpp:120-123` reveals no per-byte timing information.
 
 **(e) Side-channel attacker (log scraping).** Reads server logs (e.g., a tenant with stdout access on a shared box, or a centralized log aggregator) and extracts `K` from any echoed material. Threat: log-based secret recovery. **Defended at the RPC-server surface (T-4).** A configuration-surface finding is registered in §6.2.
 
@@ -335,22 +337,22 @@ The v2.16 HMAC scheme is designed against the following adversary families:
 **Recommended mitigation:**
 
 1. **Short-term (operator hardening).** Document explicitly in `docs/CLI-REFERENCE.md` §17 that the config file containing `rpc_auth_secret` must be `chmod 0600` and owned by the determ user only. Add an at-startup permission audit similar to the `key_path` permission check (already present for the node's Ed25519 key).
-2. **Medium-term (passphrase encryption).** Apply the v2.17 passphrase-encrypted-keyfile pattern (already shipped for the Ed25519 node key per `docs/SECURITY.md` S-004 closure) to `rpc_auth_secret`. The operator would set `DETERM_RPC_AUTH_SECRET` via env var (the existing env-var path at `src/rpc/rpc.cpp:294` already supports this) or via an encrypted config blob.
+2. **Medium-term (passphrase encryption).** Apply the v2.17 passphrase-encrypted-keyfile pattern (already shipped for the Ed25519 node key per `docs/SECURITY.md` S-004 closure) to `rpc_auth_secret`. The operator would set `DETERM_RPC_AUTH_SECRET` via env var (the existing env-var path at `src/rpc/rpc.cpp:333` already supports this) or via an encrypted config blob.
 3. **Long-term (secrets manager integration).** Add an optional `rpc_auth_secret_source` field that can specify "file", "env", "vault", "aws-secrets-manager", etc. Out of scope for the HMAC primitive's correctness proof.
 
 The HMAC primitive's soundness (T-1, T-3, T-5) is unaffected by F-1; F-1 is a key-management hygiene issue, not a defect in the HMAC scheme.
 
-**Finding F-2 (DETERM_RPC_AUTH_SECRET env var leakage surface).** The client-side `rpc_call` at `src/rpc/rpc.cpp:294-296` reads the secret from `DETERM_RPC_AUTH_SECRET`. Environment variables are visible to any process the operator owns via `/proc/$pid/environ` (Linux) or `ps e` (BSD). A co-tenant on the same host without explicit permission to read the determ process can still see the env var on a misconfigured box (e.g., if `/proc` is not `hidepid=2`).
+**Finding F-2 (DETERM_RPC_AUTH_SECRET env var leakage surface).** The client-side `rpc_call` at `src/rpc/rpc.cpp:331-335` reads the secret from `DETERM_RPC_AUTH_SECRET`. Environment variables are visible to any process the operator owns via `/proc/$pid/environ` (Linux) or `ps e` (BSD). A co-tenant on the same host without explicit permission to read the determ process can still see the env var on a misconfigured box (e.g., if `/proc` is not `hidepid=2`).
 
 **Severity:** Low (mitigated by S-001 Option 1's localhost-only default — the attacker would need same-host access already).
 
 **Recommended mitigation:** document `hidepid=2` mount option (Linux) as part of the operator deployment checklist, and recommend the explicit `--auth-secret <hex>` CLI argument over the env var for higher-trust deployments.
 
-**Finding F-3 (compiler-attribute hardening — defense in depth).** The constant-time XOR-OR loop at `src/rpc/rpc.cpp:124-127` relies on the compiler not transforming the loop into an early-exit form. Modern GCC/Clang at `-O2` are observed to preserve the loop structure (no auto-introduced early exit), but a future compiler upgrade could introduce a regression.
+**Finding F-3 (compiler-attribute hardening — defense in depth).** The constant-time XOR-OR loop at `src/rpc/rpc.cpp:120-123` relies on the compiler not transforming the loop into an early-exit form. Modern GCC/Clang at `-O2` are observed to preserve the loop structure (no auto-introduced early exit), but a future compiler upgrade could introduce a regression.
 
 **Severity:** Very Low (theoretical; current compilers are well-behaved).
 
-**Recommended mitigation:** add a `volatile`-qualified accumulator (`volatile int diff = 0;`) or use OpenSSL's `CRYPTO_memcmp` directly. Either change is ~3 LOC and is a defense-in-depth measure, not a fix for any observed defect.
+**Recommended mitigation:** add a `volatile`-qualified accumulator (`volatile int diff = 0;`) or use the vendored C99 `determ_ct_memcmp` (`include/determ/crypto/ct.h`). Either change is ~3 LOC and is a defense-in-depth measure, not a fix for any observed defect.
 
 The three findings are advisory; none invalidates T-1 .. T-5. They are surfaced for completeness so an external auditor can confirm the scope of the proof's analytic conclusion.
 
@@ -360,9 +362,9 @@ The three findings are advisory; none invalidates T-1 .. T-5. They are surfaced 
 
 **Shipped (v2.16, in-session).** The HMAC RPC auth scheme is live in the current `main` branch:
 
-- `src/rpc/rpc.cpp:60-129` — HMAC primitive + `verify_auth` + constant-time compare.
-- `include/determ/rpc/rpc.hpp:35-52` — `RpcServer` constructor + `verify_auth` declaration + `auth_secret_` field.
-- `src/rpc/rpc.cpp:276-321` — client-side `rpc_call` with `DETERM_RPC_AUTH_SECRET` env var support.
+- `src/rpc/rpc.cpp:60-138` — HMAC primitive + `auth_tag_verdict` (constant-time compare) + `verify_auth`.
+- `include/determ/rpc/rpc.hpp:45-75` — `RpcServer` constructor + `verify_auth` declaration + `auth_secret_` field + `auth_tag_verdict` declaration.
+- `src/rpc/rpc.cpp:319-355` — client-side `rpc_call` with `DETERM_RPC_AUTH_SECRET` env var support.
 - `tools/test_rpc_hmac_auth.sh` — 5-assertion regression test (auth-disabled, missing-auth, wrong-secret, correct-secret, malformed-hex).
 - `docs/SECURITY.md` §3 S-001 — closure narrative (Option 1 + Option 3 both landed).
 - `docs/PROTOCOL.md` §10.2 — wire-level documentation of the `auth` field requirement.
@@ -392,8 +394,8 @@ This proof was added in the current review pass as part of the analytic-closure 
 
 ### Determ-internal references
 
-- `src/rpc/rpc.cpp:60-129` — HMAC primitive + `verify_auth` (the proof's primary object).
-- `include/determ/rpc/rpc.hpp:35-52` — header declaration + `auth_secret_` field.
+- `src/rpc/rpc.cpp:60-138` — HMAC primitive + `auth_tag_verdict` + `verify_auth` (the proof's primary object).
+- `include/determ/rpc/rpc.hpp:45-75` — header declarations + `auth_secret_` field.
 - `src/node/node.cpp:25-72` — `Config::to_json` / `Config::from_json` (the configuration-surface persistence path referenced in F-1).
 - `tools/test_rpc_hmac_auth.sh` — regression harness (5 assertions, T-1's exercised cases).
 - `docs/SECURITY.md` §3 S-001 — closure-status narrative; threat-model matrix this proof formalizes.
@@ -402,4 +404,4 @@ This proof was added in the current review pass as part of the analytic-closure 
 - `docs/proofs/Preliminaries.md` §2.1 (SHA-256 / H1), §2.3 (CSPRNG / uniform-key assumption referenced as K_random).
 - `docs/proofs/EquivocationSlashing.md` (FA6) — companion proof on EUF-CMA-style soundness against an honest-key forgery (citation-style template).
 - `docs/proofs/MakeContribCommitmentBackwardCompat.md` — companion proof; structural-disjointness lemma style used in L-3 + L-4.
-- `FrostVerifyDelegation.md` (deleted 2026-07-09 — git history) — companion proof; delegation-to-underlying-primitive style mirrored here (HMAC primitive delegated to OpenSSL `HMAC(EVP_sha256(), ...)`).
+- `FrostVerifyDelegation.md` (deleted 2026-07-09 — git history) — companion proof; delegation-to-underlying-primitive style mirrored here (HMAC primitive delegated to RFC 2104, instantiated by the C99 `determ_hmac_sha256`).

@@ -292,9 +292,11 @@ worth its own gate); `on_cross_shard_receipt_bundle` relay amplification + unver
 (confirm the deferral to the sister VAL-csr / VAL-inbound-f2 gates holds); ~~`on_snapshot_request(header_count)`
 against a crafted peer value~~ — **CLOSED as row #8 §3d** (SNAP-header-count-uncapped); whether
 `on_snapshot_response`/`on_headers_response` are truly never wired on
-the full node; and the lower-confidence `verify_auth` empty-expected-MAC observation (rpc.cpp:123-128 — the
+the full node; and ~~the lower-confidence `verify_auth` empty-expected-MAC observation (rpc.cpp:123-128 — the
 internal-failure trigger is not attacker-forceable so it is unregistered, but it contradicts the
-`fails CLOSED` comment and merits a defense-in-depth assertion).
+`fails CLOSED` comment and merits a defense-in-depth assertion)~~ — **REGISTERED as S-118 and CLOSED
+2026-09-25** (memory pressure is partly attacker-influenced): `verify_auth` refuses an empty expected tag
+through `auth_tag_verdict`, gated by `test-rpc-auth-hmac` §13.
 
 Cross-references [`ConsensusValidatorGateAudit.md`](ConsensusValidatorGateAudit.md) (the sibling
 block-acceptance register). Any gate confirmed here is closed by the same falsify-on-mutant method; a

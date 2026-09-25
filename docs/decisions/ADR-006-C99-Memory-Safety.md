@@ -384,7 +384,7 @@ rationale in its report; the ledger rows carry the full account.
 
 | ID | Status | Severity | Location | Summary | Recorded |
 |---|---|---|---|---|---|
-| R4-01 | CONFIRMED | Medium | `src/rpc/rpc.cpp` `verify_auth` | If HMAC allocation fails, the expected tag is empty and an empty `auth` field is accepted: authentication fails open under memory pressure. | S-118 |
+| R4-01 | CONFIRMED; FIXED 2026-09-25 | Medium | `src/rpc/rpc.cpp` `verify_auth` | If HMAC allocation fails, the expected tag is empty and an empty `auth` field is accepted: authentication fails open under memory pressure. | S-118 |
 | R3-02 | CONFIRMED | Medium | `src/net/peer.cpp` → `binary_codec.cpp` | Frames are decoded before HELLO and the rate limit. A 16 MB SNAPSHOT_RESPONSE rebuilds a full chain state and is then dropped (no handler); CHAIN_RESPONSE is consumed, but its decode also precedes admission. The snapshot residual was noted on 2026-09-16. | S-119 |
 | R4-02 | CONFIRMED | Medium (latent) | `src/crypto/dsso/opaque3dh.c` `hash_preamble` | The OPAQUE transcript is not injective: `cred_request` and `cred_response` carry no length, so a split view (with a different client nonce) still yields `server_mac_ok = 1`. Tests are the only callers. | S-120 |
 | R2-01 | CONFIRMED | Medium | `dapps/dsso/dsso_pid.c` subject material | The pseudonym hashes the escaped JSON token, so two spellings of one PAN bind two accounts. | S-121 |

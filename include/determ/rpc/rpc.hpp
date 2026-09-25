@@ -67,6 +67,13 @@ private:
     net::RateLimiter              rate_limiter_;
 };
 
+// v2.16 / S-118: the verdict RpcServer::verify_auth applies to a computed tag.
+// Returns "" (accept) only when `expected` is a complete 64-character tag and
+// `got` equals it, compared in constant time; "auth_failed" otherwise. Any other
+// `expected` length means the tag could not be computed (the HMAC failed, or its
+// hex encoding was cut short) and never authenticates, whatever the client sent.
+std::string auth_tag_verdict(const std::string& expected, const std::string& got);
+
 // Simple blocking RPC client — used by CLI to talk to a running node.
 // v2.16: if auth_secret_hex is set, every request includes a
 // computed HMAC-SHA-256 `auth` field.

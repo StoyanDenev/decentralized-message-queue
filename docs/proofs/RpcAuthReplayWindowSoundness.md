@@ -2,7 +2,7 @@
 
 # RpcAuthReplayWindowSoundness — bound-timestamp + sliding-window anti-replay for HMAC RPC auth (S-001 T-2 follow-on)
 
-**Status: specification + soundness proof.** The base HMAC-SHA-256 RPC-auth scheme is shipped (`src/rpc/rpc.cpp:112-129`; soundness in `RpcAuthHmacSoundness.md` T-1..T-5). Its one documented residual is **replay**: the `auth` field is a deterministic function of `(K, method, params)` only — no nonce, no timestamp, no sequence — so a captured legitimate triple `(method, params, auth)` replays verbatim against the same server forever (`RpcAuthHmacSoundness.md` T-2; `SECURITY.md` §S-001 "Replay of authenticated requests by MITM: NOT addressed in v2.16"). This document specifies the anti-replay extension that closes T-2 and proves it sound under the same assumption stack the base scheme already consumes. No source is modified by this document; it formalizes the wire-format extension, the server-side acceptance predicate, and the soundness argument so the implementation lands against a fixed specification rather than ad-hoc.
+**Status: specification + soundness proof.** The base HMAC-SHA-256 RPC-auth scheme is shipped (`src/rpc/rpc.cpp:127-138`; soundness in `RpcAuthHmacSoundness.md` T-1..T-5). Its one documented residual is **replay**: the `auth` field is a deterministic function of `(K, method, params)` only — no nonce, no timestamp, no sequence — so a captured legitimate triple `(method, params, auth)` replays verbatim against the same server forever (`RpcAuthHmacSoundness.md` T-2; `SECURITY.md` §S-001 "Replay of authenticated requests by MITM: NOT addressed in v2.16"). This document specifies the anti-replay extension that closes T-2 and proves it sound under the same assumption stack the base scheme already consumes. No source is modified by this document; it formalizes the wire-format extension, the server-side acceptance predicate, and the soundness argument so the implementation lands against a fixed specification rather than ad-hoc.
 
 The novelty relative to every sibling RPC-auth proof is the **freshness dimension**. `RpcAuthHmacSoundness.md` proves unforgeability + constant-time + secret-confidentiality of the *stateless* gate and explicitly leaves replay open (T-2). `S001RpcAuthSoundness.md` composes the stateless gate with the input-validation pipeline and routes replay to the **apply-layer** nonce gate (`NonceMonotonicity.md` FA-Apply-3) — but that backstop covers ONLY the five tx-carrying state-mutating methods (`send`/`stake`/`unstake`/`register`/`submit_tx`) plus `submit_equivocation` via idempotent re-apply (`EquivocationSlashingApply.md` T-E3); it provides **no** freshness for read methods and **no** RPC-layer freshness for any method (a replayed `submit_tx` is dropped at apply, but the server still pays parse + HMAC + dispatch + mempool-admit work on every replay). `F2RPCAuthEnvComposition.md` pins the secret-loading boundary, not freshness. None of these documents specifies a request-envelope nonce/timestamp, a server-side acceptance window, or proves the replay surface closed at the **RPC layer**. This document closes that gap. It is the freshness companion to the unforgeability proof, exactly as `S016InboundReceiptTimeOrdered.md` is the time-ordering companion to the cross-shard-receipt admission proofs.
 
@@ -14,13 +14,13 @@ The novelty relative to every sibling RPC-auth proof is the **freshness dimensio
 
 ### 1.1 The shipped stateless gate
 
-The shipped `verify_auth` (`src/rpc/rpc.cpp:112-129`) accepts a request `(method, params, auth)` iff
+The shipped `verify_auth` (`src/rpc/rpc.cpp:127-138`) accepts a request `(method, params, auth)` iff
 
 ```
 auth = hex(HMAC-SHA-256(K, canonical(method, params)))
 ```
 
-where `canonical(method, params) := method ‖ "|" ‖ params.dump()` (`src/rpc/rpc.cpp:52-58`) and the compare is the constant-time XOR-OR loop at `:124-127`. The acceptance predicate references **no** per-request freshness material: not a nonce, not a timestamp, not a sequence number, not any server-side per-secret state. This is exactly `RpcAuthHmacSoundness.md`'s observation in T-2.
+where `canonical(method, params) := method ‖ "|" ‖ params.dump()` (`src/rpc/rpc.cpp:52-58`) and the compare is the constant-time XOR-OR loop at `:120-123` in `auth_tag_verdict`, which first refuses a computed tag that is not 64 characters (S-118). The acceptance predicate references **no** per-request freshness material: not a nonce, not a timestamp, not a sequence number, not any server-side per-secret state. This is exactly `RpcAuthHmacSoundness.md`'s observation in T-2.
 
 ### 1.2 The replay attack (constructive)
 
@@ -108,7 +108,7 @@ The flag's default-off + must-set-on-external-bind shape matches the existing S-
 
 ### 3.2 Server acceptance predicate (the verify_fresh extension)
 
-The extended verify is a refinement of `verify_auth`: the constant-time HMAC compare is unchanged; (F1) and (F2) are added BEFORE the accept return. In pseudocode mirroring `src/rpc/rpc.cpp:112-129`:
+The extended verify is a refinement of `verify_auth`: the constant-time HMAC compare is unchanged; (F1) and (F2) are added BEFORE the accept return. In pseudocode mirroring `src/rpc/rpc.cpp:127-138`:
 
 ```
 verify_fresh(req):
@@ -253,7 +253,7 @@ The four findings are advisory; none invalidates T-1..T-5. They scope the specif
 
 ## 8. Status
 
-**Specification + proof only — no source modified by this document.** The base HMAC scheme it extends is shipped (`src/rpc/rpc.cpp:112-129`; `RpcAuthHmacSoundness.md`). The extension specified here (the `ts`/`nonce` envelope fields, the `canonical_v2` pre-image, the `verify_fresh` predicate with the `SEEN` cache, and the `rpc_auth_require_fresh` policy flag) is the implementation of `RpcAuthHmacSoundness.md` T-2's recommended follow-on and `SECURITY.md` §S-001's "Replay … NOT addressed in v2.16" line. The proof establishes that the extension closes the residual at the RPC layer (T-1), without weakening the base unforgeability bound (T-2), with tamper-evident freshness fields (T-3), under bounded replay-DoS (T-4), composing in front of the apply-layer nonce gate to cover all methods including reads (T-5).
+**Specification + proof only — no source modified by this document.** The base HMAC scheme it extends is shipped (`src/rpc/rpc.cpp:127-138`; `RpcAuthHmacSoundness.md`). The extension specified here (the `ts`/`nonce` envelope fields, the `canonical_v2` pre-image, the `verify_fresh` predicate with the `SEEN` cache, and the `rpc_auth_require_fresh` policy flag) is the implementation of `RpcAuthHmacSoundness.md` T-2's recommended follow-on and `SECURITY.md` §S-001's "Replay … NOT addressed in v2.16" line. The proof establishes that the extension closes the residual at the RPC layer (T-1), without weakening the base unforgeability bound (T-2), with tamper-evident freshness fields (T-3), under bounded replay-DoS (T-4), composing in front of the apply-layer nonce gate to cover all methods including reads (T-5).
 
 Estimated implementation effort (per `RpcAuthHmacSoundness.md` T-2's note): ~10 LOC in `verify_auth` for (F1)+(F3-v2), ~30 LOC for the window-bounded `SEEN` cache (mirroring the `S014RateLimiterSoundness.md` eviction sweep), ~5 LOC for the config flag + banner warning, ~80 LOC for the regression test (F-3). The cryptographic argument requires no new primitive — only the longer pre-image — so the security review reduces to confirming the predicate ordering (L-6) and the cache-bound (L-3) at implementation time.
 
@@ -278,7 +278,7 @@ Estimated implementation effort (per `RpcAuthHmacSoundness.md` T-2's note): ~10 
 ### Determ-internal references
 
 - `src/rpc/rpc.cpp:52-58` — `canonical_for_hmac` (the `canonical` this document extends to `canonical_v2`).
-- `src/rpc/rpc.cpp:112-129` — `verify_auth` (the predicate `verify_fresh` refines).
+- `src/rpc/rpc.cpp:127-138` — `verify_auth` (the predicate `verify_fresh` refines).
 - `src/rpc/rpc.cpp:166-187` — `handle_session` ordering (the rate-limit → parse → auth discipline L-6 mirrors).
 - `src/rpc/rpc.cpp:276-321` — client `rpc_call` (the site that would add `ts`/`nonce` to the request envelope + HMAC over `canonical_v2`).
 - `include/determ/net/rate_limiter.hpp` — the eviction-sweep pattern the `SEEN` prune (L-3) mirrors.

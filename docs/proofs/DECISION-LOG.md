@@ -8243,3 +8243,39 @@ changes.
 **Verification.** `ci_local.sh --docs-only` passes all 17 guards, the new one included;
 the security-ledger guard derives the new summary counts (Medium open 11, total 28). The
 default mode (build, FAST 341/0 and the same guards) passes on this tree.
+
+## 2026-09-25 — S-118 closed: an incomplete RPC tag never authenticates
+
+**Problem.** `RpcServer::verify_auth` compared the request's `auth` field with the tag
+`hmac_sha256_hex` computed, and that tag is empty when `determ_hmac_sha256` fails (an
+allocation failure) and truncated when `bytes_to_hex`'s stream cannot allocate. A client
+that sent the same empty or short string was authenticated (S-118, review R4-01; the fix's
+own review reproduced the truncated shape on the built daemon).
+
+**Change.** `determ::rpc::auth_tag_verdict(expected, got)` (`src/rpc/rpc.cpp`, declared in
+`rpc.hpp`) refuses a computed tag that is not 64 characters, then applies the existing
+length check and constant-time comparison; `verify_auth` returns it. A correct request is
+accepted exactly as before. No wire, consensus, client or configuration change.
+
+**Gate.** `determ test-rpc-auth-hmac` §13 (FAST, `tools/test_rpc_auth_hmac.sh`) calls the
+production verdict with ten assertions. Five mutants of the verdict, each rebuilt and run
+against the fresh binary, turn it red: no 64-character check, no length check on `auth`,
+accept-all, a loop that skips the last character, and `=` for `|=`. The gate does not
+assert that `verify_auth` calls the verdict: no in-process path fails the HMAC on demand,
+so that one line rests on review. RpcAuthHmacSoundness.md now cites the verdict (and the
+C99 HMAC in place of the OpenSSL call it still showed); RpcIngressGateAudit.md's
+unregistered observation points at S-118. The line citations of `verify_auth` and its
+compare that the move broke are corrected in the RPC proof documents and CLI-REFERENCE.md;
+other RPC line citations there were already stale before this change and are unchanged
+(`test_doc_citation_bounds` checks bounds, not content).
+
+**Review.** An independent review before commit found, besides the truncated-tag shape: two
+surviving mutants of the first test (fixed by the extension, truncation and last-nibble
+cases), stale comments and the coverage pins. It confirmed no other server-side tag
+comparison: `rpc_call`, the subscription client and the offline wallet/light `rpc-auth`
+tools fail closed on an HMAC error. It also found that a malformed `rpc_auth_secret` (odd
+length or non-hex) decodes to an empty key and silently disables authentication while
+`status` reports it enabled. That is outside this fix and is the next increment.
+
+**Verification.** `ci_local.sh` default on this tree: build, FAST 341/0 (the wrapper
+count is unchanged; `test-rpc-auth-hmac` grew from 16 to 26 assertions) and 17 guards.

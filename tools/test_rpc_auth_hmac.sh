@@ -3,10 +3,11 @@
 # unit test (pure functions, no sockets, FAST=1).
 #
 # The production verifier (RpcServer::verify_auth) and client signer
-# (rpc_call) live in src/rpc/rpc.cpp behind an asio io_context + Node,
-# so they can only be exercised end-to-end. This is the pure-function
-# complement that locks in the auth-field algebra those two surfaces
-# agree on:
+# (rpc_call) live in src/rpc/rpc.cpp behind a live transport + Node,
+# so they can only be exercised end-to-end; the verdict verify_auth
+# applies (determ::rpc::auth_tag_verdict) is called directly (item 17).
+# This is the pure-function complement that locks in the auth-field
+# algebra those two surfaces agree on:
 #
 #   canonical_for_hmac(method, params) = method + "|" + params.dump()
 #   auth_field = hex(HMAC-SHA-256(secret, canonical))
@@ -17,7 +18,7 @@
 #   * tools/test_rpc_hmac_auth.sh — end-to-end RPC HMAC auth on a live
 #     cluster (missing / wrong / correct auth tag)
 #
-# 17 assertions covering:
+# 26 assertions covering:
 #
 #   1-2.  Canonical message is EXACTLY "method|params.dump()" (single
 #         '|' separator, method first)
@@ -35,6 +36,11 @@
 #   15.   Sensitivity: any params field change → different tag
 #         (tamper-evident)
 #   16.   Auth-disabled signal: empty secret hex decodes to empty key
+#   17.   S-118, the PRODUCTION verdict (10 assertions): a computed tag
+#         that is not 64 characters (empty or truncated) refuses every
+#         client value, including the same short string; a complete tag
+#         is accepted only on an exact match (first/last nibble, one byte
+#         appended or removed, and an empty field are refused)
 #
 # Run from repo root: bash tools/test_rpc_auth_hmac.sh
 set -u

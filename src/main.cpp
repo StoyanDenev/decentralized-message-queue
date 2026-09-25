@@ -10198,8 +10198,9 @@ pre_chain.append(b3);
     // S-001 / v2.16 RPC HMAC-SHA-256 authentication contract. The
     // production verifier (RpcServer::verify_auth) and client signer
     // (rpc_call) both live in src/rpc/rpc.cpp behind a live transport
-    // + Node, so they cannot be exercised in-process. This
-    // test re-implements the SAME auth-field algebra from rpc.cpp —
+    // + Node, so they cannot be exercised in-process; only the verdict
+    // they apply, determ::rpc::auth_tag_verdict, is called directly (§13,
+    // S-118). This test re-implements the SAME auth-field algebra from rpc.cpp —
     //
     //   canonical_for_hmac(method, params) = method + "|" + params.dump()
     //   auth_field = hex(HMAC-SHA-256(secret, canonical))
@@ -10412,6 +10413,42 @@ pre_chain.append(b3);
         {
             check(from_hex("").empty(),
                   "empty secret hex decodes to empty key (auth-disabled signal)");
+        }
+
+        // 13. S-118: the PRODUCTION verdict (determ::rpc::auth_tag_verdict, the
+        //     function RpcServer::verify_auth applies). An expected tag that is
+        //     not 64 characters (empty: the HMAC failed; shorter: the hex
+        //     encoding was cut short) refuses every client value, including the
+        //     same short string. A complete tag is accepted only when `auth`
+        //     equals it in full: no prefix, extension or last-nibble change.
+        {
+            namespace rpcns = determ::rpc;
+            std::string tag = hmac_sha256_hex(secret,
+                                  canonical_for_hmac("head", json::object()));
+            auto flip = [](std::string t, size_t i) {
+                t[i] = (t[i] == 'a') ? 'b' : 'a';
+                return t;
+            };
+            const std::string prefix = tag.substr(0, 15);
+            check(tag.size() == 64, "fixture tag is 64 hex characters");
+            check(rpcns::auth_tag_verdict("", "") == "auth_failed",
+                  "S-118: an empty expected tag (HMAC failure) refuses an empty auth field");
+            check(rpcns::auth_tag_verdict("", tag) == "auth_failed",
+                  "S-118: an empty expected tag refuses a well-formed auth field");
+            check(rpcns::auth_tag_verdict(prefix, prefix) == "auth_failed",
+                  "S-118: a truncated expected tag refuses the same truncated auth field");
+            check(rpcns::auth_tag_verdict(tag, tag).empty(),
+                  "production verdict accepts a matching tag");
+            check(rpcns::auth_tag_verdict(tag, flip(tag, 0)) == "auth_failed",
+                  "production verdict refuses a first-nibble difference");
+            check(rpcns::auth_tag_verdict(tag, flip(tag, 63)) == "auth_failed",
+                  "production verdict refuses a last-nibble difference");
+            check(rpcns::auth_tag_verdict(tag, tag + "0") == "auth_failed",
+                  "production verdict refuses the tag with a byte appended");
+            check(rpcns::auth_tag_verdict(tag, tag.substr(0, 63)) == "auth_failed",
+                  "production verdict refuses the tag missing its last byte");
+            check(rpcns::auth_tag_verdict(tag, "") == "auth_failed",
+                  "production verdict refuses an empty auth field against a real tag");
         }
 
         std::cout << "\n  " << (fail == 0 ? "PASS" : "FAIL")

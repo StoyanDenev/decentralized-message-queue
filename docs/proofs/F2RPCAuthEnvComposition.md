@@ -32,7 +32,7 @@ The composed flow has six discrete steps from operator action to request accepta
 
 5. **Client request — env-var path** (the path that DOES consume the env-var). Operator runs a CLI subcommand backed by `rpc_call` at `src/rpc/rpc.cpp:276–321`. The client at line 292 takes the explicit `auth_secret_hex` argument; if empty, falls back at line 294 to `std::getenv("DETERM_RPC_AUTH_SECRET")`. If both are empty, no `auth` field is added to the request; if either is set, the client computes `auth = hex(HMAC-SHA-256(hex_to_bytes(K_hex), method ‖ "|" ‖ params.dump()))` (lines 297–307) and embeds it in the request.
 
-6. **Server verify.** The server at `src/rpc/rpc.cpp:179` calls `verify_auth` (lines 112–129); if `auth_secret_.empty()` returns `""` (pass — auth disabled). Otherwise: recompute the expected HMAC over the canonical bytes, constant-time compare to the request's `auth` field, return `""` on match or `"auth_failed"` on mismatch. The dispatch at line 184 fires only on the `""` (pass) path.
+6. **Server verify.** The server at `src/rpc/rpc.cpp:179` calls `verify_auth` (lines 127–138); if `auth_secret_.empty()` returns `""` (pass — auth disabled). Otherwise: recompute the expected HMAC over the canonical bytes, constant-time compare to the request's `auth` field, return `""` on match or `"auth_failed"` on mismatch. The dispatch at line 184 fires only on the `""` (pass) path.
 
 ### 1.2 The asymmetry — env-var loading lives only on the client
 
@@ -161,7 +161,7 @@ The reduction: env-var loading soundness ⇒ (OS per-process env-var ACL is effe
 
 ### Theorem T-2 (Constant-time compare)
 
-**Statement.** The auth comparison at `src/rpc/rpc.cpp:122–128` is constant-time per `RpcAuthHmacSoundness.md` T-3 + L-3. No timing side channel reveals per-byte information about `K`. The constant-time property is preserved across the loading-boundary: regardless of how `K` was loaded (env-var, config-file, future passphrase-decryption), the compare path is identical.
+**Statement.** The auth comparison in `auth_tag_verdict` at `src/rpc/rpc.cpp:117–124` is constant-time per `RpcAuthHmacSoundness.md` T-3 + L-3. No timing side channel reveals per-byte information about `K`. The constant-time property is preserved across the loading-boundary: regardless of how `K` was loaded (env-var, config-file, future passphrase-decryption), the compare path is identical.
 
 **Proof.** Cited from `RpcAuthHmacSoundness.md` T-3 (Constant-Time Comparison) and L-3 (`verify_auth` HMAC compare is constant-time). The compare logic is independent of the loading path: it operates on the in-memory `auth_secret_` byte vector after `hex_to_bytes` decoding in the constructor. The constructor's logic at `src/rpc/rpc.cpp:79–90` calls `hex_to_bytes(auth_secret_hex)` regardless of which source produced `auth_secret_hex`. The decode is itself constant-time per the `hex_to_bytes` helper (it does not vary timing on the value of the hex digits, only on the length — which is the documented 64 hex chars / 32 bytes for the recommended secret).
 
@@ -174,7 +174,7 @@ The post-load compare path is byte-for-byte the same across loading paths. T-2 i
 **Proof.** The HMAC primitive's soundness is independent of the loading boundary. The reduction is:
 
 1. **Pre-condition (from T-1).** The env-var loading path placed the operator-set `K_hex` into the client's `effective_secret` string. The config-file loading path placed the operator-stored `rpc_auth_secret` into the daemon's `Config::rpc_auth_secret` field, then into `auth_secret_` via the constructor's `hex_to_bytes`.
-2. **HMAC computation.** Client: `hmac_sha256_hex(key, canonical_for_hmac(method, params))` at `src/rpc/rpc.cpp:305–306`. Server: identical call at `src/rpc/rpc.cpp:119–120` inside `verify_auth`. Both invocations use OpenSSL's `HMAC(EVP_sha256(), ...)` per `RpcAuthHmacSoundness.md` §3.
+2. **HMAC computation.** Client: `hmac_sha256_hex(key, canonical_for_hmac(method, params))` at `src/rpc/rpc.cpp:305–306`. Server: identical call at `src/rpc/rpc.cpp:134–135` inside `verify_auth`. Both invocations use the C99 `determ_hmac_sha256` per `RpcAuthHmacSoundness.md` §3.
 3. **Verify.** Constant-time compare per T-2.
 4. **Soundness.** By `RpcAuthHmacSoundness.md` T-1, the probability that an attacker without `K` produces a valid `(method*, params*, auth*)` triple is `≤ 2^-256 + q² / 2^256` per attempt — negligible for any operational `q`.
 
@@ -186,7 +186,7 @@ The single-call reduction: `T-3 ⇐ T-1 ∧ RpcAuthHmacSoundness.md T-1`. Loadin
 
 **Statement.** When the env-var `DETERM_RPC_AUTH_SECRET` is missing AND no config-file entry for `rpc_auth_secret` exists, the daemon's `auth_secret_` field is empty. The shipped behavior is:
 
-1. `verify_auth` at `src/rpc/rpc.cpp:113` returns `""` (pass) unconditionally on every request. **This is documented "silent no-auth" — the daemon accepts unauthenticated requests.**
+1. `verify_auth` at `src/rpc/rpc.cpp:128` returns `""` (pass) unconditionally on every request. **This is documented "silent no-auth" — the daemon accepts unauthenticated requests.**
 2. The startup banner at `src/rpc/rpc.cpp:98–104` emits `[WARNING: external bind without HMAC auth — set rpc_auth_secret in config or enable rpc_localhost_only]` IFF `!localhost_only && auth_secret_.empty()`.
 3. The default `rpc_localhost_only=true` per `src/node/node.cpp:75` (defensive default — legacy configs without the field get the secure default) restricts the no-auth surface to loopback. An attacker without same-host access cannot reach the RPC port; an attacker WITH same-host access is the cross-tenant adversary that S-001 Option 3 (HMAC) was meant to defend against — but it is not active here.
 
@@ -194,7 +194,7 @@ The shipped behavior is therefore (b)-like ("bind only to localhost") per the us
 
 **Audit citation.** The audit pins the actual code paths:
 
-- `src/rpc/rpc.cpp:112-113`: `if (auth_secret_.empty()) return ""; // Auth disabled, pass.`
+- `src/rpc/rpc.cpp:127-128`: `if (auth_secret_.empty()) return ""; // Auth disabled, pass.`
 - `src/rpc/rpc.cpp:98-104`: external-bind warning emit IFF `!localhost_only && auth_secret_.empty()`.
 - `src/node/node.cpp:75`: `c.rpc_localhost_only = j.value("rpc_localhost_only", true);` — default `true`.
 
@@ -371,7 +371,7 @@ The five findings are advisory; none invalidates T-1..T-5. They are surfaced for
 - **`src/rpc/rpc.cpp:60–70`** — `hmac_sha256_hex` OpenSSL HMAC primitive wrapper.
 - **`src/rpc/rpc.cpp:79–90`** — `RpcServer` constructor; loads `auth_secret_` from the `auth_secret_hex` parameter via `hex_to_bytes`.
 - **`src/rpc/rpc.cpp:95–104`** — Startup banner; length-only secret emission + external-bind warning emit.
-- **`src/rpc/rpc.cpp:112–129`** — `verify_auth` (T-4 audit's primary object).
+- **`src/rpc/rpc.cpp:113–138`** — `auth_tag_verdict` and `verify_auth` (T-4 audit's primary object).
 - **`src/rpc/rpc.cpp:142–195`** — `handle_session` (T-5 canonical control flow at the heart of the layer ordering).
 - **`src/rpc/rpc.cpp:172`** — Layer D rate-limit consume call.
 - **`src/rpc/rpc.cpp:176`** — Layer B `json::parse` call.
