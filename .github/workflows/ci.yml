@@ -1,8 +1,8 @@
 # Determ CI — the push-triggered form of tools/ci_local.sh:
 # shared C++ binaries + FAST + doc guards on Linux and Windows/MSVC;
 # a Linux job for the C99 targets (strict GCC and Clang builds, ASan + UBSan,
-# isolated mutants, doc guards); UBSan over the C++ consensus surface; and TLC
-# over docs/proofs/tla.
+# isolated mutants, doc guards, the freestanding foundation examples); UBSan
+# over the C++ consensus surface; and TLC over docs/proofs/tla.
 #
 # The local WSL2 run via tools/ci_local.sh is the primary gate on the dev box;
 # this workflow is the pushed mirror of it (repo:
@@ -79,6 +79,12 @@ jobs:
         run: bash tools/ci_local.sh --c99-sanitize --jobs 4
       - name: Isolated C99 mutation gates
         run: bash tools/ci_local.sh --c99-mutants --jobs 4
+      # C99-MINIX-PORT 11.5: fresh GCC and Clang builds of the freestanding
+      # examples, their assertions, undefined-symbol audit and isolated
+      # mutants. A missing compiler or sanitizer runtime is printed as NOT
+      # VERIFIED in the log; the step still passes, and report.json is not kept.
+      - name: Freestanding foundation examples
+        run: bash tools/ci_local.sh --freestanding-examples
       - name: Documentation guards
         run: bash tools/ci_local.sh --docs-only
 

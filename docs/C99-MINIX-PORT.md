@@ -450,7 +450,11 @@ code and measured side channels. The existing `determ_secure_zero` calls libc
 
 Run `bash tools/ci_local.sh --freestanding-examples`. It builds the examples freshly,
 runs functional/boundary checks and isolated falsify-on-mutant cases, and retains
-compiler metadata, emitted assembly and dependency evidence. Instrumented tests of
+compiler metadata, emitted assembly and dependency evidence. The `c99` job of
+`.github/workflows/ci.yml` runs it on pushes to `main`, pull requests and manual runs
+(ubuntu-24.04, x86-64, the runner's GCC and Clang). A toolchain or sanitizer runtime it
+lacks is printed as NOT VERIFIED and the step still passes; CI keeps the log, not the
+evidence directory, so a qualification record needs a local run. Instrumented tests of
 loop visits can detect an introduced early return but do not prove constant time
 for the uninstrumented binary. Hosted test allocations and sanitizer runtimes are
 test apparatus, not linked target dependencies. These checks do not boot a MicroVM.

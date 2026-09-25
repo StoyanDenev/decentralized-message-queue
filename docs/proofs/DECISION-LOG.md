@@ -8377,3 +8377,34 @@ above.
 **Verification.** On this tree: `ci_local.sh --c99` with GCC and with Clang, `--c99-sanitize`
 (ASan + UBSan), the default mode (build, FAST 341/0, 17 guards) and `--c99-mutants`
 (211/211 rejected after successful builds).
+
+## 2026-09-25 — CI readiness: a line-ending-proof coverage guard, freestanding examples in CI
+
+**Problem.** The coverage guard hashed each pinned file's working-tree bytes with `git
+hash-object`, which applies the checkout's line-ending conversion without the index's
+knowledge of files stored with CRLF. On the Windows job (`core.autocrlf=true`) the two
+reviewed files stored with CRLF, `include/determ/crypto/pedersen/balance.h` and
+`src/crypto/mldsa/zetas.inc`, hash differently from their pins, so the guard, and with it
+the Windows job, would fail on an unchanged tree; a clone checked out with
+`core.autocrlf=true` reproduces it. Separately, the freestanding foundation examples
+(C99-MINIX-PORT §11.5) had a `ci_local` mode but no CI step.
+
+**Change.** `tools/audit_coverage.py` takes each pinned file's blob id from the index and
+its unstaged changes from `git diff --no-renames`, which applies line-ending conversion with
+the index in view, as `git status` does; a pinned file is stale when either differs, or
+when its index entry could hide an edit (assume-unchanged, skip-worktree, an unmerged
+stage). The `c99` job gains a `--freestanding-examples` step; like the local mode it prints
+a missing toolchain or sanitizer runtime as NOT VERIFIED and passes. No product code
+changes.
+
+**Evidence.** In a clone with `core.autocrlf=true` the previous guard reports both CRLF
+files stale and the new one passes, also after touching every file so that `git diff`
+compares contents; the new one fails on a staged or an unstaged edit of a reviewed file and
+on an edit hidden by assume-unchanged or skip-worktree. An independent review found no
+other change since 0cbc3861 likely to break the Windows job and estimated the `c99` job at
+about 23 minutes on two cores, within its 45-minute limit. The freestanding gate passed locally on this container (GCC and
+Clang at -O2/-O3; Clang's sanitizer probe reported NOT VERIFIED, as designed).
+
+**Verification.** `ci_local.sh --docs-only` (17 guards) and `--freestanding-examples` (GCC
+and Clang at -O2/-O3, each with 6 mutants rejected; the local Clang lacks a sanitizer
+runtime) on this tree.

@@ -4,9 +4,12 @@
 Every tracked file must match a rule in tools/audit_coverage.tsv. REVIEWED and
 PARTIAL rules name one exact path and the git blob that was reviewed, and take
 precedence; otherwise the first matching pattern wins, and `*` also matches `/`.
-A reviewed file whose working-tree content no longer hashes to its pinned blob
-is STALE: the guard fails until the change is reviewed and the row re-pinned, or
-the row is downgraded to PENDING. A changed file is never counted as reviewed.
+A reviewed file is STALE when its staged blob differs from the pin, git reports
+an unstaged change to it, or git could hide one (assume-unchanged, skip-worktree
+or an unmerged entry): the guard fails until the change is reviewed and the row
+re-pinned, or the row is downgraded to PENDING. A changed file is never counted
+as reviewed. Blob ids come from the index and changes from `git diff`, so
+line-ending conversion on checkout (core.autocrlf) cannot fake a change.
 
   --check (default)  exit 1 on a file without a row, a malformed or duplicated
                      rule, a literal row naming an untracked path, or a stale
@@ -71,19 +74,28 @@ def main(argv):
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     try:
         rules, errors = load_rules(os.path.join(root, "tools", "audit_coverage.tsv"))
-        tracked = sorted(p for p in git(root, "ls-files", "-z").split("\0") if p)
+        tracked = sorted(set(p for p in git(root, "ls-files", "-z").split("\0") if p))
         exact = {}
         for rule in rules:
             if rule[3] in EXACT:
                 if rule[1] in exact:
                     errors.append("line %d: duplicate exact row for %s" % (rule[0], rule[1]))
                 exact[rule[1]] = rule
-        pinned = [p for p in tracked if p in exact]
-        hashes = git(root, "hash-object", "--stdin-paths",
-                     stdin="".join(p + "\n" for p in pinned).encode("utf-8")).split()
-    except (OSError, subprocess.CalledProcessError) as error:
+        # "<tag> <mode> <blob> <stage>\t<path>": tag H is an ordinary entry;
+        # h/S (assume-unchanged, skip-worktree) hide working-tree edits from
+        # git diff, and a nonzero stage is an unresolved merge.
+        current, hidden = {}, set()
+        for entry in git(root, "ls-files", "-s", "-v", "-z").split("\0"):
+            if entry:
+                meta, path = entry.split("\t", 1)
+                tag, _mode, blob, stage = meta.split()
+                if path in exact:
+                    current[path] = blob
+                    if tag != "H" or stage != "0":
+                        hidden.add(path)
+        unstaged = set(p for p in git(root, "diff", "--no-renames", "--name-only", "-z").split("\0") if p)
+    except (OSError, subprocess.CalledProcessError, ValueError, IndexError) as error:
         return fail("cannot read the rules or the git checkout: %s" % error)
-    current = dict(zip(pinned, hashes))
     for path in exact:
         if path not in current:
             errors.append("exact row names an untracked path: %s" % path)
@@ -98,7 +110,7 @@ def main(argv):
         used.add(rule[0])
         number, pattern, surface, disposition, blob, note = rule
         status = disposition
-        if disposition in EXACT and current.get(path) != blob:
+        if disposition in EXACT and (current.get(path) != blob or path in unstaged or path in hidden):
             status = "STALE"
             stale.append(path)
         counts[status] += 1
