@@ -8503,3 +8503,33 @@ only by UBSan in the sanitizer gate.
 `--c99-sanitize`, the nine SHA-512/HMAC mutation cases (9/9 rejected by the assertion) and
 the default mode (build, FAST, 17 guards). The full mutation gate runs on the session's
 final tree.
+
+## 2026-09-25 — Session validation of the final tree (§14.1 record and §14.2 increments)
+
+**Record.** This session committed, each after an independent review and its own gates:
+the §14.1 coverage and hypothesis record (1bc21e3f), S-118 (f7f2b34c), S-122 (b8665c9d),
+heap-free HMAC-SHA-256/HKDF/PBKDF2 (c195a665), CI readiness (a3435858), the block store's
+R1-01/R1-02 (e23f0b7c) and streaming SHA-512 with heap-free HMAC-SHA-512 (54ae4d96). Two
+entries left the full mutation gate and the default mode to the final tree; both ran
+there.
+
+**Evidence on 54ae4d96's code.** Every mode of the GitHub workflow except the Windows job:
+the default mode (build, FAST 341/0, 17 guards); `--c99` with GCC and with Clang (27
+targets); `--c99-sanitize`; `--c99-mutants` (221/221 rejected after successful builds; the
+two kqueue-only cases are skipped on Linux); `--freestanding-examples` (GCC and Clang at
+-O2/-O3, 6 mutants each; the local Clang lacks a sanitizer runtime and reports NOT
+VERIFIED, as designed); `--docs-only`; and `--sanitize` (UBSan, 44 subcommands clean). One
+deviation, in `--sanitize` only: this container's memory limit (5.8 GiB) OOM-killed the
+UBSan compile of `src/main.cpp` at the gate's `-O1` three times, also with variable
+tracking off, so `main.cpp.o` was compiled by hand at `-O0` with otherwise identical flags
+and the same `-fsanitize=undefined` instrumentation; every other translation unit,
+`determ-cryptotest` and the run itself are the unmodified gate. The workflow's `ubsan` job
+compiles at `-O1` on its larger runner. `--tla` last ran at b8665c9d over every configured
+model; no TLA input or `ci_local.sh` changed since. The Windows job was not run here; the
+line-ending failure it would have hit is fixed in a3435858 and was tested with
+`core.autocrlf=true`.
+
+**Not established.** 1,363 of 1,570 tracked files remain PENDING in the §14.1 record; S-120
+waits for the owner's -v3 transcript decision; the residuals each entry records stay open,
+and the next increments are those CLAUDE.md lists. Nothing is pushed; no push, merge or
+deployment is authorized.
