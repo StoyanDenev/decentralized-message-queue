@@ -166,6 +166,58 @@ static void hmac_stream_tests(void) {
     CHECK(hmac_calls == 0u && alloc_calls == 0u);
 }
 
+static void sha512_stream_tests(void) {
+    static const char msg[] = "what do ya want for nothing?";
+    static const char big[] = "Test Using Larger Than Block-Size Key - Hash Key First";
+    determ_sha512_ctx sc;
+    uint8_t m[300], a[64], b[64], longkey[131], edge[129];
+    size_t i;
+    /* hmac.c and sha512.c are built with the allocator hooked, as in
+     * hmac_stream_tests: nothing below may allocate. */
+    reset(); forbid_alloc = 1;
+    for (i = 0; i < sizeof m; ++i) m[i] = (uint8_t)(i * 7u + 3u);
+    /* 300 bytes span two blocks and a partial one; every split, with an empty
+     * NULL update between, equals the one-shot, which equals the reference. */
+    determ_sha512(m, sizeof m, a);
+    equals_hex(a, 64u, "46e56ad30db9ef50f8b6762ba55839737f3fba34ab47863c9daff7b3f58f97fe3465a52dd364560db47f802909ced49093322621ea0aebf8e0696b85ca8f81f0");
+    for (i = 0; i <= sizeof m; ++i) {
+        memset(&sc, 0xa5, sizeof sc);           /* init must reset a dirty ctx */
+        determ_sha512_init(&sc);
+        CHECK(sc.total == 0u && sc.buflen == 0u);
+        determ_sha512_update(&sc, m, i);
+        determ_sha512_update(&sc, NULL, 0u);
+        determ_sha512_update(&sc, m + i, sizeof m - i);
+        determ_sha512_final(&sc, b);
+        CHECK(memcmp(a, b, 64u) == 0);
+    }
+    for (i = 0; i < sizeof sc; ++i) CHECK(((const uint8_t *)&sc)[i] == 0u);
+    /* Every length 0..300 reaches both padding branches at every remainder:
+     * the SHA-512 of the concatenated prefix digests equals the reference. */
+    determ_sha512_init(&sc);
+    for (i = 0; i <= sizeof m; ++i) {
+        determ_sha512(m, i, b);
+        determ_sha512_update(&sc, b, 64u);
+    }
+    determ_sha512_final(&sc, b);
+    equals_hex(b, 64u, "404431b1c0eac12729b20176c61b0e1c561b6b20d2ecbb7ee1126c361943d724d7c0814a8daf5c3a2a7d3e431a0aaf58c12f96d8c3370582b777fd375c3c972f");
+    /* HMAC-SHA-512 streams too: RFC 4231 cases 2 and 6, an aliased output,
+     * and the block-size edge (a 128-byte key is padded, 129 bytes hashed). */
+    CHECK(determ_hmac_sha512((const uint8_t *)"Jefe", 4u, (const uint8_t *)msg, 28u, a) == 0);
+    equals_hex(a, 64u, "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737");
+    memcpy(b, msg, 28u);
+    CHECK(determ_hmac_sha512((const uint8_t *)"Jefe", 4u, b, 28u, b) == 0);
+    CHECK(memcmp(a, b, 64u) == 0);
+    memset(longkey, 0xaa, sizeof longkey);
+    CHECK(determ_hmac_sha512(longkey, sizeof longkey, (const uint8_t *)big, 54u, a) == 0);
+    equals_hex(a, 64u, "80b24263c7c1a3ebb71493c1dd7be8b49b46d1f41b4aeec1121b013783f8f3526b56d037e05f2598bd0fd2215d6a1e5295e64f73f63f0aec8b915a985d786598");
+    for (i = 0; i < sizeof edge; ++i) edge[i] = (uint8_t)i;
+    CHECK(determ_hmac_sha512(edge, 128u, (const uint8_t *)msg, 28u, a) == 0);
+    equals_hex(a, 64u, "45a2353553c24eb6dc843fa22df01bec0a487ca3c7fe017d2d7bec8e7714686d2d9ab5a2817902eac0a6a50bcc8265f00308b8258c903c2ec7f7e4305d546cf4");
+    CHECK(determ_hmac_sha512(edge, 129u, (const uint8_t *)msg, 28u, a) == 0);
+    equals_hex(a, 64u, "6d05f465c0d707398c5a152d04e8696dbe05f6d9f9fdaf81a745c2698b263f4323fac365a42c46c8687c5e71fc955a119205c016b3c5d5629c309e4f78b98171");
+    CHECK(alloc_calls == 0u);
+}
+
 static void kdf_tests(void) {
     static uint8_t wide[8161];
     uint8_t ikm[22], salt[13], info[10], out[64];
@@ -442,6 +494,7 @@ static void opaque_known_answer(void) {
 
 int main(void) {
     hmac_stream_tests();
+    sha512_stream_tests();
     kdf_tests();
     preflight_tests();
     opaque_tests();

@@ -56,9 +56,10 @@ At the audit the eight heap-using crypto files were `argon2/argon2id.c`, `ed2551
 and `chacha20/chacha20_poly1305.c`, all beneath `src/crypto/`. Ed25519 uses its
 bounded stack path for the current short C99 transfer preimage, but retains a
 heap fallback for larger messages. Since 2026-09-25 HMAC-SHA-256 streams on the
-SHA-256 engine and HKDF and PBKDF2 use it, so `hkdf.c` and `pbkdf2.c` no longer
-allocate and `hmac.c` does so only for HMAC-SHA-512: six of the eight remain
-(DECISION-LOG "Heap-free HMAC-SHA-256, HKDF and PBKDF2"). Network peers, reactor slots, HTTP clients,
+SHA-256 engine and HKDF and PBKDF2 use it, and HMAC-SHA-512 streams on a new
+incremental SHA-512 engine, so `hmac.c`, `hkdf.c` and `pbkdf2.c` no longer
+allocate: five of the eight remain (DECISION-LOG "Heap-free HMAC-SHA-256, HKDF
+and PBKDF2" and "Streaming SHA-512 and heap-free HMAC-SHA-512"). Network peers, reactor slots, HTTP clients,
 consensus state and pending-ledger entries already use bounded storage; there is
 no dynamically allocated peer object to replace with another arena.
 

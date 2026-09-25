@@ -34,7 +34,11 @@ HKDF fails only on its RFC output bound and PBKDF2 only on zero iterations or
 its RFC bound, before writing. PBKDF2 keys the HMAC once per password.
 Outputs are unchanged: RFC 4231, 5869 and 7914 vectors in
 `test-c99-crypto-bounds` and the OpenSSL cross-check in `test-sha2-c99`.
-HMAC-SHA-512 still copies into a heap buffer. Removing allocation does not
+HMAC-SHA-512 now streams too, on an incremental SHA-512 engine
+(`determ_sha512_init`/`update`/`final`) that the one-shot `determ_sha512`
+wraps, so the existing SHA-512 and Ed25519 gates exercise the new engine;
+its split, padding-edge and HMAC KATs and the allocation hook are in
+`test-c99-crypto-bounds`. Removing allocation does not
 admit these files to the target; the other admission obligations stand.
 
 **PQ/identity planning extension (2026-09-25).**
@@ -871,8 +875,9 @@ Original plan (retained):
   P-256 DH commutativity + compress round-trip + OPRF protocol identity +
   VOPRF tamper/wrong-mode rejects; ML-DSA keygen→sign→verify round-trip == raw
   C for all three sets, with tamper + short-signature rejection).
-- Remaining for full §3.11: RAII incremental/streaming state (BLAKE2b first —
-  the only shipped streaming C API), the caller-refactor mechanical-edit test
+- Remaining for full §3.11: RAII incremental/streaming state over the shipped
+  streaming C APIs (BLAKE2b, the SHA-3 sponge, SHA-256/512, HMAC-SHA-256),
+  the caller-refactor mechanical-edit test
   (lands with §3.15), and umbrella rows for §3.7/§3.9a as they ship.
 
 ### 3.12 Constant-time verification framework — **SEEDED** (in-house probe shipped; vendoring still gated)

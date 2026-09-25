@@ -842,8 +842,9 @@ These are verified entry points for the future audit, not its completed coverage
   branches. Never claim an attacker-supplied length proves remote exploitability
   without the ingress-to-copy path and allocation/capacity preconditions.
 - C99 network pools are already static and their callback lifetime fixes are
-  recorded in ADR-006. C++ containers/ownership remain to be audited; eight crypto
-  C files, `src/dapp/d5draw.c` and `dapps/d5-random-selection/d5rp.c` still allocate. No heap does not imply no libc,
+  recorded in ADR-006. C++ containers/ownership remain to be audited; five crypto
+  C files (eight at the audit; the SHA-2 family stopped allocating 2026-09-25),
+  `src/dapp/d5draw.c` and `dapps/d5-random-selection/d5rp.c` still allocate. No heap does not imply no libc,
   correct object lifetime or bounded stack use.
 - Missing mesh handshake deadlines, HTTP idle-slot exhaustion and descriptor
   exhaustion spins are recorded OPEN in SECURITY.md. Inventory all admission,

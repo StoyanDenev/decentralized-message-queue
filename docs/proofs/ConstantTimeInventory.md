@@ -50,9 +50,11 @@ in §4.1 rather than re-litigated per module. This includes password length in
 PBKDF2/Argon2id: an observer who can time the KDF learns `pwdlen` — the standard
 posture for password KDFs, inherited from the same contract.
 
-Heap allocations (`malloc` in `hmac.c`, `hkdf.c`, `pbkdf2.c`, `ed25519.c` sign/
-verify, `frost.c`) are sized from public lengths only, so allocator timing leaks
-nothing beyond those lengths.
+Heap allocations (in `argon2id.c`, `chacha20_poly1305.c`, `p256.c`,
+`pedersen/balance.c` and the `ed25519.c` sign/verify fallback; `hmac.c`, `hkdf.c`
+and `pbkdf2.c` stopped allocating 2026-09-25 and `frost.c` was removed) are sized
+from public lengths, counts or cost parameters only, so allocator timing leaks
+nothing beyond those values.
 
 ### 1.3 The shared §3.10 primitives
 

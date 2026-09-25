@@ -69,39 +69,81 @@ static void sha512_block(uint64_t h[8], const uint8_t p[128]) {
     determ_secure_zero(w, sizeof w);
 }
 
-void determ_sha512(const uint8_t *data, size_t len, uint8_t out[64]) {
-    uint64_t h[8] = {
+/* ── Incremental engine ───────────────────────────────────────────────────────
+ * The streaming init/update/final form, mirroring SHA-256's. The one-shot below
+ * is a thin wrapper, so the CAVP + OpenSSL gates that validate determ_sha512
+ * (and every Ed25519 vector built on it) validate this engine. */
+
+void determ_sha512_init(determ_sha512_ctx *ctx) {
+    static const uint64_t H0[8] = {
         0x6a09e667f3bcc908ULL, 0xbb67ae8584caa73bULL,
         0x3c6ef372fe94f82bULL, 0xa54ff53a5f1d36f1ULL,
         0x510e527fade682d1ULL, 0x9b05688c2b3e6c1fULL,
         0x1f83d9abfb41bd6bULL, 0x5be0cd19137e2179ULL
     };
-    uint64_t bitlen = (uint64_t)len * 8u;
-    size_t full = len / 128u;
-    size_t rem;
-    size_t padlen;
+    memcpy(ctx->h, H0, sizeof H0);
+    ctx->total  = 0u;
+    ctx->buflen = 0u;
+}
+
+void determ_sha512_update(determ_sha512_ctx *ctx, const uint8_t *data, size_t len) {
+    /* An empty update is a no-op, so `data` may be NULL. */
+    if (len == 0) return;
+    ctx->total += len;
+    /* Top up a pending partial block first. */
+    if (ctx->buflen) {
+        size_t need = 128u - ctx->buflen;
+        size_t take = (len < need) ? len : need;
+        memcpy(ctx->buf + ctx->buflen, data, take);
+        ctx->buflen += take;
+        data += take;
+        len  -= take;
+        if (ctx->buflen == 128u) {
+            sha512_block(ctx->h, ctx->buf);
+            ctx->buflen = 0u;
+        }
+    }
+    /* Full blocks straight from the input (no copy). */
+    while (len >= 128u) {
+        sha512_block(ctx->h, data);
+        data += 128u;
+        len  -= 128u;
+    }
+    if (len) {
+        memcpy(ctx->buf, data, len);
+        ctx->buflen = len;
+    }
+}
+
+void determ_sha512_final(determ_sha512_ctx *ctx, uint8_t out[64]) {
+    /* The length field is 128 bits; inputs here are < 2^61 bytes, so the high
+     * 64 bits are zero (covered by the memset) and only the low 64 hold it. */
+    uint64_t bitlen = ctx->total * 8u;
+    size_t rem = ctx->buflen;
+    size_t padlen = (rem < 112u) ? 128u : 256u;
     uint8_t tail[256];
-    size_t i, j;   /* size_t (not unsigned): the block loop counts up to `full`
-                    * (a size_t); an `unsigned` counter would wrap before reaching
-                    * `full` for inputs >= 512 GiB and never terminate. */
+    size_t i, j;
 
-    for (i = 0; i < full; i++) sha512_block(h, data + i * 128u);
-
-    rem = len - full * 128u;
-    if (rem) memcpy(tail, data + full * 128u, rem);
+    if (rem) memcpy(tail, ctx->buf, rem);
     tail[rem] = 0x80u;
-    /* The length field is 128 bits; messages here are < 2^64 bits, so the high
-     * 64 bits are zero (covered by the memset) and only the low 64 hold bitlen. */
-    padlen = (rem < 112u) ? 128u : 256u;
     memset(tail + rem + 1u, 0, padlen - rem - 1u - 8u);
     for (i = 0; i < 8u; i++)
         tail[padlen - 1u - i] = (uint8_t)(bitlen >> (8u * i));
-    sha512_block(h, tail);
-    if (padlen == 256u) sha512_block(h, tail + 128u);
+    sha512_block(ctx->h, tail);
+    if (padlen == 256u) sha512_block(ctx->h, tail + 128u);
 
     for (i = 0; i < 8u; i++)
         for (j = 0; j < 8u; j++)
-            out[i * 8u + j] = (uint8_t)(h[i] >> (56u - 8u * j));
-    /* tail holds up to the final 255 input bytes (key-derived for keyed callers). */
+            out[i * 8u + j] = (uint8_t)(ctx->h[i] >> (56u - 8u * j));
+    /* tail and the ctx hold the final input bytes (key-derived for keyed
+     * callers); the ctx is single-use — scrub both. */
     determ_secure_zero(tail, sizeof tail);
+    determ_secure_zero(ctx, sizeof *ctx);
+}
+
+void determ_sha512(const uint8_t *data, size_t len, uint8_t out[64]) {
+    determ_sha512_ctx ctx;
+    determ_sha512_init(&ctx);
+    determ_sha512_update(&ctx, data, len);
+    determ_sha512_final(&ctx, out);   /* zeroizes ctx */
 }

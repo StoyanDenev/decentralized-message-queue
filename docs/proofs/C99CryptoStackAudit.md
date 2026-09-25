@@ -36,9 +36,10 @@ blockchain-sized data, and a uniform stack-wide secret-zeroization gap.
 > §5.3 remain open as future hardening, not correctness gaps.
 >
 > **2026-09-25:** the streaming refactor landed for HMAC-SHA-256 and, through it,
-> HKDF (§3.5, §3.6) and PBKDF2 (§3.9): no heap buffer and no allocation-failure path
-> remain there.
-> HMAC-SHA-512 (§3.3) and the AEAD (§3.14) still allocate.
+> HKDF (§3.5, §3.6) and PBKDF2 (§3.9), and for HMAC-SHA-512 (§3.3) on a new
+> incremental SHA-512 engine that the one-shot `determ_sha512` now wraps: no heap
+> buffer and no allocation-failure path remain in the SHA-2 family. The AEAD
+> (§3.14) still allocates.
 
 ---
 

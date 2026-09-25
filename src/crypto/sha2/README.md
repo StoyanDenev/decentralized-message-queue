@@ -12,27 +12,27 @@ no external dependency). Entry points, by file:
 
 | File | Entry point | Construction | Spec work unit |
 |---|---|---|---|
-| `sha256.c` | `determ_sha256` | One-shot SHA-256, FIPS 180-4 §6.2 | §3.1 |
-| `sha512.c` | `determ_sha512` | One-shot SHA-512, FIPS 180-4 §6.4 | §3.1 |
-| `hmac.c` | `determ_hmac_sha256`, `determ_hmac_sha512` | HMAC, RFC 2104 / FIPS 198-1 | §3.1 |
+| `sha256.c` | `determ_sha256`, `determ_sha256_init`/`_update`/`_final` | SHA-256, FIPS 180-4 §6.2 (the one-shot wraps the incremental engine) | §3.1 |
+| `sha512.c` | `determ_sha512`, `determ_sha512_init`/`_update`/`_final` | SHA-512, FIPS 180-4 §6.4 (the one-shot wraps the incremental engine) | §3.1 |
+| `hmac.c` | `determ_hmac_sha256` (+ `_init`/`_update`/`_final`), `determ_hmac_sha512` | HMAC, RFC 2104 / FIPS 198-1, streamed through the hash | §3.1 |
 | `hkdf.c` | `determ_hkdf_sha256` | HKDF extract-then-expand, RFC 5869 | §3.1 |
 | `pbkdf2.c` | `determ_pbkdf2_hmac_sha256` | PBKDF2, RFC 8018 / PKCS #5 v2.1 (SP 800-132) | §3.8b |
 
-Error channels: HMAC returns `-1` on allocation failure or `B + msglen`
-`size_t` overflow (its `int` return is an output-preserving audit retrofit —
-prior statement-call sites still compile); HKDF returns `-1` when
-`outlen > 255*32 = 8160` (RFC 5869 ceiling — pre-dates the audit), on `infolen`
-`size_t` overflow, or on allocation failure (both audit retrofits); PBKDF2
-returns `-1` when `iters == 0` (pre-dates the audit), when
-`dkLen > (2^32 − 1)·hLen` (RFC 8018 §5.2 step 1), on `saltlen + 4` overflow, or
-on allocation failure (all three audit retrofits). A NULL/zero HKDF salt is
-treated as HashLen zero bytes per the RFC.
+Error channels: no file here allocates (2026-09-25, DECISION-LOG "Heap-free
+HMAC-SHA-256, HKDF and PBKDF2" and "Streaming SHA-512 and heap-free
+HMAC-SHA-512"), so the audit's allocation-failure and size-overflow returns are
+gone. Both HMACs stream the message through the hash and always return 0 (the
+`int` return is an audit retrofit kept for source compatibility); HKDF returns
+`-1` only when `outlen > 255*32 = 8160` (RFC 5869 ceiling); PBKDF2 returns `-1`
+only when `iters == 0` or `dkLen > (2^32 − 1)·hLen` (RFC 8018 §5.2 step 1).
+Both KDFs fail before writing `out`. A NULL/zero HKDF salt is treated as
+HashLen zero bytes per the RFC.
 
 SHA-2 is the foundation the rest of the stack builds on. In-tree consumers
-today: `hmac.c` → `determ_sha256/512`; `hkdf.c` + `pbkdf2.c` → the HMAC here;
+today: `hmac.c` → the SHA-256/512 incremental engines; `hkdf.c` + `pbkdf2.c` →
+the streaming HMAC-SHA-256 here;
 `src/crypto/ed25519/ed25519.c` (RFC 8032 seed-hash, nonce `r`, and HRAM are
-SHA-512) and `src/crypto/frost/frost.c` (challenge / binding hashes) →
-`determ_sha512`. Production daemon/wallet call sites are still on the OpenSSL
+SHA-512) → `determ_sha512`. Production daemon/wallet call sites are still on the OpenSSL
 backend — the §Q9 step-2 call-site migration is gated on an explicit go-ahead
 because it touches the keyfile on-disk format.
 
@@ -113,26 +113,31 @@ callers, who must route tag equality through `determ_ct_memcmp`
 
 `determ_secure_zero` (`include/determ/crypto/secure_zero.h`, the
 memory-hygiene half of §3.10) scrubs every secret-bearing buffer before scope
-exit: the message-schedule `w[]` in `sha256_block` / `sha512_block` and the
-padding `tail[]` in both one-shots (key-derived when a keyed caller feeds a
-secret block); HMAC `k0` / `ibuf` (before `free`) / `opad_block` / `inner`;
-HKDF `prk` / `t` / `buf` (before `free`) / `zero_salt`; PBKDF2 `U` / `T` /
-`msg` (before `free`).
+exit: the message-schedule `w[]` in `sha256_block` / `sha512_block`, and the
+padding `tail[]` and the whole ctx in both `_final`s (key-derived when a keyed
+caller feeds a secret block); HMAC `k0` / `pad` / `inner`; HKDF `prk` / `t`;
+PBKDF2 the keyed HMAC ctx / `U` / `T`. A caller that abandons an HMAC ctx
+before `_final` wipes it itself (`sha2.h`).
 
 ## 5. Known limitations / future work
 
 Only what the spec + audit record:
 
-- **One-shot API; HMAC heap-allocates `B + msglen`.** The audit's
-  streaming-refactor alternative (init/update/final, dropping the input-sized
-  heap buffers and the secret-bearing `free` entirely) remains open as future
-  hardening, not a correctness gap (audit remediation banner + §5.2).
-- **Test-vector coverage to add** (audit §5.3): NIST CAVP SHAVS vectors beyond
-  the `"abc"` / `""` anchors; HKDF RFC 5869 TC2 (long inputs, `outlen=82`),
-  `outlen=0`, and the `L=8160` ceiling boundary; PBKDF2 RFC 6070 / RFC 7914
-  vectors at varied `dkLen` + the partial-final-block boundary; a deliberate
-  allocation-failure (malloc-interposer) test for the §5.2 NULL-check paths.
-  The RFC 4231 HMAC KATs from that list have already landed.
+- **Streaming landed 2026-09-25.** The audit's streaming-refactor alternative
+  (init/update/final, dropping the input-sized heap buffers and the
+  secret-bearing `free`) is done for the whole family; `test-c99-crypto-bounds`
+  asserts with an allocator hook that the HMACs and hashes allocate nothing.
+  This does not admit the files to the freestanding target by itself
+  (CRYPTO-C99-SPEC "Heap-free SHA-256 MAC and KDFs").
+- **Test-vector coverage** (audit §5.3): the RFC 4231 HMAC KATs, HKDF RFC 5869
+  A.1–A.3 with the `L=8160` ceiling and its last block, and PBKDF2 RFC 7914
+  vectors at varied `dkLen` including a partial final block are in
+  `test-c99-crypto-bounds`; the allocation-failure paths the audit wanted
+  interposed no longer exist. Still to add: HKDF `outlen=0`, RFC 6070
+  (PBKDF2-HMAC-SHA-1 — not implemented here, so not applicable as written) and
+  the NIST CAVP SHAVS files inside the C99 gate (the FAST gate
+  `test-c99-vectors` runs `tools/vectors/sha2_cavp_*.json`, whose SHA-512
+  lengths include the 111/112/113 padding edge).
 - **SHA-512 length field**: the 128-bit length encoding carries only the low
   64 bits (high 64 covered by the zero padding), so single messages are bounded
   at < 2^64 bits — documented in `sha512.c`, unreachable for blockchain-sized

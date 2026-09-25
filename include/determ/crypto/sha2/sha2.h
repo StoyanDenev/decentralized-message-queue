@@ -1,10 +1,10 @@
 /* Determ C99-native SHA-2 (FIPS 180-4).
  *
  * First vendored primitive of the libsodium-free C99 crypto stack
- * (CRYPTO-C99-SPEC.md Section 3.1). One-shot SHA-256 / SHA-512, written in
- * portable C99 with no external dependency, consumable from C99 and from C++
- * (extern "C"). SHA-2 is the foundation the rest of the stack builds on:
- * RFC 8032 Ed25519 uses SHA-512.
+ * (CRYPTO-C99-SPEC.md Section 3.1). SHA-256 / SHA-512, one-shot and
+ * incremental, written in portable C99 with no external dependency,
+ * consumable from C99 and from C++ (extern "C"). SHA-2 is the foundation the
+ * rest of the stack builds on: RFC 8032 Ed25519 uses SHA-512.
  *
  * Correctness is gated two independent ways by `determ test-sha2-c99`:
  *   (1) byte-equal cross-validation against the daemon's current backend
@@ -73,15 +73,26 @@ void determ_hmac_sha256_final(determ_hmac_sha256_ctx *ctx, uint8_t out[32]);
 /* One-shot SHA-512. `out` must point to at least 64 bytes. */
 void determ_sha512(const uint8_t *data, size_t len, uint8_t out[64]);
 
+/* Incremental SHA-512: the same engine as determ_sha512 (which is built on it),
+ * in the shape of the SHA-256 ctx above. An empty update is a no-op (`data` may
+ * then be NULL); final zeroizes the ctx, which is single-use. */
+typedef struct {
+    uint64_t h[8];      /* chaining state */
+    uint64_t total;     /* total bytes absorbed */
+    uint8_t  buf[128];  /* partial-block buffer */
+    size_t   buflen;    /* valid bytes in buf (< 128) */
+} determ_sha512_ctx;
+
+void determ_sha512_init(determ_sha512_ctx *ctx);
+void determ_sha512_update(determ_sha512_ctx *ctx, const uint8_t *data, size_t len);
+void determ_sha512_final(determ_sha512_ctx *ctx, uint8_t out[64]);
+
 /* HMAC (RFC 2104) keyed by SHA-256 / SHA-512. `out` = 32 / 64 bytes. `key`/`msg`
- * may be NULL when their length is 0. Secret-bearing intermediates are zeroized
- * before return. HMAC-SHA-256 is the streaming form above: it does not allocate
- * and always returns 0. HMAC-SHA-512 returns -1 on a memory-allocation failure
- * or a `block+msglen` size_t overflow (in which case `out` is left unwritten; a
- * long key never enters size arithmetic — `keylen > block` hashes the key into
- * the fixed-size k0 block), 0 otherwise. (The int return is kept for source
- * compatibility.) `out` may alias `msg`: the message is consumed before `out`
- * is written. */
+ * may be NULL when their length is 0. Both stream the message through the
+ * hash (HMAC-SHA-256 is the streaming form above), so neither allocates and
+ * both always return 0; the int return is kept for source compatibility.
+ * Secret-bearing intermediates are zeroized before return. `out` may alias
+ * `msg`: the message is consumed before `out` is written. */
 int determ_hmac_sha256(const uint8_t *key, size_t keylen,
                        const uint8_t *msg, size_t msglen, uint8_t out[32]);
 int determ_hmac_sha512(const uint8_t *key, size_t keylen,

@@ -812,11 +812,11 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(c99-crypto-bounds-object PRIVATE -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0)
 endif()
 determ_c99_strict(c99-crypto-bounds-object)
-# hmac.c and sha256.c with only the allocator hooked, replacing the library's
-# copies in this test: the gate asserts the streaming HMAC-SHA-256 allocates
-# nothing. The HMAC, copy and comparison hooks above stay out of these files.
+# hmac.c, sha256.c and sha512.c with only the allocator hooked, replacing the
+# library's copies in this test: the gate asserts the streaming HMACs and hashes
+# allocate nothing. The HMAC, copy and comparison hooks above stay out of these.
 add_library(c99-crypto-heapfree-object OBJECT
-  src/crypto/sha2/hmac.c src/crypto/sha2/sha256.c)
+  src/crypto/sha2/hmac.c src/crypto/sha2/sha256.c src/crypto/sha2/sha512.c)
 target_include_directories(c99-crypto-heapfree-object PRIVATE include)
 target_compile_definitions(c99-crypto-heapfree-object PRIVATE
   malloc=c99_bounds_malloc calloc=c99_bounds_calloc free=c99_bounds_free)

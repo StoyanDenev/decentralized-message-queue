@@ -96,9 +96,10 @@ incomplete RPC tag never authenticates"). Each increment is reviewed, gated and 
 on its own; this entry lists them as they land. LANDED: S-118 (the RPC verdict refuses a
 computed tag that is not 64 characters); S-122 (a malformed rpc_auth_secret stops the
 daemon instead of silently disabling authentication); heap-free HMAC-SHA-256, HKDF and
-PBKDF2 (six crypto files still allocate); the C99 block store's stat() and zero-hash rules
-(R1-01, R1-02). NEXT: streaming SHA-512 (HMAC-SHA-512, then Ed25519's heap fallback),
-S-121 and the DSSO overflow items, R3-01 and S-119. S-120 still waits for the owner's -v3 transcript decision.
+PBKDF2; the C99 block store's stat() and zero-hash rules (R1-01, R1-02); streaming SHA-512
+and heap-free HMAC-SHA-512 (five crypto files still allocate). NEXT: Ed25519's heap
+fallback, S-121 and the DSSO overflow items (with the stale HMAC-allocation comments in
+opaque3dh.c/.h), R3-01 and S-119. S-120 still waits for the owner's -v3 transcript decision.
 
 STATE 2026-09-25 — §14.1 COVERAGE RECORD (DECISION-LOG: "Local coverage and hypothesis
 record (§14.1)"). ADR-006 §7 records four independent reviews, the allegation

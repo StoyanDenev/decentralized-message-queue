@@ -16,8 +16,9 @@
 //   - AEAD authentication failure and X25519 low-order results return
 //     std::nullopt — they are NORMAL adversarial-input outcomes a caller must
 //     branch on, not exceptional states.
-//   - No incremental/streaming state in this seed (the C layer is one-shot
-//     except BLAKE2b; RAII streaming wrappers are §3.11 follow-up work).
+//   - No incremental/streaming state in this seed (the C layer's streaming
+//     APIs — BLAKE2b, the SHA-3 sponge, SHA-256/512, HMAC-SHA-256 — have no
+//     RAII wrappers yet; §3.11 follow-up work).
 #ifndef DETERM_CRYPTO_HPP
 #define DETERM_CRYPTO_HPP
 
@@ -93,7 +94,7 @@ inline std::array<uint8_t, 64> hmac_sha512(std::span<const uint8_t> key,
     std::array<uint8_t, 64> out;
     detail::require(determ_hmac_sha512(detail::ptr(key), key.size(),
                                        detail::ptr(msg), msg.size(), out.data()),
-                    "hmac_sha512 failed (allocation or size overflow)");
+                    "hmac_sha512 failed");
     return out;
 }
 

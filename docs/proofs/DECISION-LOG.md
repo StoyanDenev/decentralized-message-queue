@@ -8448,3 +8448,58 @@ in SECURITY.md's storage row stands.
 **Verification.** On this tree: `ci_local.sh --c99` with GCC and with Clang (27 targets),
 `--c99-sanitize`, the four storage mutation cases (4/4 rejected) and `--docs-only`. The full
 mutation gate and the default mode run on the session's final tree.
+
+## 2026-09-25 — Streaming SHA-512 and heap-free HMAC-SHA-512 (§14.2 step B)
+
+**Problem.** HMAC-SHA-512 still copied the padded key block and the message into a heap
+buffer, the SHA-2 family's last allocation, with an allocation-failure and size-overflow
+`-1` path, because SHA-512 had only a one-shot form. The freestanding target admits no
+heap (ADR-006 M8).
+
+**Change.** `determ_sha512_init`/`update`/`final` over a `determ_sha512_ctx` give SHA-512
+the incremental engine SHA-256 already has; the one-shot `determ_sha512` is that sequence,
+so every existing SHA-512 and Ed25519 gate exercises the engine. An empty update is a
+no-op (a NULL pointer with length 0 is never passed to `memcpy`); final wipes the ctx,
+including the chaining state the old one-shot left on the stack. `determ_hmac_sha512`
+streams the pad block and the message through it: no message copy, no allocation, and it
+always returns 0. Outputs are unchanged. No file in the SHA-2 family allocates now; five crypto C
+files still do (`argon2id.c`, `chacha20_poly1305.c`, the `ed25519.c` long-message
+fallback, `p256.c`, `pedersen/balance.c`). The ctx costs stack: +192 B for
+`determ_sha512` and +336 B on HMAC-SHA-512's long-key path (GCC -O2, x86-64,
+`-fstack-usage`), which the target stack budget must include.
+
+**Gate.** `test-c99-crypto-bounds` (C99 gates, GCC, Clang and ASan+UBSan): a 300-byte
+message split at every position, with an empty NULL update between and each ctx dirtied
+before init, equals the one-shot and the `hashlib` reference; a SHA-512 over the digests of
+every prefix of lengths 0..300, which reaches both padding branches at every remainder,
+equals its reference; the ctx is all zero after final; HMAC-SHA-512 RFC 4231 cases 2 and 6,
+an aliased output and the 128/129-byte key edge; zero allocations, with `sha512.c` added
+to the allocator-hooked object. New mutation cases: the 128-byte key edge, an allocation in
+HMAC-SHA-512 and in the engine, the partial-block flush, the 112-byte padding boundary,
+final not wiping, and init not resetting `total` or `buflen`, all killed by the gate's
+assertion. The existing HMAC-SHA-256 heap case now declares `malloc`/`free` itself, since
+`hmac.c` no longer includes `<stdlib.h>`.
+
+**Documents.** SECURITY.md's target-admission row names the five files. ADR-006,
+CRYPTO-C99-SPEC.md (CRLF kept), C99CryptoStackAudit.md, the §14.1 bullet of
+C99-MINIX-PORT.md, ConstantTimeInventory.md, `sha2.h` and `crypto.hpp` no longer describe the
+SHA-2 family as one-shot or allocating. The sha2 README's error channels, hygiene list and
+coverage notes still described the pre-streaming code after the HMAC-SHA-256 increment;
+they now match it. Still stale, left for the DSSO increment that comes next: two comments
+in `src/crypto/dsso/opaque3dh.c`/`.h` mention an HMAC allocation failure, which cannot
+happen since the HMAC-SHA-256 increment.
+
+**Review.** An independent review compared the engine and the HMAC with Python's
+`hashlib`/`hmac` in about 25,600 cases in each of seven configurations (GCC, Clang,
+ASan+UBSan, 32-bit), and 300,000 random key/message pairs byte for byte against HEAD's
+code; it checked secret wiping and every caller (none uses the removed `-1`) and ran 43
+mutants (the six listed cases and 37 more). It found no code defect. It found that init's reset was never checked,
+because every ctx the test initialized was already zero; the dirtied ctx and the two init
+cases above cover it. It also found the stale text fixed above. Stack wipes stay
+unobservable to the gate, as for SHA-256, and removing the empty-update guard is caught
+only by UBSan in the sanitizer gate.
+
+**Verification.** On this tree: `ci_local.sh --c99` with GCC and with Clang,
+`--c99-sanitize`, the nine SHA-512/HMAC mutation cases (9/9 rejected by the assertion) and
+the default mode (build, FAST, 17 guards). The full mutation gate runs on the session's
+final tree.
