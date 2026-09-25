@@ -306,3 +306,104 @@ and review):
 - The 32-bit mesh generation budget (§4), open in SECURITY.md.
 - The width-specific Argon2 allocation and PBKDF2 ceiling guards run only in the
   manual ARM32 reproduction (§5); no recurring CI job exercises them.
+
+## 7. Local coverage and hypothesis record (C99-MINIX-PORT §14.1), 2026-09-25
+
+**Baseline and method.** The reviews read the source of commit `0cbc3861`
+(tree `97b19e03`); the five files commit `9f6a5d8a` then changed were reviewed as
+that commit's diff, and every pinned blob is that of `9f6a5d8a`. Four independent
+reviews (R1–R4) each read their scope in full, ran sanitizer, 32-bit,
+differential or fault-injection experiments, and reported coverage and findings;
+the three pre-commit reviews and the final-diff review of §6 cover the ADR-006
+files, and a fifth review (R5) checked this record. Reproducers ran in the
+reviewers' scratch directories and are not committed; the finding-by-finding
+record, with reachability, evidence, fix and gate, is
+[ADR-006-review-record-2026-09-25.md](ADR-006-review-record-2026-09-25.md), and
+each fix increment commits its own gate. Reviewed means read in full for the
+scope stated on the file's row. It is not a proof, and it does not cover what a
+later change introduces.
+
+**Coverage.** `tools/audit_coverage.tsv` gives every tracked file one
+disposition: REVIEWED or PARTIAL (exact path, with the git blob that was
+reviewed), PENDING, DATA (with producer and consumer) or EXCLUDED (with the
+reason; only a file with a reviewed producer or consumer is DATA). The
+`--docs-only` guard `tools/test_audit_coverage.sh` fails when a tracked file has
+no disposition, when a rule is malformed or duplicated, and when a reviewed file's
+content no longer matches its pinned blob: the change must be reviewed and the
+row re-pinned, or the row downgraded. At this record's commit:
+
+| Surface | Reviewed | Partial | Pending |
+|---|---|---|---|
+| Hosted C99 product (`src/`, `include/`, outside crypto) | 41 | 0 | 0 |
+| Crypto (`src/crypto/`, `include/determ/crypto*`; R4's inventory scope only) | 96 | 0 | 13 READMEs |
+| C++ reference (`src/`, `include/` C++ files) | 20 | 4 | 41 |
+| DApps (`dapps/`) | 17 | 1 | 2 |
+| Wallet / light client | 0 | 0 | 9 / 46 |
+| Simulation / SDK / test oracle / vendored JSON parser | 0 | 0 | 12 / 3 / 1 / 1 |
+| Tests, tooling, build and CI (with the foundation example) | 12 | 2 | 866 |
+| Documentation / TLA+ models | 0 | 0 | 256 / 113 |
+
+In total 1,569 tracked files: 186 reviewed, 7 partial, 1,363 pending, 1 data and
+12 excluded. 96 of the reviewed files are crypto files reviewed only for R4's
+inventory questions. The outstanding in-scope code is named, not implied reviewed:
+the C++ consensus, apply and replay path (`node.cpp`, `producer.cpp`,
+`validator.cpp`, `chain.cpp` and `block.cpp` outside their codecs, `registry.cpp`,
+`committee_pool.cpp`, `shardtip_verify.cpp`, `pq_tx_auth.cpp`), `main.cpp`
+beyond the crypto calls of its production commands, the vendored JSON parser on
+the RPC path, the wallet and light clients, the simulation harness, and the test
+wrappers as evidence. The remaining coverage continues alongside the fixes:
+§14.2 does not let a confirmed defect wait for the ordering.
+
+**Preliminary allegations (§14.1).**
+
+- Reveal-bundle overflow: REFUTED. Two maximal reveals need 131,080 bytes of
+  the 131,104-byte bundle; every bundle write is checked against its capacity;
+  the bundle seeds the VDF locally and never crosses the K2 transport, which
+  carries one ≤ 65,536-byte reveal per frame and the 32-byte VDF output (R1).
+- Integer overflow: CONFIRMED where recorded (M1, M3–M6 here; R3-01 below for
+  the C++ decoders on 32-bit hosts; R1-03's port parsing) and newly as undefined
+  signed overflow in two DSSO time checks, one on holder-supplied input (R2-02,
+  R2-03). No remotely exploitable overflow was found in the shipped 64-bit C++
+  reference's ingress.
+- Static pools and C++ ownership: the C99 pools are static (M8 unchanged); R3
+  found no lifetime violation in the C++ transport and ingress code it read. The
+  C++ consensus path's ownership remains pending.
+- Handshake deadlines, idle HTTP slots and EMFILE accept spins: still OPEN as
+  recorded in SECURITY.md. R1 measured the service loop's bounded delays
+  (R1-06); a sustained connection flood remains UNRESOLVED.
+- EAGAIN "freeze": REFUTED for R1's files on the Linux epoll build: consumers
+  return to the loop on EAGAIN, and K2's `send_all` retries for at most 2 s.
+- QPC conversion overflow: ALREADY FIXED (`48daed3f`), revalidated against a
+  128-bit reference over 20,000,000 cases and on i386 (R1).
+- Post-quantum coverage: no ML-KEM or SLH-DSA implementation exists anywhere in
+  the repository (CONFIRMED, R4); ML-DSA authenticates only PQ_TRANSFER. Every
+  key-exchange, OPRF, credential and non-PQ signature path is classical.
+
+**Findings.** Pre-existing unless stated. Severity is the reviewer's, with the
+rationale in its report; the ledger rows carry the full account.
+
+| ID | Status | Severity | Location | Summary | Recorded |
+|---|---|---|---|---|---|
+| R4-01 | CONFIRMED | Medium | `src/rpc/rpc.cpp` `verify_auth` | If HMAC allocation fails, the expected tag is empty and an empty `auth` field is accepted: authentication fails open under memory pressure. | S-118 |
+| R3-02 | CONFIRMED | Medium | `src/net/peer.cpp` → `binary_codec.cpp` | Frames are decoded before HELLO and the rate limit. A 16 MB SNAPSHOT_RESPONSE rebuilds a full chain state and is then dropped (no handler); CHAIN_RESPONSE is consumed, but its decode also precedes admission. The snapshot residual was noted on 2026-09-16. | S-119 |
+| R4-02 | CONFIRMED | Medium (latent) | `src/crypto/dsso/opaque3dh.c` `hash_preamble` | The OPAQUE transcript is not injective: `cred_request` and `cred_response` carry no length, so a split view (with a different client nonce) still yields `server_mac_ok = 1`. Tests are the only callers. | S-120 |
+| R2-01 | CONFIRMED | Medium | `dapps/dsso/dsso_pid.c` subject material | The pseudonym hashes the escaped JSON token, so two spellings of one PAN bind two accounts. | S-121 |
+| R1-01 | CONFIRMED | Medium | `src/storage/block_store.c` `block_store_open` | Any `stat()` failure other than ENOENT re-initializes the manifest at height 0, losing the head. | SECURITY.md C99 table |
+| R3-01 | CONFIRMED (recorded 2026-09-16, not fixed) | Info on 64-bit, High on ILP32 | `binary_codec.cpp:843`; `block.cpp:1666,1723,1812` | Additive `off + len > total` checks wrap with 32-bit `size_t`; the HEADERS decoder already uses the subtractive form. A port requirement. | here |
+| R1-02 | CONFIRMED | Low | `block_store.c` append | Append accepts an all-zero head hash that open rejects. | here |
+| R1-03 | CONFIRMED | Low | `src/determ_node.c` | Port options go through `atoi` and wrap or disable services; unknown options are ignored. | here |
+| R1-04 | CONFIRMED | Low | `src/net/event_loop.c` stub | The unsupported-platform stub ignores timeouts (a spin) and uses fd 0; it does not compile under the strict flags. | SECURITY.md (fd 0) |
+| R2-02 | CONFIRMED | Low | `dsso_pid.c:626,631` | `now - iat` overflows (undefined) for `iat = INT64_MIN`, bypassing the age check. | here |
+| R2-03 | CONFIRMED | Low | `dsso_bind.c:57-58` | `now - auth->at` overflows before the MAC check; a MAC over such an `at` never expires. | here |
+| R2-04..R2-08 | CONFIRMED | Low | `dapps/dsso/` | No key-usage separation between PID and status anchors; a non-integer `nbf` is ignored; claim-name escaping defeats the shadow check; the PID buffer is not scrubbed; unbound slots are never reused (service-wide denial after 32 cycles). | here |
+| R4-03, R4-04 | CONFIRMED | Low | `p256.c` OPRF | Lengths over 65,535 bytes are truncated instead of rejected (also §6); `derive_key` accepts any seed length, giving colliding (seed, info) pairs. No production caller. | here |
+| R5-01 | CONFIRMED | Low | `src/rpc/rpc.cpp` → vendored JSON parser | The loopback RPC parses each line before authentication: a 16.7 MB nested array cost about 615 MB and 2.4 s. RPC binds to loopback by default. | here |
+| R4-05 | CONFIRMED | Low (API) | `ed25519.c` sign | Signing hashes a caller-supplied public key; a mismatched key reveals the secret scalar. Every caller derives it from the seed. | here |
+| R4-12..R4-18 | CONFIRMED | Low / Info | crypto | Non-constant-time C++ `scalar_valid`; permissive Ed25519-to-X25519 conversion contrary to its header; unprefixed D5 context; no ChaCha20/GCM length limits; length-less ML-DSA API; CT prover randomness bound only to `nonce_seed ‖ tx_nonce`; unwiped secret residues. | here |
+| R1-09, R2-10, R2-11, R4-06..R4-11 | TARGET BLOCKER | — | C99 target | libc/POSIX symbols per file; HMAC heap on DSSO paths; stack paths up to ≈207 KB (≈125 KB on the consensus `ctx_bundle_verify` path); ML-DSA signing emits divisions at `-Os` and SampleInBall depends on rejected challenges; range-proof and IPA scalar helpers branch on secret bits; Argon2id needs runtime division helpers; P-256 lazy initialization includes SSWU statics; eight crypto files allocate. | here, M8 |
+| R1-05..R1-08, R1-10, R2-09, R2-12..R2-18 | CONFIRMED | Info | various | One-shot System V `signal()`; sequential service polling; unchecked clock-source failures (UNRESOLVED); DSF seam fidelity; storage ordering notes; no UBSan profile for `determ-dsso` or `d5rp`; partial outputs contrary to two header contracts; a `dsso_loa` redefinition; revoked-device slot reuse. | here |
+| R3-03 | REFUTED | — | `block.cpp` | Count-driven reserve blow-up: all Block-frame counts are 16-bit and byte-backed. | — |
+
+"Here" means the row is recorded in this table and in the review record, not in
+the ledger. Fixes proceed one reviewed increment at a time under C99-MINIX-PORT
+§14.2; the Medium rows come first.

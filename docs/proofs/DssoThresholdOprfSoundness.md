@@ -369,6 +369,11 @@ differ from the server's, and the client rejects the server MAC (`server_mac_ok 
 `hash_preamble` flips EXACTLY this assertion RED (the swap stops mattering) while
 E2E-1 stays green (both sides omit it identically) — the clean directional split
 proves E2E-3 rests on the binding, not on the AKE running.
+**Open finding (2026-09-25, SECURITY.md S-120):** the binding is not injective.
+The preamble streams both fields without lengths, so a split that moves bytes
+between `cred_request` and `cred_response` (with a different client nonce) keeps
+the preamble bytes and `server_mac_ok = 1`. E2E-3 holds for a swap that changes
+the concatenation, not for every change of the two fields.
 
 **E2E-10 (C2 — the client's `pk_s` is AUTHENTIC, not merely bound).** Transcript
 binding alone cannot create trust in a key the client learned from the attacker, so

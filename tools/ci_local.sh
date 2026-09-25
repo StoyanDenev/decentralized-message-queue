@@ -102,7 +102,8 @@ run_doc_guards() {
            test_light_resume_monotonicity_guard \
            test_light_keybind_surface \
            test_security_ledger_coherence \
-           test_producer_admit_wiring_guard; do
+           test_producer_admit_wiring_guard \
+           test_audit_coverage; do
     if [ ! -f "tools/$g.sh" ]; then
       echo "  FAIL: $g (tools/$g.sh missing)"; GUARDS_OK=0
     elif bash "tools/$g.sh" >"$DOC_GUARD_LOG" 2>&1; then

@@ -786,6 +786,18 @@ ADR-004 §9.6 decisions gate production consensus and sharding.
 
 ### 14.1 First deliverable: local coverage and hypothesis record
 
+**Status (2026-09-25).** The first record is ADR-006 §7: four independent
+reviews, the allegation dispositions below confirmed or refuted with evidence,
+and a findings table whose Medium rows are SECURITY.md S-118–S-121 and the C99
+storage row. `tools/audit_coverage.tsv` gives every tracked file a disposition
+and `tools/test_audit_coverage.sh` (a `--docs-only` guard) keeps it complete and
+fails when a reviewed file changes without being re-reviewed. At that commit 186
+files were reviewed for a stated scope (96 of them crypto files, for R4's
+inventory questions only), 7 partially and 1,363 were pending, including the C++
+consensus/apply path, the wallet and light clients and the simulation harness;
+the record says so rather than claiming full coverage. The per-finding record is
+ADR-006's review appendix.
+
 Pin HEAD and the reviewed working-tree diff. Inventory all repository files, then
 record each as reviewed, pending, generated/data with a reviewed producer/consumer,
 or excluded with a reason. Inspect C/C++ sources and headers, plus wallet/light,

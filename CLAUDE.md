@@ -91,6 +91,16 @@ Read this before writing code or docs. On any decision conflict, docs/proofs/DEC
   unqualified PFS alongside view-key disclosure is wrong (same entry).
 
 ## CURRENT FRONT — read before selecting any work (latest owner directive 2026-09-25)
+STATE 2026-09-25 — §14.1 COVERAGE RECORD (DECISION-LOG: "Local coverage and hypothesis
+record (§14.1)"). ADR-006 §7 records four independent reviews, the allegation
+dispositions and the findings (per-finding record: ADR-006-review-record-2026-09-25.md);
+tools/audit_coverage.tsv gives every tracked file a disposition (186 reviewed for a
+stated scope, 96 of them crypto inventory only; 1,363 pending — not a full review), and a
+--docs-only guard fails on a file without one or a reviewed file changed without
+re-review. New open rows S-118–S-121 and the C99 block-store stat() item. NEXT: the
+remaining coverage continues while §14.2's increments fix confirmed defects in the order
+that entry gives (S-118 first); S-120 waits for an owner decision on a -v3 transcript.
+
 STATE 2026-09-25 — AUDIT AND PLAN WORK COMMITTED (DECISION-LOG: "Audit and plan work
 committed after independent review"). The ADR-006 audit implementation with its
 pre-commit review resolutions (`aee4e535`) and the ADR-008/§12/§14 plan update

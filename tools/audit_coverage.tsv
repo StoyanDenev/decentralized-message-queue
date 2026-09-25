@@ -1,0 +1,234 @@
+# Coverage record of the local audit (C99-MINIX-PORT 14.1; summary in ADR-006 7).
+# Columns: pattern<TAB>surface<TAB>disposition<TAB>reviewed git blob or -<TAB>scope or reason.
+# REVIEWED and PARTIAL rows are exact paths with the git blob that was reviewed and take
+# precedence; otherwise the first matching pattern wins (* also matches /). DATA needs a
+# reviewed producer or consumer. Checked by tools/test_audit_coverage.sh, which fails when
+# a file has no row, a rule is malformed or duplicated, a literal row names an untracked path, or a reviewed file changed.
+src/wire/binary_codec.c	c99-product	REVIEWED	17ccaed7fc0b6dfbdcfc70c6efd981dda5823665	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
+include/determ/wire/binary_codec.h	c99-product	REVIEWED	9bd958852c5ab3f1195343c585db061636404fcc	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
+src/wire/json_token.c	c99-product	REVIEWED	0aa97d9447382bfbcc404a0700fb3ef10c0ebd66	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
+include/determ/wire/json_token.h	c99-product	REVIEWED	077498e4ef0b956eb5d83e10ca561578209f5d13	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
+src/rpc/json_rpc.c	c99-product	REVIEWED	d72f21d4b56f149e4ca24049c1ef183c60f6e627	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
+include/determ/rpc/json_rpc.h	c99-product	REVIEWED	114989d286b60f26ed0f1b270691ddc404296122	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
+src/rpc/http_rpc_server.c	c99-product	REVIEWED	cbde8442e6d2adb3bdf45d5c704234f1a5615d49	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
+include/determ/rpc/http_rpc_server.h	c99-product	REVIEWED	38da08e0d5282dcab65126ae262cd2cd8ddf605a	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
+src/net/reactor.c	c99-product	REVIEWED	eed853d9bd3b85a97e8aa04377b0f062e39f82d0	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
+include/determ/net/reactor.h	c99-product	REVIEWED	b9bbdda936bc4c8fdcbade2bec88a28c8f70b28f	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
+src/net/peer_mesh.c	c99-product	REVIEWED	e15f10b6436d4593456ff793f015e07a0524e5e9	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
+include/determ/net/peer_mesh.h	c99-product	REVIEWED	6de60073b53ac3f692984df1af4913425ac4eb84	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
+src/net/k2_net.c	c99-product	REVIEWED	b4364dddb25fd5799fc9bae4f96e5bcc0ce80042	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
+include/determ/net/k2_net.h	c99-product	REVIEWED	e0c102fc63f1df8030f04a2a747fffe0cc235b68	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
+tests/test_c99_codec_bounds.c	tests	REVIEWED	829ef0a5728a5632ac89ae783f6e31519aefb0e9	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
+tests/test_c99_crypto_bounds.c	tests	REVIEWED	c8e044a91a7fd1de744f136ed622df229eea8925	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
+tests/test_c99_http_safety.c	tests	REVIEWED	5f98c2be3daa7fbc2a3ead03bfae8c91334f06e2	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
+tests/test_c99_network_safety.c	tests	REVIEWED	8561fc256e2a21df03a7dfb717c49dab3adbdc9b	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
+tests/test_http_rpc.c	tests	REVIEWED	b3c9f5bffa10a3d00bf6ab949b93d4011306e1fd	ADR-006 audit with its independent pre-commit and final-diff reviews, 2026-09-25: bounds, arithmetic, lifetime and failure paths
+src/consensus/stake_quorum.c	c99-product	REVIEWED	c86bf8496e1b18f8b37f4db0243503b336534284	stake_quorum qualification with two independent reviewers, 2026-09-24 (C99-MINIX-PORT 13.1)
+include/determ/consensus/stake_quorum.h	c99-product	REVIEWED	f6f129197f3eab76b2cd07534a7fd2b0a244cb82	stake_quorum qualification with two independent reviewers, 2026-09-24 (C99-MINIX-PORT 13.1)
+tests/test_stake_quorum.c	tests	REVIEWED	a38bfeebb25bb6030e14c04f39d2472d2af9a3d7	stake_quorum qualification with two independent reviewers, 2026-09-24 (C99-MINIX-PORT 13.1)
+tools/check_no_undefined.cmake	tooling	REVIEWED	a4f0d84a5e5fed089d0bd64f911f0ead7f618ee2	stake_quorum qualification with two independent reviewers, 2026-09-24 (C99-MINIX-PORT 13.1)
+tests/freestanding_audit_canary.c	tests	REVIEWED	fa5a29c3ad5bf43cc03ebb4cedeff786b63f9dcd	stake_quorum qualification with two independent reviewers, 2026-09-24 (C99-MINIX-PORT 13.1)
+docs/examples/freestanding_core.c	c99-example	REVIEWED	b5913b5e48d0988ba08b03ceb5d61a045e4eedf7	freestanding foundation example review, 2026-09-24 (C99-MINIX-PORT 11)
+docs/examples/freestanding_core.h	c99-example	REVIEWED	873963ca576699574e311acb52c0f2227b50c112	freestanding foundation example review, 2026-09-24 (C99-MINIX-PORT 11)
+tests/test_freestanding_example.c	tests	REVIEWED	d41a1bc50376f3ffb20d2012a7ae56f452da6bec	freestanding foundation example review, 2026-09-24 (C99-MINIX-PORT 11)
+tools/test_freestanding_examples.py	tests	REVIEWED	b14f1a0f6cf43526850f0a38fea0ed852cbe4ac6	freestanding foundation example review, 2026-09-24 (C99-MINIX-PORT 11)
+src/storage/block_store.c	c99-product	REVIEWED	00470719184e47d81513eeeb27bfcb5d7c9b697e	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+include/determ/storage/block_store.h	c99-product	REVIEWED	bc0fc13b972791fd64031f22cc69017808f1a6f6	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+src/ledger/state.c	c99-product	REVIEWED	693bb6df2a8770880ba1f7a0646c080d0fb9fe6d	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+include/determ/ledger/state.h	c99-product	REVIEWED	8de5525e4054fb14c461c0c9abbc6dda2ebe4de4	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+src/ledger/pending_transfer.c	c99-product	REVIEWED	f768b6d6cd772026d1249b463b91ff34cbcae8ab	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+include/determ/ledger/pending_transfer.h	c99-product	REVIEWED	f06c205a2b6ec0817fc5447922dbd89db675bb48	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+src/ledger/shard_routing.c	c99-product	REVIEWED	e26b29e0d4e4c0ca5b6f7830de50ffac2fe255b0	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+include/determ/ledger/shard_routing.h	c99-product	REVIEWED	ef079c35c9b8cb1296da74071782146585594b7f	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+src/consensus/duel_state.c	c99-product	REVIEWED	002f862ebd48f60099fc466f4a8f929f94e60108	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+include/determ/consensus/duel_state.h	c99-product	REVIEWED	c4b4a4dd9e26c06e721c2f0666b146a7077ebcd3	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+src/consensus/dda.c	c99-product	REVIEWED	db38e68cd6c542f3aa127b501f27758a8d1a3171	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+include/determ/consensus/dda.h	c99-product	REVIEWED	f4f5a0b07162a72609d1199edf4226413269c36f	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+src/time/clock.c	c99-product	REVIEWED	998776e361fee7cd77a31c600686cae7f8b9c9b4	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+include/determ/time/clock.h	c99-product	REVIEWED	b8e5d8d2331e8e85e57924bb0a40e56ad46054da	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+src/net/event_loop.c	c99-product	REVIEWED	4f6ec4ef04cf9f3fc0410b13b028d5e091912f39	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+include/determ/net/event_loop.h	c99-product	REVIEWED	31a5b91eab656c400112cf25e69fb3ad58fa450b	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+src/net/virtual_transport.c	c99-product	REVIEWED	2c271bc0325689e113a3e687082e02be9d7e5759	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+include/determ/net/virtual_transport.h	c99-product	REVIEWED	d916be02527eb2799b081aafbeb39890afb3423f	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+src/wire/parser.c	c99-product	REVIEWED	98703597a58707908c1eff8b4cac29b09833e17b	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+include/determ/wire/parser.h	c99-product	REVIEWED	b14227e7cc74aa0a80d87d05ed4e738653f1553d	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+src/dapp/d5draw.c	c99-product	REVIEWED	59f230567d6fce2909260a8f968270cdaa5ad487	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+include/determ/dapp/d5draw.h	c99-product	REVIEWED	4994141479c560e059958825f2573cfa9dde5f59	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+src/dapp/d5codec.c	c99-product	REVIEWED	33ee9532ebbcfc3eb1260db47d92ec992206906a	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+include/determ/dapp/d5codec.h	c99-product	REVIEWED	b4006192818774b09a49972707ce8513d63f9b03	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+src/determ_node.c	c99-product	REVIEWED	0784bea1a09d5326b17cb7b07e0d61ceed941ab4	ADR-006 7 review R1, 2026-09-25: bounds, arithmetic, lifetime, failure and durability paths, time, work
+dapps/dsso/assertion.c	dapps	REVIEWED	1f95ea7fb8c04dd4c3cb55755401d19bcc99e2be	ADR-006 7 review R2, 2026-09-25: external-format parsing, arithmetic, allocation, failure paths
+dapps/dsso/assertion.h	dapps	REVIEWED	a68af8ae7e3b60eaf1c00b09c3b64b6cf2d48665	ADR-006 7 review R2, 2026-09-25: external-format parsing, arithmetic, allocation, failure paths
+dapps/dsso/authn.c	dapps	REVIEWED	05c7f9a5e312a4027bc58ecf1ecd62debb2a88c2	ADR-006 7 review R2, 2026-09-25: external-format parsing, arithmetic, allocation, failure paths
+dapps/dsso/authn.h	dapps	REVIEWED	0e9c6ac1dac113fe49a3ae0dc700b7d4527e1986	ADR-006 7 review R2, 2026-09-25: external-format parsing, arithmetic, allocation, failure paths
+dapps/dsso/dsso.c	dapps	REVIEWED	2a789b724ade2fcdaf35b7f566743f7c13588d3e	ADR-006 7 review R2, 2026-09-25: external-format parsing, arithmetic, allocation, failure paths
+dapps/dsso/dsso.h	dapps	REVIEWED	8b7318f44c82e9c53ff3fe715043c87ab97b5a8c	ADR-006 7 review R2, 2026-09-25: external-format parsing, arithmetic, allocation, failure paths
+dapps/dsso/dsso_bind.c	dapps	REVIEWED	b1c5f5e8704fbff92a6d50cbde0c1d374390955d	ADR-006 7 review R2, 2026-09-25: external-format parsing, arithmetic, allocation, failure paths
+dapps/dsso/dsso_bind.h	dapps	REVIEWED	0df187253e2c858b55fd280bb197bc72958038aa	ADR-006 7 review R2, 2026-09-25: external-format parsing, arithmetic, allocation, failure paths
+dapps/dsso/dsso_jose.c	dapps	REVIEWED	04a6d1394745e73bebeb09db69927546c6114d22	ADR-006 7 review R2, 2026-09-25: external-format parsing, arithmetic, allocation, failure paths
+dapps/dsso/dsso_jose.h	dapps	REVIEWED	edd00a749daf80d50051019bc427defcfc2d417c	ADR-006 7 review R2, 2026-09-25: external-format parsing, arithmetic, allocation, failure paths
+dapps/dsso/dsso_main.c	dapps	REVIEWED	8eadcbdfab1e29ecd52233d29e3c29bdaae48364	ADR-006 7 review R2, 2026-09-25: external-format parsing, arithmetic, allocation, failure paths
+dapps/dsso/dsso_pid.c	dapps	REVIEWED	d3592339bc38dd7445329cdfc2502fd6bc72f9eb	ADR-006 7 review R2, 2026-09-25: external-format parsing, arithmetic, allocation, failure paths
+dapps/dsso/dsso_pid.h	dapps	REVIEWED	d5a5231749393ad14df6fd03b29528c46df76966	ADR-006 7 review R2, 2026-09-25: external-format parsing, arithmetic, allocation, failure paths
+dapps/dsso/dsso_selftest_pid.c	dapps	REVIEWED	3c6f0d2b31010f9ce8398b600101d8c742a3e6ea	ADR-006 7 review R2, 2026-09-25: external-format parsing, arithmetic, allocation, failure paths
+dapps/d5-random-selection/d5rp.c	dapps	REVIEWED	b07af9e50584c61c2660be8f8733e0dac37d493b	ADR-006 7 review R2, 2026-09-25: external-format parsing, arithmetic, allocation, failure paths
+dapps/d5-random-selection/d5rp.h	dapps	REVIEWED	6d699a9629aa79a402c5d6cbc831e7d49299e8e5	ADR-006 7 review R2, 2026-09-25: external-format parsing, arithmetic, allocation, failure paths
+dapps/d5-random-selection/d5rp_main.c	dapps	REVIEWED	7207cae335fbef854408cad5c81dd821aba602ff	ADR-006 7 review R2, 2026-09-25: external-format parsing, arithmetic, allocation, failure paths
+src/net/binary_codec.cpp	cpp-reference	REVIEWED	fc128247fcbe0a81c4ded3c9bb4e84c6e90a4806	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+src/net/messages.cpp	cpp-reference	REVIEWED	149b8c8afea6f88c80f1079f87f87e5e5dcd7fc0	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+include/determ/net/messages.hpp	cpp-reference	REVIEWED	7e354937d1306e90d5902777af8f76f8f6a6f6b8	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+src/net/gossip.cpp	cpp-reference	REVIEWED	61b3df50853c6a4b153e8ce6bd55bb1a93f0c9f3	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+include/determ/net/gossip.hpp	cpp-reference	REVIEWED	0b75d48e1633ae3ba226f2a5c69d2da4387ff228	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+src/net/peer.cpp	cpp-reference	REVIEWED	c766cdf77a29d5ff3890e366315bdf8466acf817	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+include/determ/net/peer.hpp	cpp-reference	REVIEWED	9ca1f7676bd80049b9089be5e27a5185a2c70727	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+include/determ/net/rate_limiter.hpp	cpp-reference	REVIEWED	8c73cf5981916e86dfa65616cf78a63950e0f2ac	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+src/net/reactor_transport.cpp	cpp-reference	REVIEWED	b9ce070d352eba9fe4fd4dca9f21622fb585dbf8	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+include/determ/net/reactor_transport.hpp	cpp-reference	REVIEWED	0402e75881478a3dfeef836e0860b70dd447197c	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+src/net/reactor_event_loop.cpp	cpp-reference	REVIEWED	3931d1100f76fc004076aac862e35cd7fbf9a84a	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+include/determ/net/reactor_event_loop.hpp	cpp-reference	REVIEWED	f821acbfc295e5e58908c27f1c928a9995fef3f4	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+src/net/sync_client.cpp	cpp-reference	REVIEWED	733bfec5f033107a499d82312286fda1d8d9ab4b	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+include/determ/net/sync_client.hpp	cpp-reference	REVIEWED	352fa5d62834d34b4a182875e748fcd97c8a4214	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+src/net/iocp_transport.cpp	cpp-reference	REVIEWED	e00d923529b3d9c070d075c68fc4108ef3f56df9	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+src/net/iocp_event_loop.cpp	cpp-reference	REVIEWED	b867dc1914a75377d5485251b5d6577eb9f047a4	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+src/net/iocp_detail.hpp	cpp-reference	REVIEWED	c6552b52613a7c598297c88584186b7c3c7a891b	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+src/net/virtual_transport.cpp	cpp-reference	REVIEWED	4ab6b35ced00d61b6f967f2654365573b86378ba	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+src/rpc/rpc.cpp	cpp-reference	REVIEWED	26d95265bb7c1aa5c390b6c5daa213fda1a996a4	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+include/determ/net/transport.hpp	cpp-reference	REVIEWED	79eb6b6b393f19f668d706a06edb3d2b6db5aa09	ADR-006 7 review R3, 2026-09-25: wire/network ingress bounds, allocation from untrusted counts, lifetime, pre-admission work
+include/determ/crypto.h	crypto	REVIEWED	64c485bfdd27fa683ff6c2b87e03dcfbedbc7060	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto.hpp	crypto	REVIEWED	3babebba9e08826adee54dcd4034e364de8ebedf	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/aes/aes.h	crypto	REVIEWED	80bcf37c32991622c65cb423a3c6d06cf7e86dab	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/argon2/argon2id.h	crypto	REVIEWED	c15c493d72bda36daadb7bb257333ef4d6ccc1e0	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/base64/base64.h	crypto	REVIEWED	7cf405f6dc34c17878e7ab6deb0a48b3507502c0	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/blake2/blake2b.h	crypto	REVIEWED	497ae3bceab4a4ac1c06e96533aea150aab37503	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/chacha20/chacha20.h	crypto	REVIEWED	fde3f2a510bc6482c4af7ea1b0a935960af931fa	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/chacha20/xchacha20_poly1305.h	crypto	REVIEWED	52fa86708f98611214b8aa08c4218f576e1bdb92	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/ct.h	crypto	REVIEWED	793546b118e83a20c8a22de4de94ee6f52354ef4	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/dsso/opaque3dh.h	crypto	REVIEWED	0c8503173f93880107f051685f4be21ccc974959	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/ed25519/ed25519.h	crypto	REVIEWED	3e9be6460200ef73d7038bc27a2c62a9ccc969cc	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/ed25519/ed25519_group.h	crypto	REVIEWED	7588e4ac53cbb13d10ccd2412e8c17d70fc2e63f	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/enote/enote.h	crypto	REVIEWED	35ab1e7fa3e33d00be32e29d4aaab55c05ee25c8	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/keys.hpp	crypto	REVIEWED	d5f7171442f62b4bbb5d2a05767d6dc56b21c80c	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/merkle.hpp	crypto	REVIEWED	cf237765c17dc2d6aa57620325ff27ea4fc4b026	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/mldsa/keygen.h	crypto	REVIEWED	194ea0c34141e7902f592eb10122ea49a3d6956b	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/mldsa/ntt.h	crypto	REVIEWED	c4ba3eade9fb357bc491ad9dd0fc8fad639be167	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/mldsa/pack.h	crypto	REVIEWED	22322a077cb247f2bf509cc85b1e3e8bde53f711	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/mldsa/params.h	crypto	REVIEWED	707eff5aabe35e305be8742f312186818ea55168	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/mldsa/poly.h	crypto	REVIEWED	04ffc54010d9bb8ef0426b30fdd8639a8010a3e0	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/mldsa/polyvec.h	crypto	REVIEWED	2f3fb681fa0e0b86a93d694377d05e102cd3152e	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/mldsa/reduce.h	crypto	REVIEWED	7d1c41e3c1aa046084e10a1de2a0843c6cc4313f	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/mldsa/rounding.h	crypto	REVIEWED	216269e67cdb0cdc2090064851572085fd2aa64a	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/mldsa/sample.h	crypto	REVIEWED	92cf7c9a614726e0b883443b8ca84a1c3cfad939	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/mldsa/sign.h	crypto	REVIEWED	d01b47c6521c88f0031f123759995d501eafcfb4	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/notekey/fips/notekey_fips.h	crypto	REVIEWED	c52f176eb69db11218515942cb75fa543328e27f	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/notekey/modern/notekey_modern.h	crypto	REVIEWED	37fcaa008a5763cb3f480061983937bf7aa8a26f	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/notekey/notekey.h	crypto	REVIEWED	af7658bd9ac8b6dbc476b21e81a56117ae6f33b4	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/p256/p256.h	crypto	REVIEWED	a6ea20b727f767276c420f166b251543606d3449	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/pedersen/balance.h	crypto	REVIEWED	4d357b93fd32c3bb5a6b53a234a983e4a9e1b79d	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/pedersen/ctxbundle.h	crypto	REVIEWED	008a58358f413175a51d88b25662ea5a6436a62c	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/pedersen/ipa.h	crypto	REVIEWED	8c2e606213c4661f4c3141e2442a079beffc2329	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/pedersen/pedersen.h	crypto	REVIEWED	2b211bbf60cc2fe7dec8e3aaea272482175cee6f	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/pedersen/rangeproof.h	crypto	REVIEWED	30a4bc0dc51dd12a636afd603d23639ed4ec918e	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/pq_address.hpp	crypto	REVIEWED	a4f1bb7373451268085186c5c3de64424465ec61	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/pqauth.hpp	crypto	REVIEWED	251d8e97f2793421b8333a2b41c22e6f67aad2ab	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/random.hpp	crypto	REVIEWED	b4ea47e6c2f7b37060b90d92f0257deed4ba32e6	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/rng/rng.h	crypto	REVIEWED	58e28adc61bc4079877fe173f2203ea569ef88d3	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/rng_source.hpp	crypto	REVIEWED	cd44f3ed1ffc25b79738bfc7ac03d6a6ca201ac5	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/secure_zero.h	crypto	REVIEWED	cd5a5e1c8bbd32aeb82c6ac855d93b71bc375090	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/seeded_rng.hpp	crypto	REVIEWED	1c4b1cf7a07e2ae3677142dea4faa51a06646e65	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/sha2/sha2.h	crypto	REVIEWED	757a1d656a1467c2b3f2dec87a51362ecf11f828	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/sha256.hpp	crypto	REVIEWED	af8480631adc83a7ff0b88c45b27c5843c4b2c96	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/sha3/sha3.h	crypto	REVIEWED	390e6affdfacfd1f9263497f24cf73bb1ecbb719	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/vdf.h	crypto	REVIEWED	f327c4bfe2e792130f3d5e416d839f7afdfae73b	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/viewkey/viewkey.h	crypto	REVIEWED	7ff2f45b288becec8aa3a9949cd9cc5b5a4468a2	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+include/determ/crypto/x25519/x25519.h	crypto	REVIEWED	710100631830360e34e18f47f012d9d83c8afea8	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/aes/aes_core.c	crypto	REVIEWED	0665e213a0a7cbb8d3b5a4bc21f7ff32195b0533	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/aes/aes_gcm.c	crypto	REVIEWED	bc51fac7c99c1e35eca3ea3f646e6f65df95a6d6	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/argon2/argon2id.c	crypto	REVIEWED	4c5d3e9d3c9099ba31d9ea9a13f9dfc8b4443fc8	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/base64/base64.c	crypto	REVIEWED	5fadc8a1064d05718d67aa7d62af6acbcfcae7b1	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/blake2/blake2b.c	crypto	REVIEWED	9f46b1dc8b2e57c756437d6a1f2b4c7f841f55a3	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/chacha20/chacha20.c	crypto	REVIEWED	32029a60f96b8c662290177cb5cab4988ee1f2a5	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/chacha20/chacha20_poly1305.c	crypto	REVIEWED	d0a78ffcb082a822ff9cf73896dcf6c56e8fbb2e	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/chacha20/poly1305.c	crypto	REVIEWED	e09be1733b3c206839a67d3af67c230a808a50e3	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/chacha20/xchacha20_poly1305.c	crypto	REVIEWED	d5d223a590b05f39f673ae838a71c2a0a1db0897	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/ct.c	crypto	REVIEWED	118074b17d9f9b7deb05195a1f330961d8ebbf43	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/dsso/opaque3dh.c	crypto	REVIEWED	fcffa7c712b1e10cdedc52156ca0c1cb60f0f78c	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/ed25519/ed25519.c	crypto	REVIEWED	946176fc77f35889afe4824919a02f2089b91fe1	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/enote/enote.c	crypto	REVIEWED	5a1456ea567838dd5228069c8d3e00b462cb6eb5	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/keys.cpp	crypto	REVIEWED	4b8733635c3eee734b6c64c476a9c9bb6bedc87b	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/merkle.cpp	crypto	REVIEWED	f8a09fab4505ae2df6861a4f6a0f9d31114a2a1b	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/mldsa/keygen.c	crypto	REVIEWED	efe21d26a035061fa9e10dfa475736649a8460ab	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/mldsa/ntt.c	crypto	REVIEWED	fc7ef775827844d907652115a33ac7c4a4d3e587	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/mldsa/pack.c	crypto	REVIEWED	4449442150eeccac9d8941653edb9ff90ce754e2	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/mldsa/poly.c	crypto	REVIEWED	ed60b66d47fa67c287ba97c39cd792c29d1f13d1	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/mldsa/polyvec.c	crypto	REVIEWED	5ca8c4a3094c2ca5b22f8b41c92a89bca7f26163	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/mldsa/reduce.c	crypto	REVIEWED	0b43278df65d99c56106c6670a249b8d336676a9	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/mldsa/rounding.c	crypto	REVIEWED	37d13669101f618237cea25880104c80453b0bc7	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/mldsa/sample.c	crypto	REVIEWED	f12df5e19b688d0dc17ae07f71a37972bb8e0410	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/mldsa/sign.c	crypto	REVIEWED	75922337c241682c9adc92f9fadb63d4555a10d2	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/mldsa/zetas.inc	crypto	REVIEWED	c54ab536033dd77bc5d8cceedd14397571995864	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/notekey/fips/notekey_fips.c	crypto	REVIEWED	7c163735c3a8eb1e59612190d50d42cf97a70ddb	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/notekey/modern/notekey_modern.c	crypto	REVIEWED	fec2d9d4801083e1ffa8615121de65b0af26ef90	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/notekey/notekey.c	crypto	REVIEWED	58669ee4f7a0e7c9e0deec1e93ae5c8505e1f7d3	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/p256/p256.c	crypto	REVIEWED	285e7cbc8ae62539ba27f66d64ca7c04d391befc	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/pedersen/balance.c	crypto	REVIEWED	00050972fc8dca1f01b22be25a56dab7a8ad690c	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/pedersen/ctxbundle.c	crypto	REVIEWED	e39b194daffe40db91ec5cebe75502a3fd86e25e	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/pedersen/ipa.c	crypto	REVIEWED	c1bdf39620508a42404d6ac75e9d338863b232e0	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/pedersen/pedersen.c	crypto	REVIEWED	a4356b7d7a54eda608fb5c8c730ec62b28e7d9a6	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/pedersen/rangeproof.c	crypto	REVIEWED	d48f188d71a1a87e6d7db9147407630b147c4448	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/pq_address.cpp	crypto	REVIEWED	f948e128220637c4b331838a65d3f5d2b3e4719d	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/pqauth.cpp	crypto	REVIEWED	c9107ee8921d676f1f55fd9051dc28bd4d483485	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/random.cpp	crypto	REVIEWED	805b5ae20745ca9885c448afb2e0d4affaeb4654	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/rng/rng.c	crypto	REVIEWED	2181e19978ad2e0031e3ecf81c3b0ece117db2b0	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/secure_zero.c	crypto	REVIEWED	92b62ca93416baafda0f162c70bfc7b13ed00344	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/sha2/hkdf.c	crypto	REVIEWED	377e51187fc97606474d80ce0b50b8c1be248ec0	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/sha2/hmac.c	crypto	REVIEWED	f48230df8caae92a2f7ae976c0aad8f2bf28bbc4	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/sha2/pbkdf2.c	crypto	REVIEWED	c84b3a61eb070db97dffb68f66669f0724ad7aa0	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/sha2/sha256.c	crypto	REVIEWED	112f6eea6eb550a8505d5663a70639e68ac78f4f	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/sha2/sha512.c	crypto	REVIEWED	9635279187f64ec28a29b5bc664e7faa09698738	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/sha256.cpp	crypto	REVIEWED	54fa77709a152f65aecb92bba6c6fab47aa50fec	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/sha3/sha3.c	crypto	REVIEWED	f00d5e4401759a0f7ac96e26219510fe0e7f589d	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/vdf.c	crypto	REVIEWED	93fea50bc624bb13cb98dfef02311759e1319d97	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/viewkey/viewkey.c	crypto	REVIEWED	ebe7708119754e04b73621f5f1edede199068f4f	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/crypto/x25519/x25519.c	crypto	REVIEWED	9ad0c022e3b922570bf0c614af27029b37df70ed	ADR-006 7 review R4, 2026-09-25: crypto inventory (callers, heap, libc, globals, stack, secret-dependent control and memory); not a correctness proof
+src/chain/block.cpp	cpp-reference	PARTIAL	902834d6720df21296b876847d438014e67b3ab3	R3: frame codecs only (Block, Transaction, claims and witness encode/decode); apply and consensus bodies pending
+src/chain/chain.cpp	cpp-reference	PARTIAL	92caa20886e824519788ed3a9d4821d3b3694533	R3: decode_state/encode_state, load and manifest decode only; apply and replay pending
+src/chain/genesis.cpp	cpp-reference	PARTIAL	7490b37d20cc0f850cca3e36411cd392a97496be	R3: DGC1 decode, encode and validate only
+src/main.cpp	cpp-reference	PARTIAL	10d5badf8d3944273ea0e923f473672f3885cb2b	R4: crypto calls of the production commands account, send_anon, genesis and verify-pq-tx only; the rest (mostly test subcommands) pending
+dapps/dsso/authn_selftest.c	tests	PARTIAL	0a7ef478fa84e10dd7978b623d09820d4b0f0166	R2: helpers and F-arms only (test code)
+tools/c99_mutants.py	tooling	PARTIAL	7447e85c3dc8e9d5b4cf6e5a7ec51bc53ae562c1	ADR-006 pre-commit and final-diff reviews: the mutation cases and runner changes the audit added; pre-existing cases not re-reviewed
+tools/ci_c99.sh	tooling	PARTIAL	5ebe0df4c264b0de79d4fba08417ec204b74b10b	ADR-006 pre-commit review: the C99 target lists the audit changed; the rest of the script not re-reviewed
+dapps/dsso/dsso_pid_vectors.h	dapps	DATA	-	generated PID vectors: producer tools/gen_dsso_pid_vectors.py; consumer dsso_selftest_pid.c
+third_party/*	vendored	PENDING	-	vendored nlohmann/json (SHA-256 pinned); not target code, but it parses RPC input before authentication (ADR-006 7); D2 step 2 deletes it
+LICENSES/*	legal	EXCLUDED	-	license text; no target behaviour
+LICENSE	legal	EXCLUDED	-	license text; no target behaviour
+*/LICENSE	legal	EXCLUDED	-	license text; no target behaviour
+COMMERCIAL-LICENSE.md	legal	EXCLUDED	-	license text; no target behaviour
+NOTICE	legal	EXCLUDED	-	attribution notice; no target behaviour
+docs/Confrontation_against_public_unjustice_i.odt	docs	EXCLUDED	-	non-technical binary document; no target behaviour
+tests/fixtures/*	tests	PENDING	-	test fixtures; their producers and consumers are not yet reviewed
+tools/vectors/*	tests	PENDING	-	test vectors; their producers (tools/*.py) and consumers are not yet reviewed
+docs/proofs/tla/*	models	PENDING	-	TLA+ models and configurations; model-checked by ci_local --tla, not yet reviewed in this audit
+.github/*	build-ci	PENDING	-	CI workflow
+CMakeLists.txt	build-ci	PENDING	-	build definition
+.gitattributes	build-ci	PENDING	-	line-ending policy
+.gitignore	build-ci	PENDING	-	ignore rules
+tools/test_*.sh	tests	PENDING	-	test wrappers: evidence harnesses, reviewed when their gates are cited
+tools/operator_*.sh	tooling	PENDING	-	operator scripts over RPC output; no target behaviour
+tools/*	tooling	PENDING	-	build, CI and oracle tooling
+tests/*	tests	PENDING	-	C99 test and fuzz harnesses
+cryptotest/*	tests	PENDING	-	OpenSSL test oracle; never production
+sim/*	simulation	PENDING	-	deterministic simulation harness
+sdk/*	sdk	PENDING	-	relying-party SDK
+dapps/*.md	docs	PENDING	-	DApp documentation: claims checked when changed or cited
+dapps/*	dapps	PENDING	-	DApp sources not yet reviewed
+wallet/*	wallet	PENDING	-	wallet client (C++)
+light/*	light-client	PENDING	-	light client (C++)
+src/*.c	c99-product	PENDING	-	C99 sources not yet reviewed
+src/*.h	c99-product	PENDING	-	C99 headers not yet reviewed
+include/*.h	c99-product	PENDING	-	C99 headers not yet reviewed
+src/*.cpp	cpp-reference	PENDING	-	retained C++ reference; ownership, lifetime and arithmetic not yet reviewed
+src/*.hpp	cpp-reference	PENDING	-	retained C++ reference headers
+include/*.hpp	cpp-reference	PENDING	-	retained C++ reference headers
+src/crypto/*.md	docs	PENDING	-	crypto READMEs: claims checked when changed or cited
+docs/*	docs	PENDING	-	documentation: claims checked when changed or cited
+*.md	docs	PENDING	-	documentation: claims checked when changed or cited

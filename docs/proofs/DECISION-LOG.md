@@ -8191,3 +8191,55 @@ prior bytes are a prefix of each commit's copy.
 
 **Next.** §14.1's coverage and hypothesis record, then §14.2's increments. No finding,
 H obligation or ADR-004 §9.6 decision changes here.
+
+## 2026-09-25 — Local coverage and hypothesis record (§14.1)
+
+**What.** C99-MINIX-PORT §14.1's first deliverable, recorded in ADR-006 §7. Four
+independent reviews each read a scope in full and reported coverage and findings: R1,
+the hosted C99 services outside the ADR-006 files; R2, the DApp C code facing external
+formats; R3, the C++ network and wire ingress; R4, the crypto library, its callers and
+the post-quantum inventory. Each ran sanitizer, 32-bit, differential or fault-injection
+experiments; reproducers stayed in the reviewers' scratch directories. Documentation,
+the coverage data and a guard only: no code, consensus, wire or proof status changes.
+
+**Coverage.** `tools/audit_coverage.tsv` gives every tracked file one disposition, and
+the new `--docs-only` guard `tools/test_audit_coverage.sh` fails on a file without one
+and on a reviewed file whose content no longer matches its pinned blob. Of 1,569 tracked
+files, 186 are reviewed for a stated scope (96 of them crypto files, for R4's inventory
+questions only), 7 partially, 1,363 pending, 1 data and 12 excluded. Pending in-scope
+code is named: the C++ consensus, apply and replay path, `main.cpp` beyond the crypto
+calls of its production commands, the vendored JSON parser on the RPC path, the wallet
+and light clients and the simulation harness. This is not a full-repository review.
+The finding-by-finding record (reachability, evidence, fix, gate) is
+ADR-006-review-record-2026-09-25.md; a fifth review of the record corrected a false
+statement that CHAIN_RESPONSE is discarded (it is consumed; only the snapshot is
+dropped) and added the pre-authentication JSON parse cost on the loopback RPC (R5-01).
+
+**Allegations.** The reveal-bundle overflow and the EAGAIN "freeze" are REFUTED; the QPC
+overflow is ALREADY FIXED and revalidated; integer overflow is CONFIRMED where recorded
+(ADR-006 M1, M3–M6; R3-01 on 32-bit hosts); no ML-KEM or SLH-DSA exists anywhere and
+ML-DSA protects only PQ_TRANSFER. The handshake, idle-slot and EMFILE items stay open.
+
+**Findings.** Medium: S-118 (RPC authentication fails open when HMAC allocation fails;
+noted earlier in RpcIngressGateAudit.md, unregistered); S-119 (frames decoded before
+admission; the snapshot decode, noted on 2026-09-16 as a bounded residual, is dropped);
+S-120 (OPAQUE transcript not injective; latent, no deployment); S-121 (DSSO pseudonym
+over the escaped JSON token); the C99 block store re-initializing its manifest after any
+`stat()` error. Low and Info items, and the target blockers (heap, libc, stack paths up
+to about 207 KB, ML-DSA and range-proof secret-dependent code, P-256 lazy
+initialization), are tabulated in ADR-006 §7. R2-09 is a process gap: no sanitizer
+profile instruments `determ-dsso` or `d5rp` for undefined behaviour, which is how the
+two signed-overflow findings stayed invisible.
+
+**Next.** The remaining coverage continues, and meanwhile §14.2's increments, each with
+its own design note, independent review, gate and commit, because §14.2 does not let a
+confirmed defect wait for the ordering: S-118; the block-store `stat()` errno rule;
+heap-free HMAC (SHA-256 and SHA-512), HKDF and PBKDF2, which removes S-118's
+precondition and three of the eight heap-using crypto files; then S-121 and the DSSO
+overflow items, R3-01 and S-119. S-120 changes a transcript and needs the owner's choice
+of a `-v3` version before any DSSO deployment. No H obligation or ADR-004 §9.6 decision
+changes.
+
+**Verification.** `ci_local.sh --docs-only` passes all 17 guards, the new one included;
+the security-ledger guard derives the new summary counts (Medium open 11, total 28). The
+default mode (build, FAST 341/0 and the same guards) passes on this tree.

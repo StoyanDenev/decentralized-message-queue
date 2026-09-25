@@ -367,6 +367,11 @@ rather than a convention.
 
 ### 4.1 The pseudonym, and why it is derived this way
 
+**Open finding (2026-09-25, SECURITY.md S-121):** the code hashes the raw JSON
+token of the identifier (quotes and escapes included), not the unescaped `id`
+this section specifies, so two legal spellings of one identifier derive two
+pseudonyms. The derivation below is the specified one.
+
 The persistent identifier is
 
 ```

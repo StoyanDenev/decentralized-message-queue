@@ -181,7 +181,10 @@ int determ_opaque3dh_server(const determ_opaque3dh_transcript *t,
  *   client_mac    : HMAC(Km3, SHA256(preamble || server_mac)) (32), sent in ke3
  *   server_mac_ok : 1 iff server_mac matches the client's recomputation — i.e. iff
  *                   the peer holds sk_s for t->server_public_key AND ran the same
- *                   transcript (server authenticated), 0 otherwise. A 0 here is an
+ *                   preamble (server authenticated), 0 otherwise. Open finding
+ *                   S-120: cred_request/cred_response are not length-prefixed, so
+ *                   two transcripts that split those bytes differently share a
+ *                   preamble. A 0 here is an
  *                   AKE ABORT even though the call returns 0 (success = "ran to
  *                   completion"). */
 int determ_opaque3dh_client(const determ_opaque3dh_transcript *t,
