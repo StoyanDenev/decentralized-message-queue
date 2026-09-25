@@ -1170,6 +1170,13 @@ Do not promote the teaching QF frame, bounded recovery model or repeated-work
 evaluator into production consensus by renaming it. Sharding, integration and
 deployment remain conditional on their own proofs and acceptance decisions.
 
+**Planning extension (2026-09-25).** [C99-MINIX-PORT §14](../C99-MINIX-PORT.md#14-local-audit-regulatory-alignment-and-target-qualification-2026-09-25)
+adds independent local C/C++ audit and target/regulatory qualification work under
+ADR-008. §9 below is the initial receiver/resource deliverable already produced;
+its unresolved decisions still gate dependent production work. The extension
+changes no H decision, quorum, timeout, wire rule or proof status. Claude's current
+work selection and commit instructions are in C99-MINIX-PORT §12 / CURRENT FRONT.
+
 ## 9. One-shard receiver, state and resource contract (2026-09-24)
 
 **Status and scope.** This section starts the first deliverable of §8.4 for one shard. It

@@ -27,6 +27,17 @@ Caller-owned-workspace migration, complete memory safety and compiler/target
 side-channel qualification remain separate obligations. These fixes do not
 admit the hosted library to the freestanding target.
 
+**PQ/identity planning extension (2026-09-25).**
+[ADR-008](../decisions/ADR-008-Regulatory-Compliance-and-C99-Rewrite.md) and
+[C99-MINIX-PORT §14](../C99-MINIX-PORT.md#14-local-audit-regulatory-alignment-and-target-qualification-2026-09-25)
+require a complete algorithm/caller inventory and reviewed PQ/profile and credential
+presentation designs. This adopts goals, not algorithm or transcript changes.
+Existing ML-DSA conformance evidence does not establish full PQ coverage or module
+validation; OPAQUE authentication does not establish selective-disclosure credentials.
+Parameter sets, hybrid composition, credential schemes, workspace and target leakage
+qualification remain explicit gates. The no-escrow/no-master-key and target-admission
+constraints stand, including the unresolved Argon2id incompatibility.
+
 **Companion documents:**
 - `v2.22-PRIVACY-SPEC.md` — confidential transactions spec (consumer; Bulletproofs are over NIST P-256 — secp256k1 was rejected 2026-07-07 and never built)
 - `Beaconless-v2-SPEC.md` — Phase D architecture (consumer; cross-shard randomness uses MPDH commit-reveal aggregation, not FROST — switched 2026-06-07, `DECISION-LOG.md`)

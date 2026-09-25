@@ -12,6 +12,14 @@ recovery proofs. Adoption closes no security-ledger item or H proof obligation.
 The freestanding target and its compiler/platform/crypto qualification remain
 separate from the current hosted reference and local experiment described below.
 
+**Planning extension (2026-09-25):** [ADR-008](decisions/ADR-008-Regulatory-Compliance-and-C99-Rewrite.md)
+and [C99-MINIX-PORT §14](C99-MINIX-PORT.md#14-local-audit-regulatory-alignment-and-target-qualification-2026-09-25)
+schedule the full C/C++ audit, memory/temporal qualification, PQ and credential
+work, and regulatory evidence. These are goals/process only. No finding closes,
+no algorithm/transcript changes and no certification or whole-system immunity
+follow from this documentation-only adoption. Prior ADR-006 implementation changes
+remain separately scoped; all open items below retain their dispositions.
+
 | C99 item | Current disposition |
 |---|---|
 | Payload admission | Both commitments and both matching SHA-256 openings are required. Missing/invalid input terminates the local attempt; explicit retry is caller-controlled. No 1-of-2 completion or authenticated membership is claimed. |

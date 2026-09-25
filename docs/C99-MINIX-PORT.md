@@ -16,11 +16,13 @@ gate. The Decision Log and CURRENT FRONT still control work sequencing.
 
 **Adopted development plan (2026-09-24):** [ADR-004 §8.4](decisions/ADR-004-Fault-Model.md#84-adopted-development-plan-2026-09-24)
 combines two unanimous co-creators and reviewed K-of-K validation/encoding/persistence
-principles with the selected K=2 election, recovery and checkpoints. The next
-development deliverable is a one-shard receiver/state/resource contract and its
-proofs or counterexamples. §7 is a component dependency map under that plan;
-§12 contains the Claude commit-and-development handoff. Adoption does not close
-the outstanding protocol proofs or qualify the target image.
+principles with the selected K=2 election, recovery and checkpoints. The initial
+receiver/resource contract now exists in ADR-004 §9 / FB76; its unresolved budget
+composition and owner decisions gate dependent production work (§13). §7 maps
+component dependencies. The 2026-09-25 extension in §14 adds the full local C/C++
+audit, PQ/identity design and regulatory evidence work from ADR-008; §12 is the
+updated Claude handoff. Adoption does not close protocol proofs or qualify the
+target image.
 
 The existing C++ implementation (`src/`, `wallet/`, `light/`) remains the reference
 for unchanged protocol behavior while components are ported and verified. Compare
@@ -214,6 +216,10 @@ porting the entire old consensus or building unused scaffolding before that desi
 work. Select actual paths and callers from the current tree rather than creating
 the illustrative §6 directory map wholesale. A primitive may be independently
 qualified earlier; production integration waits for its protocol dependencies.
+The independent audit/assurance track in §14 follows those same gates; it does not
+change consensus rules or bypass ADR-004 §9.6. Its crypto inventory supplements
+Phase 1: the primitives listed below are parity dependencies, not the final PQ
+algorithm policy.
 
 - **Phase 0 — required foundations.** Freestanding build/link audit, the subset of
   §5 bounded storage and checked buffers needed by the reviewed caller, platform
@@ -533,106 +539,115 @@ invariants and these bounded artifact observations do not imply those claims.
 
 ## 12. Claude commit and development handoff (2026-09-24)
 
-The owner authorizes the local commits and development described below. This prompt
-implements [ADR-004 §8.4](decisions/ADR-004-Fault-Model.md#84-adopted-development-plan-2026-09-24)
-and the corresponding Decision Log entry; it does not create another protocol
-specification. Re-read repository state when starting: the inventory here is a
-handoff observation, not permission to include every currently staged file.
+**Updated 2026-09-25:** the owner asks to add the audit/rewrite/compliance prompt to
+the plan, for later execution by Claude. This update changes documentation only.
+It preserves the earlier authorization for Claude to make reviewed local commits
+and continue development. It does not execute that authorization in this task.
+
+The prompt below implements ADR-004 §8.4, §14 of this plan and
+[ADR-008](decisions/ADR-008-Regulatory-Compliance-and-C99-Rewrite.md). Re-read the
+working tree before starting; the inventory is a dated observation. Adoption is
+not proof of consensus, target qualification or regulatory conformity.
 
 ```text
 Act as a Principal Systems Security Engineer and Applied Cryptographer. Work in
-/Users/stoyandenev/Desktop/sauromatae. Review and commit the relevant existing
-changes, then start the adopted combined-design development plan in the same task.
+/Users/stoyandenev/Desktop/sauromatae. Review and save the relevant existing work,
+then continue the adopted development plan. Use local files; do not git pull or
+fetch a replacement baseline. Do not skip the retained C++ reference.
 
 Read CLAUDE.md CURRENT FRONT (AGENTS.md points to it), the latest entries of
-docs/proofs/DECISION-LOG.md, ADR-004 §§6.1, 7 and 8.4, C99-MINIX-PORT §§0, 7 and 11,
-CRYPTO-C99-SPEC target admission rules, and ADR-005's current status. The Decision
-Log is authoritative. Preserve historical entries and known security findings.
+DECISION-LOG.md, ADR-004 §§6.1, 7, 8.4 and 9, C99-MINIX-PORT §§0, 7 and 11–14,
+ADR-006, ADR-008, SECURITY.md, CRYPTO-C99-SPEC target-admission rules and ADR-005's
+current status. Paths are under docs/, docs/decisions/ or docs/proofs/ as linked here.
+The Decision Log wins conflicts. Preserve historical decisions and open findings.
 
-The selected direction is two co-creators unanimously endorsing one canonical,
-receiver-validated body and context. Reuse sound K-of-K validation, canonical
-encoding and durable-publication principles. Retain joint receipt, the selected
-stake-weighted election/VDF, external failure witnesses, local 3B timeout and
-checkpoint settlement. Joint receipt does not inherit union's one-member inclusion
-guarantee. H0 states the accepted model; H1-H21 still need their proofs. This is an
-adopted development direction, not an implemented or proved whole protocol.
+The selected direction remains two unanimous co-creators over one canonical,
+receiver-validated body/context, joint receipt, selected election/VDF, external
+failure witnesses, local 3B timeout and checkpoint settlement. Reuse sound K-of-K
+validation/encoding/durable-publication principles. Joint receipt does not inherit
+union's one-member inclusion guarantee. H0 CLOSED / H1–H21 DECIDED does not mean
+proved. ADR-004 §9 / FB76 already records the fixed-budget incompatibility and
+pending X1, D1–D8/refusal decisions; do not restart that work or silently select
+limits. stake_quorum is a qualified primitive, not production integration.
 
-The target is strict freestanding C99 in a single-address-space unikernel/MicroVM:
-no libc, external target runtime libraries or heap allocation. Use bounded storage,
-explicit ownership and qualified secret-independent crypto. Hosted tools, test
-oracles and the retained reference are outside that image. C99 source style,
-volatile, flags or a green test do not establish universal constant time or whole
-system memory safety. The current Argon2id is not qualified for the target; do not
-choose a replacement KDF or weaken the requirement implicitly.
+The final target is strict freestanding C99 in a single-address-space unikernel/
+MicroVM: no libc, external target runtime libraries or heap. Hosted references,
+platform adapters and test oracles remain outside it. Source style, static pools,
+volatile, barriers, compiler flags and green tests do not prove whole-program
+memory safety or universal constant time. Current Argon2id and libc-backed crypto
+helpers are not admitted to the target. Do not weaken that requirement implicitly.
 
-1. Preserve and review the starting work.
-   Inspect git status, staged and unstaged diffs, and untracked files separately.
-   At handoff, main/633fc4c9 had a large preexisting staged C++ restoration and
-   build/test/model corrections, overlapping unstaged documentation and foundation
-   changes, and untracked freestanding example/test/gate files. cats.json and
-   top100.json were also staged with relevance unestablished. Verify current state
-   rather than assuming this inventory is still exact. Preserve unrelated work;
-   no blanket reset, stash, git add ., git commit -a or commit of the whole index.
-   Identify which restoration and corrections implement the recorded owner
-   decisions. Independently review consensus/apply/wire/model changes, including
-   the restored reference's actual differences and known defects.
+1. Inspect and preserve the starting state.
+   At the 2026-09-25 handoff, main was 6a131af3a96fa20e81d54e3d7057ac28bd1345c7.
+   The earlier restoration/foundation was already committed. The ADR-006 C99 audit
+   fixes, headers, tests, CI changes and docs were uncommitted, followed by this
+   documentation-only ADR-008/plan update. cats.json and top100.json were staged
+   independently. Inspect staged/unstaged/untracked changes separately; use current
+   evidence rather than assuming this list is still exact. No blanket reset,
+   stash, git add ., git add src/ include/ docs/, commit -a or whole-index commit.
+   Prior /tmp audit reports/scripts are historical snapshots, not the current
+   commit manifest. Review the actual diff and preserve unrelated index entries.
 
-2. Make coherent local commits before new production development.
-   Local commits of reviewed relevant restoration, foundation, plan and subsequent
-   qualified increments are authorized. The older uncommitted-delivery restriction
-   is superseded for this handoff. Separate unrelated changes and later development;
-   choose explicit paths/hunks and sensible dependency-respecting commit boundaries.
-   Include referenced untracked examples/tests with their gate. Review and test the
-   exact snapshot each commit will contain; unstaged fixes must not mask a broken
-   staged snapshot. Preserve the user's unrelated staged entries while doing so.
-   Record actual checks and limits in commit descriptions. No push, merge,
-   deployment or deletion of the C++ reference is authorized by this handoff.
+2. Review, verify and make scoped local commits of relevant starting work.
+   First confirm with git status/log what is already committed. If any part is
+   still uncommitted, separate the prior audit implementation from this plan
+   adoption and subsequent development in dependency order. Include each change's actual tests and docs;
+   test the exact proposed commit snapshot so unstaged fixes cannot mask defects.
+   Independently review consensus/apply/wire/evidence changes before committing,
+   regardless of gate colour. Local commits of reviewed relevant work and later
+   qualified increments remain authorized. No push, merge, deployment, reference
+   deletion or certification claim is authorized by this handoff.
 
-3. Validate through tools/ci_local.sh only.
-   For the broad restoration/foundation snapshot run the applicable documentation,
-   hosted reference, configured TLA, GCC/Clang C99, GCC sanitizer, C99 mutant and
-   freestanding example modes below. Run modes separately; select actual compiler
-   paths and report versions (Apple gcc may be Clang). Confirm a fresh build
-   succeeded before interpreting mutants. Missing tools or failed builds are not
-   passes. For later small increments run the checks affected by that increment;
-   a documentation-only change needs the doc guards, a model change also needs TLC.
-   Inspect the final diff independently of gate colour. Do not weaken guards to
-   make a change pass. Preserve CRLF in CRYPTO-C99-SPEC.md.
+3. Execute §14.1's coverage-backed audit before selecting new patches.
+   Inventory the whole local repository. Read the relevant C and C++ code, headers,
+   tests, builds and documentation, including network, parsing, ledger/consensus,
+   crypto, identity and persistence paths. Track every file's review/disposition;
+   list exclusions and outstanding coverage. Confirm/refute every preliminary
+   allegation with real callers, arithmetic/lifetime arguments and reproductions
+   where feasible. Distinguish a target dependency blocker from a reachable defect.
+   Reuse ADR-006 rather than duplicating it. The existing, sufficient reveal-bundle
+   bound and the QPC fix must not be reported as new bugs. Record the applicable regulatory/profile
+   evidence in ADR-008; an unspecified CISA directive is not a mandate.
 
-4. Begin the first development increment: one-shard receiver/state/resource design.
-   Extend ADR-004 and the existing C99 plan, following ADR-004 §8.4's deliverable.
-   Specify canonical signed context/body, commitments and joint receipt, election
-   and DH/VDF verification, witness/certificate/checkpoint/membership checks, and
-   authoritative apply/replay transitions. Map inputs to authentication, replay
-   scope, storage lifetime and ownership. Account for bytes, worst-case work,
-   RAM/stack, durable storage, concurrent candidates and crash/exhaustion behavior.
-   Distinguish consensus validity from local capacity refusal.
-   Start with the difficult composition: every earlier attempt requires a failure
-   certificate, and checkpoint spacing does not bound history when finality stalls.
-   Prove bounded-RAM streaming/persistence compatible with framing, total work,
-   storage and required progress, or record a precise incompatibility and alternatives
-   for decision. Do not silently cap attempts, prune required evidence, change
-   quorums or call safe local exhaustion a liveness proof. Map each property to the
-   existing H obligations, state assumptions, and produce adversarial traces.
-   Obtain independent adversarial review. Finite DSF/TLC success is supporting
-   evidence, not a general proof. Preserve counterexamples and pending obligations.
+4. Follow §14.2's sequence: memory/lifetime, temporal/state/persistence, crypto/PQ,
+   credential/privacy design, then target and operational qualification. Within
+   each step choose the smallest confirmed surviving defect or required component.
+   Define the caller contract, proof assumptions, bounds and failure transitions;
+   obtain independent adversarial review; then implement exact C99 changes in the
+   real files, with receiver/apply regression and falsify-on-mutant gates. Fix a
+   surviving C++ consensus/logic defect separately when justified; do not spend
+   proof effort hardening an abstraction scheduled for deletion. Keep hosted parity
+   for unchanged behavior and reviewed specification vectors for approved changes.
+   Do not combine a full rewrite, PQ suite replacement and credential scheme into
+   one compliance commit. No placeholder APIs or renamed prototypes as production.
 
-5. Implement only the smallest proved surviving component after its design review.
-   Choose a concrete caller and meaningful receiver/apply property, then implement
-   with positive/negative and falsify-on-mutant gates at the layer where the rule
-   lives. Use reference parity for unchanged survivors and reviewed specification
-   vectors for approved changed rules. Do not port obsolete consensus just to
-   replace it, or relabel the teaching QF frame, bounded model or repeated-work
-   evaluator as production consensus. Keep dependent production code gated where
-   a proof is unresolved; continue independent work and report the precise decision
-   needed rather than inventing it. Preserve port-then-retire. Sharding follows the
-   single-shard and cross-shard proof gates; performance comparison and H21 deployment
-   remain separate. Keep canonical docs, tests and proof status coherent per increment.
+5. Keep decisions and evidence explicit.
+   PQ parameter/profile/hybrid choices, credential proof scheme and applicable
+   operator/wallet roles must be specified and reviewed before dependent code.
+   OPAQUE authentication is not credential selective disclosure. Preserve the
+   no-escrow/no-master-key rule, no post-genesis migration, and the requirement for
+   secret-independent target crypto. Record incompatibilities for owner decision;
+   continue independent work rather than inventing authorization or weakening a
+   goal. ADR-004's unresolved production dependencies still gate consensus and
+   sharding. Local socket timeouts do not grant replacement/finality authority.
 
-Finish with commit hashes and scope, exact checks/results, independent-review
-findings and resolutions, the development artifact or smallest landed increment,
-remaining proof/decision dependencies, and the next concrete task. Do not stop at
-the initial commits when authorized design work can proceed.
+6. Validate each increment through tools/ci_local.sh.
+   Select the affected documented modes below, run them separately, report compiler
+   paths/versions and confirm a fresh build before trusting mutants. Any change
+   under src/crypto/ or include/determ/crypto/ also runs the default mode (FAST):
+   the C++ reference links the same C99 crypto library, and ADR-006 §6 records a
+   contract regression that only a C++ gate caught. A new mutant
+   must trigger the intended assertion, not a build failure, crash or timeout.
+   Missing tools are not passes. Preserve CRLF in CRYPTO-C99-SPEC.md and append-only
+   Decision Log history. Do not weaken guards. Converge README, SECURITY, protocol,
+   proof and plan records as each actual behavior changes; distinguish decisions,
+   implementation, proof, bounded tests and target qualification.
+
+Finish with commit hashes/scope, audit coverage and findings, exact checks and
+limits, independent-review resolutions, pending decisions and the next concrete
+increment. Make no absolute safety, PQ, compliance or certification claim without
+its precise evidence. Continue authorized independent development after saving
+the starting work; do not stop at the initial commits.
 ```
 
 Verification entry points for that prompt (separate invocations; compiler paths are
@@ -653,7 +668,7 @@ git -c core.whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol diff
 
 The TLA mode does not run the documentation guards. The standalone freestanding
 mode must not be combined with the other CI modes. These are verification entry
-points, not a statement that the large restoration snapshot has been revalidated
+points, not a statement that the current audit/plan snapshot has been revalidated
 by this documentation-only handoff. §11.6 records the prior example evidence and
 its limits; Claude must report results for the actual snapshots it commits.
 
@@ -757,3 +772,158 @@ production integration waits for the decisions listed in ADR-004 §9.6.
   - a freestanding Ed25519 (the hosted verifier allocates for messages over 448 bytes);
   - the audit on profiles other than those above;
   - constant-time properties, which are not needed because all inputs are public.
+
+## 14. Local audit, regulatory alignment and target qualification (2026-09-25)
+
+**Adopted scope, not completed work.** This section schedules the supplied prompt
+for Claude. [ADR-008](decisions/ADR-008-Regulatory-Compliance-and-C99-Rewrite.md)
+records the corrected regulatory premises and accepted long-term goals. No new
+runtime implementation, full-repository audit or compliance assessment is claimed
+by this planning update. The prior C99 audit remains separately scoped by ADR-006.
+Use this existing plan, the Security ledger and proof records; do not create a
+competing master plan. This track can advance independently while the unresolved
+ADR-004 §9.6 decisions gate production consensus and sharding.
+
+### 14.1 First deliverable: local coverage and hypothesis record
+
+Pin HEAD and the reviewed working-tree diff. Inventory all repository files, then
+record each as reviewed, pending, generated/data with a reviewed producer/consumer,
+or excluded with a reason. Inspect C/C++ sources and headers, plus wallet/light,
+DApps, simulation, tests, build/CI and documentation that affect target behavior.
+A keyword scan is an inventory aid, not a complete audit. Completion requires an
+explicit disposition for every file and substantive review of every in-scope code
+path; report outstanding coverage instead of claiming to have read everything.
+
+Extend ADR-006's audit record and existing proof/security records with the coverage
+map and evidence. For each finding record the actual symbol/path and baseline,
+caller/reachability, input trust, violated invariant, severity, reproducer or
+reasoned counterexample, existing mitigations, planned C99 owner and verification
+gate. Mark allegations CONFIRMED, REFUTED, ALREADY FIXED, TARGET BLOCKER or UNRESOLVED
+with scope; do not equate `shared_ptr`/allocation/fragmentation with a proved UAF.
+
+These are verified entry points for the future audit, not its completed coverage:
+
+| Surface | Real local entry points and migration questions |
+|---|---|
+| Wire and reveals | `src/wire/parser.c`, `include/determ/wire/parser.h`, `src/wire/binary_codec.c`; reference `src/net/binary_codec.cpp`, `src/net/messages.cpp`, `src/chain/block.cpp`. Derive bounds at each framing layer and validate lengths before conversion/copy/publication. |
+| Network and RPC | `src/net/reactor.c`, `peer_mesh.c`, `event_loop.c`, `k2_net.c`, `src/rpc/http_rpc_server.c`, `json_rpc.c`, `src/determ_node.c`; reference `src/net/gossip.cpp` and `include/determ/net/`. Trace descriptor/slot ownership, callbacks, queues, reads/writes and shutdown/error paths. |
+| Consensus, ledger and durability | `src/consensus/duel_state.c`, `stake_quorum.c`, `src/ledger/state.c`, `pending_transfer.c`, `shard_routing.c`, `src/storage/block_store.c`; reference `src/node/node.cpp`, `producer.cpp`, `validator.cpp`, `src/chain/chain.cpp` and their headers. Map validation/apply/replay boundaries and which behavior survives the selected design. |
+| Crypto and PQ callers | `src/crypto/` and `include/determ/crypto/`; ML-DSA under `mldsa/`; reference `src/crypto/pqauth.cpp`, `src/chain/pq_tx_auth.cpp`, `light/pq_sign_tx.cpp`. Inventory algorithms and actual consumers, including optional and failure paths; reconcile stale library-only claims with callers. |
+| Identity | `src/crypto/dsso/opaque3dh.c`, `include/determ/crypto/dsso/opaque3dh.h`, `dapps/dsso/` (including the relying-party PID verifier `dsso_pid.c`), `tools/verify_opaque3dh.py`; existing `proofs/v2.25-DSSO-DAPP-SPEC.md` §11–12, `proofs/DssoPidVerification.md` and privacy/view-key designs. Separate authentication, account recovery and credential presentation. |
+| Clock/platform | `include/determ/time/clock.h`, `src/time/clock.c`, `tests/test_qpc_clock_overflow.c`, transport adapters and build definitions. Verify monotonicity/overflow/units and actual platform coverage. |
+
+**Disposition of the preliminary claims at planning time:**
+
+- Two capped 65,536-byte reveals in the current bundle need
+  `4 + 65536 + 4 + 65536 = 131080` bytes. `MAX_BUNDLE_SIZE = 131104` already fits
+  that layout; the claim that it necessarily overflows is refuted for this bundler.
+  K2 transport has a separate 65,536-byte payload / 65,548-byte frame bound; do not
+  infer that every bundle fits one transport frame. Derive the production layout
+  and caller relationship before changing either capacity.
+- Integer overflow is a real audit class, but expression width matters:
+  `4 + uint32_length` can wrap even with a 64-bit destination. ADR-006 M1 and
+  M3–M6 already record scoped fixes; recheck the remaining C++/C callers and 32-bit
+  branches. Never claim an attacker-supplied length proves remote exploitability
+  without the ingress-to-copy path and allocation/capacity preconditions.
+- C99 network pools are already static and their callback lifetime fixes are
+  recorded in ADR-006. C++ containers/ownership remain to be audited; eight crypto
+  C files, `src/dapp/d5draw.c` and `dapps/d5-random-selection/d5rp.c` still allocate. No heap does not imply no libc,
+  correct object lifetime or bounded stack use.
+- Missing mesh handshake deadlines, HTTP idle-slot exhaustion and descriptor
+  exhaustion spins are recorded OPEN in SECURITY.md. Inventory all admission,
+  handshake, read/write and shutdown paths before claiming Slowloris resistance.
+  Existing local attempt deadlines (T+1s commits, T+2s reveals) and the experimental
+  10s response wait do not implement the adopted production 3B recovery rule.
+- `EAGAIN`/`EWOULDBLOCK` means no progress is available now. A blocking descriptor,
+  busy retry, unbounded handler or synchronous storage/crypto work can starve the
+  service loop; an error return itself is not proof of a freeze. Check partial
+  I/O, interrupted calls, readiness changes and callback reentry on each backend.
+- QPC conversion already uses checked split arithmetic and saturation, with
+  `tests/test_qpc_clock_overflow.c` and mutations. Preserve/revalidate that fix;
+  audit call sites and other clock/deadline arithmetic instead of replacing it
+  from the obsolete `(ticks * 1B) / freq` premise.
+- ML-DSA primitives and C++ PQ callers exist. No ML-KEM or SLH-DSA implementation
+  was found in the scoped source/header/wallet/light/DApp search; verify full
+  coverage before treating absence as a repository-wide result. The OPAQUE core
+  uses a house-tagged P-256/3DH transcript and does not claim arbitrary-stack wire
+  interoperability. Neither fact establishes an EUDI wallet or full PQ system.
+
+### 14.2 Development sequence and deliverables
+
+Complete the coverage/hypothesis record first, then progress in the following
+order, one reviewed increment at a time. A decision-dependent step may produce
+its design and explicit pending choices while an independent step proceeds. Do
+not treat this order as authority to bypass consensus proof gates or to postpone
+an independently confirmed severe surviving defect merely for convenience.
+
+| Step | Required design and implementation deliverable | Evidence before calling the increment complete |
+|---|---|---|
+| A — local audit and applicability | §14.1 coverage; confirmed/refuted allegations; map each retained C++ behavior to its C99 replacement/dependency; fill ADR-008's clause/profile/role/control evidence matrix | File/symbol evidence, exploit preconditions and reproduction limits; explicit pending files/roles; independent review of findings; no invented mandate or blanket safety claim |
+| B — spatial and lifetime safety | Caller-owned arenas/workspaces where needed, generation-checked handles and ownership; checked length/count conversion and subtraction-based cursors; bounded stack; no standard memory/string calls in target code | Invariants and proof/model of every reachable acquire/use/release/reuse and error transition, including generation exhaustion and delayed events; exact-boundary/truncation/extreme-length/width tests; receiver-level mutants; unchanged-byte parity where required |
+| C — temporal, phase and durable-state safety | Reviewed per-connection monotonic deadlines and progress policy; bounded admission/queue/CPU work; nonblocking transport/device contract; authenticated phase transitions; crash-safe publication/recovery | Slow-drip/idle/full-pool/partial-I/O/backpressure/descriptor-exhaustion schedules, clock endpoints, reordered/replayed/stale events, callback reentry, torn-write/fsync-failure/restart traces; assertions at the actual receiver/apply/publication boundary |
+| D — crypto and PQ qualification | Complete algorithm/caller/key-lifecycle inventory; reviewed target workspace APIs; applicable ML-KEM/ML-DSA integration plan and decision on SLH-DSA's role; version/errata/parameter/hybrid policy before dependent code | Independent KAT/conformance and failure tests; canonical encoding/replay/context binding; worst-case sizes/workspace/stack/verification budgets; compiler/ISA leakage and erasure evidence; module-validation status separately stated |
+| E — identity and disclosure | Extend v2.25-DSSO-DAPP-SPEC §11–12 and DssoPidVerification.md (the existing relying-party verifier side) and the privacy design with any holder/issuer credential layer and precise selective-disclosure/ZK requirements; choose reviewed scheme/profile before structs/messages | Issuer trust and claim authenticity, holder binding, consent, verifier challenge/audience and replay defenses, revocation freshness, metadata/linkability and collusion analysis; tampered/unrequested/replayed/revoked/over-disclosure tests and applicable interoperability evidence |
+| F — integrated target and operations | Actual freestanding image and native device/event backend, deployment trust boundary; signed/reproducible release and dependency inventory; operator incident/backup/recovery/vulnerability processes | Linked-image dependency/heap/symbol and stack audits, boot/device/interrupt/DMA tests, sustained bounded-resource failure/recovery tests, scoped formal evidence, target leakage assessment and the applicable external conformity process |
+
+**Contract details that must not be lost between design and implementation:**
+
+- Bounds proofs require a live object with the claimed extent, `offset <= capacity`
+  and `length <= capacity - offset` before pointer formation or copies. Check
+  count-times-element and integer narrowing in their actual types. Prefer single-
+  evaluation C99 helpers to unsafe arithmetic macros. Reject invalid/unknown frames
+  before state mutation, and define output/state on every failure.
+- A generation counter only prevents stale reuse while identity cannot repeat.
+  Define wrap/exhaustion refusal, callback retirement ordering and event snapshots;
+  raw borrowed pointers still need a lifetime. Pool, queue, stack and DMA ownership
+  proofs are separate. Avoid a generic arena framework without a real caller.
+- Timeouts use a specified monotonic source, units and overflow policy. Bound total
+  handshake/frame lifetime as well as any idle/progress allowance, so trickled bytes
+  cannot extend occupancy forever. Set reviewed service budgets rather than borrowing
+  TCP defaults. Define fairness/refusal and loss assumptions; finite slots cannot
+  guarantee availability against an unbounded adversary.
+- Read/write progress, retry and phase changes are explicit transitions. Bound
+  EINTR/retry and accept loops; check setup failures, partial writes and `EAGAIN`.
+  Include synchronous crypto/storage/logging and wakeup storms in the loop's work
+  budget. Single-threaded code still has reentry, stale events and interrupt/DMA
+  interleavings. Keep local timeouts separate from consensus validity decisions.
+- Storage must resolve the existing manifest-rename/directory-fsync ambiguity
+  (SECURITY.md / ADR-006) before production integration; retry must not truncate a
+  block referenced by a visible manifest. Design crash and reopen behavior first.
+- PQ integration must cover classical dependencies in authentication, DH/OPRF,
+  recovery, credentials and consensus assumptions as well as transactions. Adding
+  ML-DSA does not make P-256/Ed25519/X25519 or a VDF post-quantum. Do not choose
+  hybrid composition, replacements or signature-only substitutes for key exchange
+  without a reviewed construction. No settled wire/state format is silently changed.
+- Algorithm conformance and transcript proofs do not establish secret-independent
+  machine-code traces. Apply §11 and CRYPTO-C99-SPEC target admission; document each
+  compiler, flags, ISA, public/secret input boundary and leakage model. If the goal
+  and an existing primitive conflict, record the blocker rather than relabel it.
+- An identity proof reveals its selected claim/predicate, not necessarily zero
+  plaintext bytes. Specify exactly what is disclosed and to whom; minimize disclosed
+  attributes and correlation. Do not promise unlinkability from a stable holder
+  key or reusable proof. No new master key, escrow or compelled disclosure; retain
+  the qualified forward-secrecy limits of voluntary view-key disclosure.
+
+### 14.3 Commit and completion discipline
+
+The later implementation deliverables are exact patches in real files, with highly
+commented local invariants and proof/test references where they aid review. Each
+increment follows design/proof → independent adversarial review → implementation
+and falsify-on-mutant gates at the enforcing layer → applicable `ci_local.sh` modes
+→ independent final-diff review → scoped local commit. Update canonical docs to
+actual behavior; do not close an entire vulnerability class with a single gate.
+
+Use §12's commit authorization and preserve unrelated staged work. The supplied
+blanket `git add src/ include/ docs/` and omnibus `feat(compliance)` commit are
+replaced by explicit reviewed paths/hunks and truthful per-increment messages.
+Before each commit, inspect the staged diff and verify that exact snapshot. No
+commit may claim full compliance, quantum security, immunity or completed C++
+retirement unless the relevant evidence and retirement gate actually exist.
+
+Report completed coverage, confirmed/refuted/fixed/open findings, landed patches,
+proof assumptions, tests and residual limits separately. Keep ADR-008's evidence
+matrix current. A code audit does not complete operator governance, wallet
+certification or cryptographic module validation. The final target, production
+consensus/sharding, reference retirement and deployment each retain their own
+acceptance gate. Independent work can proceed while a specific dependent decision
+remains pending.

@@ -90,7 +90,34 @@ Read this before writing code or docs. On any decision conflict, docs/proofs/DEC
   per-view-key act in the designed v2.22/v2.24 mechanism. Any doc asserting
   unqualified PFS alongside view-key disclosure is wrong (same entry).
 
-## CURRENT FRONT — read before selecting any work (latest owner directive 2026-09-24)
+## CURRENT FRONT — read before selecting any work (latest owner directive 2026-09-25)
+STATE 2026-09-25 — LOCAL AUDIT AND REGULATORY GOALS ADDED TO THE PLAN (DECISION-LOG:
+"Add the corrected audit/compliance work to the Claude development plan"). This
+owner request is a documentation-only plan update, not execution of the supplied
+rewrite prompt. ADR-008 accepts long-term goals and the evidence process, not
+certification, absolute safety or completed implementation. C99-MINIX-PORT §14
+schedules the full local C/C++ audit, memory/lifetime and temporal defenses,
+crypto/PQ and credential/privacy design, then target/operational qualification.
+Its §12 is the updated Claude handoff. No git pull; no C++ audit omission or
+premature reference deletion. NIS2 does not prescribe C99/no heap; CSF is not a
+universal PQ algorithm mandate; OPAQUE authentication is not selective-disclosure
+credential presentation. Apply the source-backed corrections in ADR-008.
+
+NEXT for Claude: confirm with git status/log that the ADR-006 audit work and this
+plan update are saved as scoped local commits; if any part is still uncommitted,
+review it independently, validate the exact snapshot and commit it, preserving
+unrelated staged cats.json/top100.json. Then complete §14.1's coverage/hypothesis
+record and proceed in §14.2's small increments.
+The earlier restoration/foundation and initial receiver contract already exist;
+do not repeat them. ADR-004 §9 / FB76's resource incompatibility and X1, D1–D8/refusal
+decisions still gate dependent production consensus; independent audit/qualification
+work may proceed. No security finding or H proof obligation is closed by adoption.
+The no-escrow/no-master-key rule, no post-genesis migration, target admission and
+port-then-retire remain. No runtime edit or commit is made in this planning task;
+the prior reviewed-local-commit authorization for Claude remains, with no new
+push, merge or deployment authorization. Earlier NEXT/status text below is
+historical wherever this entry supersedes it.
+
 STATE 2026-09-24 — COMBINED DESIGN PLAN (DECISION-LOG: "Adopt the combined design
 development plan and authorize the Claude handoff"). The owner adopts ADR-004 §8.4:
 two unanimous co-creators over one receiver-validated canonical body/context;

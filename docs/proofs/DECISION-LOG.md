@@ -8083,3 +8083,68 @@ on EOF; final review accepted that scope. All 16 doc-coherence guards passed.
 The exact patch reverse-check, append-only Decision Log check, CRLF preservation
 and unchanged Git index check accompany the artifact; unrelated staged JSON
 files remain untouched.
+
+## 2026-09-25 — Add the corrected audit/compliance work to the Claude development plan
+
+**Owner request.** Add the supplied C99 rewrite, local C/C++ audit and regulatory
+prompt to the development plan so Claude can continue; do not execute that prompt
+in this task. This is a planning/documentation increment. Existing uncommitted
+ADR-006 fixes/tests and unrelated staged files are preserved; no runtime edits,
+Git pull, staging, commit or publication are performed by this increment.
+
+**Adopted.** ADR-008 records accepted long-term goals and the evidence process;
+C99-MINIX-PORT §14 extends the existing plan, and §12 supplies the updated Claude
+prompt. Sequence: local coverage/hypothesis/applicability record → bounded memory
+and lifetime work → temporal/phase/durability work → crypto/PQ qualification →
+credential/disclosure design → integrated target and operational qualification.
+Each implementation is a separate design/proof/review/gate increment; independent
+work can proceed while a specific dependent owner decision is pending. Complete
+repository inventory and substantive C/C++ review are required; a scan or the prior
+C99-only audit must not be relabeled a full-repository review.
+
+**Corrected premises.** No specific recent CISA emergency directive, affected entity
+or deadline was verified. NIS2 does not mandate C99/no heap, CSF 2.0 does not mandate
+all PQ algorithms for every use, and neither architecture nor local conformance
+vectors establish certification. FIPS 203/204/205 have distinct KEM/signature roles;
+applicable profiles and module validation are separate. OPAQUE is authentication,
+not credential selective disclosure. C99, static pools and a unikernel do not
+immunize against stale handles, overflow, interrupts, device/host failures or DoS;
+C++ does not inherently prevent verification. ADR-008 links primary sources checked
+on this date and requires a role/jurisdiction/control/evidence record before claims.
+
+**Bounded local checks for planning, not a new full audit.** The reveal bundle needs
+131,080 bytes including both u32 prefixes and fits the existing 131,104-byte bound;
+K2 transport has a separate per-frame cap. QPC split arithmetic/saturation and its
+regression/mutant gates already exist. C99 network storage is already static;
+crypto heap/POSIX dependencies and open deadline/exhaustion/storage findings remain
+as recorded in ADR-006 and SECURITY. ML-DSA primitives and PQ callers exist; the
+scoped search found no ML-KEM or SLH-DSA implementation. Full coverage and caller
+reconciliation are assigned to Claude, including the retained C++ implementation.
+
+**Unchanged constraints and pending decisions.** Strict freestanding C99, no libc,
+external target runtime libraries or heap; qualified secret-independent crypto;
+no escrow, compelled protocol disclosure or master key; no post-genesis migration;
+port-then-retire. Existing Argon2id remains unqualified. PQ parameter/profile/hybrid
+choices and credential schemes require reviewed decisions; no algorithms, KDFs,
+transcripts, consensus formats, H obligations or slashing rules change here.
+ADR-004 §9 / FB76's fixed-budget incompatibility and X1, D1–D8/refusal decisions
+still gate dependent production consensus/sharding. The initial receiver contract
+and qualified stake_quorum primitive already exist; Claude must not restart them.
+
+**Continuation.** The prior authorization for reviewed scoped local commits by
+Claude remains. First inspect and review actual uncommitted audit and plan work,
+verify each exact proposed snapshot and preserve unrelated staged cats.json and
+top100.json; then execute §14.1 and continue the smallest qualified increments.
+An old /tmp audit script is not the current commit manifest. The supplied blanket
+add/omnibus compliance commit is replaced by explicit reviewed paths/hunks and
+truthful per-increment commits. No new push, merge, deployment, reference deletion
+or certification authorization is granted. CURRENT FRONT, README, ROADMAP,
+SECURITY, the C99 plan and crypto specification point to the same boundaries.
+No security finding or proof obligation closes through plan adoption.
+
+**Planning validation.** Independent read-only review found no material scope or
+authority contradiction; its data-minimization wording correction was applied.
+All 16 `ci_local.sh --docs-only` guards pass. Source/test/build files and the Git
+index remain byte-identical to the start of this planning increment; the Decision
+Log's prior bytes and CRYPTO-C99-SPEC's CRLF are preserved. These checks validate
+the documentation update, not the future implementation or regulatory conformity.

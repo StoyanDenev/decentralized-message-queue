@@ -52,11 +52,12 @@ list the outstanding proofs and specification details needed to qualify the desi
 The owner has adopted the [combined development plan](docs/decisions/ADR-004-Fault-Model.md#84-adopted-development-plan-2026-09-24):
 two unanimous co-creators over one canonical receiver-validated body/context,
 joint receipt, the selected election/VDF, external recovery witnesses and checkpoint
-settlement, with reviewed K-of-K validation/encoding/persistence principles. First
-specify and prove the one-shard receiver/resource and recovery contract; then build
-the smallest qualified component. This is a development direction, not a complete
+settlement, with reviewed K-of-K validation/encoding/persistence principles. The
+initial receiver/resource contract in ADR-004 §9 / FB76 identifies unresolved
+resource decisions that gate dependent production work; independent components
+can be qualified meanwhile. This is a development direction, not a complete
 security proof or production release. The [Claude handoff](docs/C99-MINIX-PORT.md#12-claude-commit-and-development-handoff-2026-09-24)
-records the review, local-commit and first-development instructions.
+records the current review, local-commit and development instructions.
 
 The **current implementation target** is a strict freestanding C99 unikernel/MicroVM
 with no libc, external crypto/network library or heap allocation. Bounded storage,
@@ -75,6 +76,12 @@ record scoped fixes for codec arithmetic, recycled network slots, RPC token boun
 and crypto error propagation. Networking already uses static pools; captured
 registration generations protect logical slot lifetimes that zeroing alone cannot.
 These fixes do not establish whole-program memory safety or freestanding admission.
+
+The [audit and regulatory-alignment plan](docs/C99-MINIX-PORT.md#14-local-audit-regulatory-alignment-and-target-qualification-2026-09-25)
+adds full local C/C++ coverage, PQ/identity design and target/operational evidence
+work for Claude. [ADR-008](docs/decisions/ADR-008-Regulatory-Compliance-and-C99-Rewrite.md)
+accepts those long-term goals and verification steps; it establishes no regulatory
+certification, whole-system safety or completed rewrite.
 
 Run the C99 checks through the project CI entry point:
 

@@ -1,6 +1,7 @@
 # Determ — Roadmap & Future Directions (NON-AUTHORITATIVE)
 
-- [Combined design development plan](decisions/ADR-004-Fault-Model.md#84-adopted-development-plan-2026-09-24) — adopted direction; next is the one-shard receiver/state/resource contract and proof review, not production consensus. [Claude handoff](C99-MINIX-PORT.md#12-claude-commit-and-development-handoff-2026-09-24).
+- [Combined design development plan](decisions/ADR-004-Fault-Model.md#84-adopted-development-plan-2026-09-24) — adopted direction; ADR-004 §9 / FB76 records the initial receiver contract and unresolved resource decisions. Dependent production consensus remains gated. [Claude handoff](C99-MINIX-PORT.md#12-claude-commit-and-development-handoff-2026-09-24).
+- [ADR-008: C99 assurance, PQC and regulatory alignment](decisions/ADR-008-Regulatory-Compliance-and-C99-Rewrite.md) — accepted long-term goals/process, not compliance or target qualification. [Audit and development sequence](C99-MINIX-PORT.md#14-local-audit-regulatory-alignment-and-target-qualification-2026-09-25) includes the retained C++ reference; Claude's updated handoff is in §12.
 - [ADR-006: C99 memory ownership, lifetime and bounds](decisions/ADR-006-C99-Memory-Safety.md) — accepted constraints and scoped audit; complete target qualification remains open.
 - [ADR-005: Temporal Sharding design gate](decisions/ADR-005-Temporal-Sharding.md) — proposed; selected membership/recovery/finality rules still require their composed proofs, qualified implementation and cross-shard settlement gates.
 
